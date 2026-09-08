@@ -6,6 +6,9 @@ web_auth / web_bridge / web_server 都是可导入模块，不依赖 sections �
 
 import asyncio
 import hashlib
+import os
+import shutil
+import tempfile
 import hmac
 import json
 import threading
@@ -18,6 +21,18 @@ import urllib.request
 from xgent_app import web_auth
 from xgent_app.web_bridge import WebBot, WebOutbox, build_web_conversation_objects
 from xgent_app.web_server import WebChatConfig, WebChatServer
+
+
+def _async_result(value):
+    async def _read(*_args, **_kwargs):
+        return value
+    return _read
+
+
+def _async_value(value):
+    async def _write(*_args, **_kwargs):
+        return value
+    return _write
 
 
 class PasswordTests(unittest.TestCase):
@@ -381,6 +396,11 @@ class WebServerHttpTests(unittest.TestCase):
             write_setting=write_setting,
             request_stop=lambda: cls.stopped.append(True),
             is_busy=lambda: cls.busy["value"],
+            read_health=lambda: {
+                "components": {"telegram": {"state": "degraded"}},
+                "channels": {"telegram": {"queued": 3, "circuit": "open"}},
+                "version": "abc1234",
+            },
         )
         cls.server = WebChatServer(cls.config)
         cls.server.start()
@@ -428,9 +448,29 @@ class WebServerHttpTests(unittest.TestCase):
             self.assertIn(b"XGent Web Chat", resp.read())
 
     def test_api_requires_auth(self):
-        for path in ("/api/history", "/api/config", "/api/stream"):
+        for path in ("/api/history", "/api/config", "/api/stream", "/api/health"):
             status, _body, _h = self.request(path)
             self.assertEqual(401, status, path)
+
+    def test_liveness_probe_is_unauthenticated_and_leaks_nothing(self):
+        """/healthz 给 nginx/PM2 探活用：不鉴权，但也**只**回一个 ok。
+
+        有它才能一眼分清"进程死了"（连不上）和"进程活着但 Telegram 断了"
+        （200 + /api/health 里 telegram=degraded）——那次 502 缺的就是这个。
+        降级细节属于侦查情报，留在需要鉴权的 /api/health 里。
+        """
+        status, body, _h = self.request("/healthz")
+        self.assertEqual(200, status)
+        self.assertEqual({"ok": True}, body)
+
+    def test_health_details_require_auth_and_report_per_channel_state(self):
+        cookie = self.login()
+        status, body, _h = self.request("/api/health", cookie=cookie)
+        self.assertEqual(200, status)
+        self.assertEqual("degraded", body["components"]["telegram"]["state"])
+        self.assertEqual("open", body["channels"]["telegram"]["circuit"])
+        self.assertEqual(3, body["channels"]["telegram"]["queued"])
+        self.assertEqual("abc1234", body["version"])
 
     def test_chat_requires_auth(self):
         status, _body, _h = self.request("/api/chat", method="POST", body={"text": "x"})
@@ -564,6 +604,177 @@ class WebServerHttpTests(unittest.TestCase):
         with urllib.request.urlopen(self.base + "/", timeout=10) as resp:
             self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
 
+    def test_vendor_marked_served(self):
+        """marked 是 Markdown 渲染的硬依赖，必须能免登录取到。
+
+        VENDOR_ASSETS 是硬编码白名单，不做目录遍历——文件放进 webui/vendor/
+        但忘了登记就是 404，页面上表现为整个 Markdown 退化成纯文本。
+        """
+        with urllib.request.urlopen(self.base + "/vendor/marked.umd.js", timeout=10) as resp:
+            self.assertEqual(200, resp.status)
+            self.assertIn("javascript", resp.headers.get("Content-Type", ""))
+            body = resp.read().decode("utf-8")
+        self.assertIn("marked", body)
+        # UMD wrapper 要挂到全局，否则页面里的 window.marked 拿不到
+        self.assertIn('g["marked"]', body)
+
+    def test_vendor_assets_exist_on_disk(self):
+        """白名单里登记的文件都得真的在磁盘上。"""
+        from xgent_app.web_server import VENDOR_ASSETS, VENDOR_DIR
+
+        for route, (filename, _ctype) in VENDOR_ASSETS.items():
+            path = os.path.join(VENDOR_DIR, filename)
+            self.assertTrue(os.path.isfile(path), f"{route} 指向的 {filename} 不存在")
+
+
+class WebOpenButtonTests(unittest.TestCase):
+    """没设密码时「打开网页」不能是个死链接。
+
+    start_web_chat_if_enabled 在没密码时直接跳过启动，地址上没有服务在监听。
+    而 url / web_app 按钮没有 callback_data，永远回不到 bot，也就没法解释原因,
+    用户看到的就是"点了毫无反应"。所以这种情况必须给回调按钮。
+    """
+
+    def _build(self, **state):
+        """在独立命名空间里跑 ui.py 里的按钮构建函数，避开 sections 全局加载。"""
+        import re
+
+        ui_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "xgent_app", "sections", "ui.py",
+        )
+        with open(ui_path, encoding="utf-8") as handle:
+            src = handle.read()
+        start = src.index("def _build_web_open_button():")
+        end = src.index("def get_web_menu():")
+        snippet = src[start:end]
+
+        from telegram import InlineKeyboardButton, WebAppInfo
+
+        ns = {
+            "InlineKeyboardButton": InlineKeyboardButton,
+            "WebAppInfo": WebAppInfo,
+            "normalize_bool": lambda v, d: bool(v) if v is not None else d,
+            "normalize_web_port": lambda v: int(v or 8790),
+            "DEFAULT_WEB_PORT": 8790,
+            "DEFAULT_WEB_HOST": "127.0.0.1",
+            "UserDataManager": type(
+                "UDM", (), {"get": staticmethod(lambda k, d=None: state.get(k, d))}
+            ),
+        }
+        exec(compile(snippet, "ui_snippet", "exec"), ns)
+        self.assertTrue(re.search(r"_web_has_password", snippet), "密码闸不在源码里")
+        return ns
+
+    def test_no_password_yields_callback_button(self):
+        ns = self._build(web_enabled=True, _web_has_password=False)
+        btn = ns["_build_web_open_button"]()
+        self.assertIsNotNone(btn, "开启状态下不该藏起按钮")
+        self.assertEqual("web_need_password", btn.callback_data)
+        self.assertIsNone(btn.url)
+        self.assertIsNone(btn.web_app)
+
+    def test_with_password_yields_openable_button(self):
+        ns = self._build(web_enabled=True, _web_has_password=True, web_port=8790)
+        btn = ns["_build_web_open_button"]()
+        self.assertIsNone(btn.callback_data)
+        self.assertEqual("http://127.0.0.1:8790", btn.url)
+
+    def test_disabled_still_hides_row(self):
+        ns = self._build(web_enabled=False, _web_has_password=False)
+        self.assertIsNone(ns["_build_web_open_button"]())
+
+    def test_terminal_button_same_guard(self):
+        ns = self._build(terminal_enabled=True, _web_has_password=False)
+        btn = ns["_build_terminal_open_button"]()
+        self.assertEqual("web_need_password", btn.callback_data)
+
+
+class WebSwitchLockoutTests(unittest.TestCase):
+    """"会把自己关在外面吗"要按**点击来源**判断，不能按"有没有 BOT_TOKEN"。
+
+    cli+web 部署（没有 token）里，用户在 xgent 终端里点「关闭 Web」以前会被
+    "纯 Web 模式下这是你唯一的入口，不能关闭"拦下——而他正坐在那台机器的 shell 前，
+    关掉毫无风险，还能随时开回来。旧判据是 BotConfig.WEB_ONLY 一个布尔，它看不见
+    CLI 这个同样真实的入口。
+    """
+
+    SECTIONS = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "xgent_app", "sections",
+    )
+
+    def _load(self, web_only):
+        """只 exec callbacks.py 顶部那段来源判定，避开 sections 全局加载。"""
+        from typing import Any
+
+        with open(os.path.join(self.SECTIONS, "callbacks.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        snippet = src[src.index("CLICK_ORIGIN_TELEGRAM"):src.index("async def _sync_web_switches")]
+        ns = {"Any": Any, "BotConfig": type("BotConfig", (), {"WEB_ONLY": web_only})}
+        exec(compile(snippet, "callbacks_snippet", "exec"), ns)
+        return ns
+
+    @staticmethod
+    def _update(origin):
+        query = type("Q", (), {"xgent_origin": origin} if origin else {})()
+        return type("U", (), {"callback_query": query})()
+
+    def test_cli_click_is_never_blocked(self):
+        ns = self._load(web_only=True)
+        self.assertEqual("cli", ns["click_origin"](self._update("cli")))
+        self.assertFalse(
+            ns["_would_lock_out_caller"](self._update("cli")),
+            "从终端点关闭不会失联——人就在这台机器上",
+        )
+
+    def test_web_click_without_telegram_is_blocked(self):
+        ns = self._load(web_only=True)
+        self.assertTrue(ns["_would_lock_out_caller"](self._update("web")))
+        # 拦下来要说清去哪儿关，不能只说"不能"。
+        self.assertIn("xgent", ns["WEB_LOCKOUT_HINT"])
+        self.assertIn("install.sh", ns["WEB_LOCKOUT_HINT"])
+
+    def test_web_click_with_telegram_fallback_is_allowed(self):
+        ns = self._load(web_only=False)
+        self.assertFalse(ns["_would_lock_out_caller"](self._update("web")),
+                         "还有 Telegram 兜底就不算失联")
+
+    def test_untagged_update_counts_as_telegram(self):
+        ns = self._load(web_only=True)
+        self.assertEqual("telegram", ns["click_origin"](self._update(None)))
+        self.assertFalse(ns["_would_lock_out_caller"](self._update(None)))
+
+    def test_web_menu_has_no_dead_switches(self):
+        """两个开关必须是真开关，不能再是 callback_data="noop" 的死按钮。"""
+        with open(os.path.join(self.SECTIONS, "ui.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        menu = src[src.index("def get_web_menu():"):src.index("def build_web_text()")]
+        self.assertIn('callback_data="toggle_web_enabled"', menu)
+        self.assertIn('callback_data="toggle_terminal_enabled"', menu)
+        code = "\n".join(
+            line for line in menu.splitlines() if not line.strip().startswith("#")
+        )
+        self.assertNotIn("noop", code, "死按钮应该已经删掉，只在注释里留下由来")
+        self.assertNotIn("不可关闭", code)
+
+    def test_web_status_line_asks_the_port(self):
+        """状态行要问端口，不能问"本进程有没有服务器对象"。
+
+        /web 面板在 xgent 终端里渲染得最多，而服务器跑在另一个进程——
+        is_web_chat_running() 在那儿永远是 False，于是固定显示"🟡 已开启但未运行"。
+        """
+        with open(os.path.join(self.SECTIONS, "ui.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        body = src[src.index("def build_web_text()"):]
+        body = body[:body.index("\ndef ", 1)]
+        code = "\n".join(
+            line for line in body.splitlines() if not line.strip().startswith("#")
+        )
+        self.assertIn("web_service_reachable(port)", code)
+        self.assertNotIn("is_web_chat_running()", code)
+        self.assertNotIn("纯 Web 模式常开", code)
+
 
 class WebServerStartupGuardTests(unittest.TestCase):
     def _config(self, **overrides):
@@ -615,6 +826,220 @@ class WebServerStartupGuardTests(unittest.TestCase):
         server.stop()  # 二次调用不该抛
         self.assertFalse(server.running)
         config.loop.close()
+
+
+class MediaResolveHttpTests(unittest.TestCase):
+    """/api/media/resolve：历史文本挖出的服务器路径 -> 新下载 token。
+
+    这是"刷新后媒体卡片不丢"的服务端半边：前端从历史文本里挖出路径，
+   来这里换 token。信任边界必须钉死——白名单根之外的路不给换（否则等于
+    开放任意文件读取），不存在的文件不给换。
+    """
+
+    PASSWORD = "test-password"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.loop = asyncio.new_event_loop()
+        cls.loop_thread = threading.Thread(target=cls.loop.run_forever, daemon=True)
+        cls.loop_thread.start()
+
+        # 白名单根：一个临时目录当 xgent_storage；系统临时目录本身当"外部"。
+        cls.storage_root = tempfile.mkdtemp(prefix="xgent-media-root-")
+        cls.outside_root = tempfile.mkdtemp(prefix="xgent-outside-")
+
+        cls.config = WebChatConfig(
+            host="127.0.0.1",
+            port=0,
+            password_hash=web_auth.hash_password(cls.PASSWORD),
+            bot_token="123456:ABCdefGhIJKlmNoPQRsTUVwxyZ",
+            authorized_user_id=42,
+            loop=cls.loop,
+            submit_message=lambda text, outbox: None,
+            read_history=_async_result([]),
+            read_settings=_async_result({"values": {}, "options": {}}),
+            write_setting=_async_value({"values": {}, "options": {}}),
+            request_stop=lambda: None,
+            is_busy=lambda: False,
+            media_allowed_roots=[cls.storage_root],
+        )
+        cls.server = WebChatServer(cls.config)
+        cls.server.start()
+        cls.port = cls.server._httpd.server_address[1]
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+        cls.loop.call_soon_threadsafe(cls.loop.stop)
+        cls.loop_thread.join(timeout=5)
+        shutil.rmtree(cls.storage_root, ignore_errors=True)
+        shutil.rmtree(cls.outside_root, ignore_errors=True)
+
+    def request(self, path, method="POST", body=None, cookie=None):
+        url = self.base + path
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Origin", self.base)
+        if cookie:
+            req.add_header("Cookie", cookie)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode()), resp.headers
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = {"raw": raw}
+            return exc.code, parsed, exc.headers
+
+    def login(self):
+        status, _body, headers = self.request(
+            "/api/login", method="POST", body={"password": self.PASSWORD}
+        )
+        self.assertEqual(200, status)
+        return headers["Set-Cookie"].split(";")[0]
+
+    def _write(self, root, name, content):
+        path = os.path.join(root, name)
+        with open(path, "wb") as handle:
+            handle.write(content)
+        return path
+
+    def test_resolve_in_allowed_root_returns_download_url(self):
+        path = self._write(self.storage_root, "exports", b"PK-zip-bytes")
+        cookie = self.login()
+        status, body, _h = self.request(
+            "/api/media/resolve", body={"path": path}, cookie=cookie
+        )
+        self.assertEqual(200, status, body)
+        self.assertIn("/api/media/", body["url"])
+        self.assertEqual("exports", body["filename"])
+        self.assertEqual(len(b"PK-zip-bytes"), body["size"])
+
+    def test_resolved_url_downloads_bytes_with_attachment_for_zip(self):
+        path = self._write(self.storage_root, "exports", b"PK-zip-bytes")
+        cookie = self.login()
+        _s, body, _h = self.request("/api/media/resolve", body={"path": path}, cookie=cookie)
+        req = urllib.request.Request(self.base + body["url"])
+        req.add_header("Cookie", cookie)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self.assertEqual(200, resp.status)
+            self.assertEqual(b"PK-zip-bytes", resp.read())
+            self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
+
+    def test_image_gets_inline_disposition(self):
+        path = self._write(self.storage_root, "pic.png", b"FAKEPNGDATA")
+        cookie = self.login()
+        _s, body, _h = self.request("/api/media/resolve", body={"path": path}, cookie=cookie)
+        req = urllib.request.Request(self.base + body["url"])
+        req.add_header("Cookie", cookie)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self.assertIn("inline", resp.headers.get("Content-Disposition", ""))
+            self.assertTrue(resp.headers.get("Content-Type", "").startswith("image/"))
+
+    def test_resolve_rejects_paths_outside_allowed_roots(self):
+        secret = self._write(self.outside_root, "secret.txt", b"nope")
+        cookie = self.login()
+        status, body, _h = self.request(
+            "/api/media/resolve", body={"path": secret}, cookie=cookie
+        )
+        self.assertEqual(403, status, body)
+
+    def test_traversal_escape_is_rejected(self):
+        # 指向白名单内不存在但借 ../ 逃逸的路径：realpath 归一化后落在根之外。
+        cookie = self.login()
+        sneaky = os.path.join(self.storage_root, "..", "escape.txt")
+        status, _body, _h = self.request(
+            "/api/media/resolve", body={"path": sneaky}, cookie=cookie
+        )
+        self.assertEqual(403, status)
+
+    def test_resolve_missing_file_is_404(self):
+        cookie = self.login()
+        missing = os.path.join(self.storage_root, "gone.zip")
+        status, body, _h = self.request(
+            "/api/media/resolve", body={"path": missing}, cookie=cookie
+        )
+        self.assertEqual(404, status, body)
+
+    def test_resolve_requires_auth(self):
+        path = self._write(self.storage_root, "auth.zip", b"x")
+        status, _body, _h = self.request("/api/media/resolve", body={"path": path})
+        self.assertEqual(401, status)
+
+
+class MirrorBotFrameIdTests(unittest.TestCase):
+    """MirrorBot 网端帧的 id 一致性。
+
+    消息身份归对话核心所有：send_message 立刻分配一个逻辑 id（≥1,000,000）并
+    推帧，真实 Telegram message_id 由出站通道在投递成功后自己记住。所以正常
+    路径上"网页帧的 id"天然就是网页见过的那个，不再依赖 Telegram 先回一个 id
+    ——TG 不通时网页照样有完整、可编辑的消息流。
+
+    仍然要钉住少数拿着真实 TG id 回来的调用点（转发-读取-删除那套取内容的
+    trick、MirrorMessage 包装真实消息）：那时必须反查回逻辑 id，否则前端
+    byMessageId 落空、流式编辑每次新建气泡——"上一条消息无限刷屏"。
+    """
+
+    def test_edit_and_delete_frames_use_web_facing_logical_id(self):
+        import asyncio
+        from xgent_app.web_bridge import MirrorBot
+
+        frames = []
+        outbox = WebOutbox()
+        outbox.put = lambda frame: frames.append(frame)  # 直接截获帧
+
+        tg_calls = []
+
+        class FakeRealMessage:
+            message_id = 777  # Telegram 真实 id
+
+        class FakeRealBot:
+            async def send_message(self, *args, **kwargs):
+                tg_calls.append(("send", kwargs.get("message_id")))
+                return FakeRealMessage()
+            async def edit_message_text(self, *args, **kwargs):
+                tg_calls.append(("edit", kwargs.get("message_id")))
+                return FakeRealMessage()
+            async def edit_message_reply_markup(self, *args, **kwargs):
+                tg_calls.append(("edit_markup", kwargs.get("message_id")))
+                return FakeRealMessage()
+            async def delete_message(self, *args, **kwargs):
+                tg_calls.append(("delete", kwargs.get("message_id")))
+                return True
+
+        async def scenario():
+            bot = MirrorBot(outbox, 42, FakeRealBot())
+            # 对话核心第一次发消息（流式首块）——网页立刻收到逻辑 id 的 message 帧
+            returned = await bot.send_message(chat_id=42, text="流式首块")
+            logical = frames[-1]["message_id"]
+            # 出站是异步的：等通道把真实 id 记下来，才能测真实 id 的反查
+            await bot.flush_telegram(timeout=5.0)
+            # 正常路径：核心手上就是逻辑 id
+            await bot.edit_message_text(text="流式更新", chat_id=42, message_id=logical)
+            # 真实 id 路径（MirrorMessage 包装真实 TG 消息）：必须反查回逻辑 id
+            await bot.edit_message_reply_markup(chat_id=42, message_id=777, reply_markup=None)
+            await bot.delete_message(chat_id=42, message_id=777)
+            await bot.flush_telegram(timeout=5.0)
+            return logical, returned.message_id
+
+        logical, returned_id = asyncio.run(scenario())
+        kinds = [(f["type"], f.get("message_id")) for f in frames]
+        self.assertEqual("message", kinds[0][0])
+        self.assertGreaterEqual(logical, 1_000_000,
+                               "逻辑 id 必须落在避开真实 Telegram id 的区间")
+        self.assertEqual(logical, returned_id,
+                         "send_message 返回的消息要带逻辑 id——身份不许由 Telegram 决定")
+        self.assertEqual(logical, kinds[1][1], "edit 帧必须用网页见过的逻辑 id")
+        self.assertEqual(logical, kinds[2][1], "传真实 id 时也要反查回逻辑 id")
+        self.assertEqual(logical, kinds[3][1], "delete 帧同样")
+        self.assertNotEqual(logical, 777)
+        # Telegram 那一侧收到的必须是真实 id，不是逻辑 id
+        self.assertEqual([("send", None), ("edit", 777), ("edit_markup", 777),
+                          ("delete", 777)], tg_calls)
 
 
 if __name__ == "__main__":

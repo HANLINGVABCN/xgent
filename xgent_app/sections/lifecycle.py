@@ -1,6 +1,55 @@
 # This file is executed by xgent_server.py in the shared application namespace.
 # Keep cross-section names available through the loader until the next decoupling phase.
 
+# 命令名 -> 一句话说明。Telegram 侧用它同步 /命令 菜单，CLI（xgent_cli.py 的
+# `/` 提示与 /help）直接读同一张表——命令的说明文字只能有一处来源，抄第二份
+# 的结果一定是加了新命令后两边不一致，而用户看到的是哪一份完全取决于他用的
+# 是哪个客户端。
+TELEGRAM_COMMAND_DESCRIPTIONS = (
+    ("start", "打开主菜单"),
+    ("config", "打开设置面板"),
+    ("update", "更新代码并重启"),
+    ("providers", "管理提供商与模型列表"),
+    ("provider_config", "导入导出提供商配置"),
+    ("models", "选择默认模型"),
+    ("chat_model", "选择默认对话模型"),
+    ("media_model", "选择默认媒体模型"),
+    ("prompts", "管理提示词"),
+    ("clear_memory", "清空上下文"),
+    ("depth", "设置记忆深度"),
+    ("params", "参数设置"),
+    ("thinking", "设置思考深度"),
+    ("web", "配置网页版聊天"),
+    ("agent", "开关 Agent 模式"),
+    ("blacklist", "管理 Agent 命令黑名单"),
+    ("stream", "开关流式输出"),
+    ("status", "查看状态"),
+    ("export", "导出全部记忆"),
+    ("stats", "Token统计报表"),
+    ("restart", "重启 Bot"),
+    ("show_chat_info", "查看状态与记忆统计"),
+)
+
+# 只在某个客户端存在的命令说明。skills 没注册进 Telegram 命令菜单
+# （main.py 没给它建 CommandHandler，只有 _WEB_COMMAND_MAP 里有），
+# 但 Web/CLI 都能敲，说明文字同样需要一处来源。
+# getchat 是 CLI 专属命令（只在 xgent_cli.py 的 _CLI_LOCAL_COMMANDS 里注册，
+# 拉的是本地终端的跨端历史，Telegram/Web 没有对应物），说明文字仍然放在
+# 这张共享表里，理由同上——不给每个客户端各开一份命令说明。
+EXTRA_COMMAND_DESCRIPTIONS = (
+    ("skills", "管理技能库"),
+    ("getchat", "拉取 Telegram/Web 端的跨端对话"),
+)
+
+
+def command_description(name: str) -> str:
+    """命令的一句话说明；没有登记过就返回空串。"""
+    for command_name, description in TELEGRAM_COMMAND_DESCRIPTIONS + EXTRA_COMMAND_DESCRIPTIONS:
+        if command_name == name:
+            return description
+    return ""
+
+
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("全局错误处理捕获异常", exc_info=context.error)
 
@@ -27,42 +76,31 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     except Exception:
         pass
 
-# --- ☆ 应用关闭处理 ☆ ---
-async def setup_bot_commands(app):
-    """同步 Telegram 命令菜单，并在启动后发送完整主菜单。"""
-    global _startup_commands_synced, _startup_menu_sent
+# --- ☆ 启动分层：公共地基 / Telegram 就绪之后 ☆ ---
+async def boot_core() -> None:
+    """所有组件共用的地基：配置缓存 + 数据库连接。刻意不碰任何 Telegram 调用。
 
+    这两行原先埋在 PTB 的 post_init（setup_bot_commands）里。post_init 排在
+    Bot.initialize() 的 get_me() 之后，于是 Telegram 不通时连数据库都不会打开，
+    网页、CLI 回放、trigger 全部跟着陪葬。完整因果链见 runtime.py 顶部。
+    """
     await UserDataManager.init()
     await BotMemoryDB.get_instance()
-    await SelfTriggerManager.startup(app)
-    # Web 服务按开关启动；失败只记日志并通知用户，不影响 bot 主流程。
-    await start_web_chat_if_enabled(app)
+
+
+async def telegram_ready(app) -> None:
+    """Telegram 通道真的就绪之后才做的事：同步 /命令 菜单 + 发启动主菜单。
+
+    由 telegram_supervisor 在长轮询起来之后调用。两段各自 try 住：菜单同步失败
+    不影响启动菜单，启动菜单失败也不影响任何别的组件。
+    """
+    global _startup_commands_synced, _startup_menu_sent
 
     if not _startup_commands_synced:
         try:
             commands = [
-                BotCommand("start", "打开主菜单"),
-                BotCommand("config", "打开设置面板"),
-                BotCommand("update", "更新代码并重启"),
-                BotCommand("providers", "管理提供商与模型列表"),
-                BotCommand("provider_config", "导入导出提供商配置"),
-                BotCommand("models", "选择默认模型"),
-                BotCommand("chat_model", "选择默认对话模型"),
-                BotCommand("media_model", "选择默认媒体模型"),
-                BotCommand("prompts", "管理提示词"),
-                BotCommand("clear_memory", "清空上下文"),
-                BotCommand("depth", "设置记忆深度"),
-                BotCommand("params", "参数设置"),
-                BotCommand("thinking", "设置思考深度"),
-                BotCommand("web", "配置网页版聊天"),
-                BotCommand("agent", "开关 Agent 模式"),
-                BotCommand("blacklist", "管理 Agent 命令黑名单"),
-                BotCommand("stream", "开关流式输出"),
-                BotCommand("status", "查看状态"),
-                BotCommand("export", "导出全部记忆"),
-                BotCommand("stats", "Token统计报表"),
-                BotCommand("restart", "重启 Bot"),
-                BotCommand("show_chat_info", "查看状态与记忆统计"),
+                BotCommand(name, description)
+                for name, description in TELEGRAM_COMMAND_DESCRIPTIONS
             ]
             private_scope = BotCommandScopeAllPrivateChats()
             await app.bot.delete_my_commands(scope=private_scope)
@@ -160,8 +198,24 @@ async def setup_bot_commands(app):
             # 发送失败也不回滚 flag：避免并发/重连再次触发导致重复发送
             logger.warning(f"启动主菜单发送失败（不再重试，用户可手动 /start）: {e}")
 
-async def on_shutdown(app):
-    """应用关闭时清理资源"""
+
+# 纯 Web 模式曾经有一条独立主循环 run_web_only_main()：自己起 Web、自己装信号
+# 处理、自己走一份关闭清理。它与 PTB 模式是两条并行的启动路径，"部署了哪些端"
+# 这件事因此散在两处，任何启停顺序的修改都要改两遍。现在两条路径合并成
+# runtime.run_app() 一条：Telegram 只是其中一个可选组件，没有 BOT_TOKEN 时它
+# 处于 disabled，Web 组件按库里存的 web_enabled 开关启动——没有 token 且从没设过
+# 这个开关时，_start_web_component 会写一次 True 当默认值（一次性迁移），此后
+# 库里的值就是权威，用户显式关掉的 Web 不会在重启后被偷偷打开。
+
+
+async def on_shutdown(app: Optional[Any] = None):
+    """应用关闭时清理资源。唯一的停机清理路径。
+
+    ``app`` 只是为了兼容历史调用点，函数体本身不需要它——PTB 的拆卸由
+    runtime.shutdown_components 负责。原先还有一份 on_shutdown_web_only()，
+    与本函数的差别只有 TelegramRichAPI 客户端要不要关，而那个关闭本身是
+    幂等的（下面已判 is_closed）；两份几乎一样的清理代码，改动时必然漏一份。
+    """
     logger.info("🛑 服务正在关闭...")
     try:
         # trace 现在是后台线程异步落盘，退出前把队列里剩下的写完。

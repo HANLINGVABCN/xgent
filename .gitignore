@@ -16,6 +16,7 @@ xgent_memory.db-*
 *.db-shm
 *.db-wal
 xgent_storage/
+.xgent-version
 
 # Pre-XGent runtime names kept ignored during compatibility migration
 bot_memory.db
@@ -31,6 +32,9 @@ memory/
 
 # 用户私有 skill（每个部署实例自定义，不进仓库、不被更新覆盖）
 skill-private/
+
+# 运行时工作区（用户生成文件、VPS配置等，不进仓库）
+workspace/
 
 # Logs
 xgent_output.log

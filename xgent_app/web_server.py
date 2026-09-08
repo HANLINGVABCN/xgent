@@ -21,6 +21,7 @@ import contextlib
 import http.server
 import json
 import logging
+import mimetypes
 import os
 import socketserver
 import threading
@@ -30,7 +31,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from xgent_app import web_auth
 from xgent_app import web_terminal
-from xgent_app.web_bridge import WebOutbox, build_web_conversation_objects
+from xgent_app.web_bridge import MEDIA_TOKEN_REGISTRY, WebOutbox, build_web_conversation_objects
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,20 @@ MAX_UPLOAD_BODY_OFFICIAL = 50 * 1024 * 1024
 MAX_UPLOAD_BODY_LOCAL_API = 2 * 1024 * 1024 * 1024
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
+VENDOR_DIR = os.path.join(STATIC_DIR, "vendor")
+# 允许直接访问的静态资源白名单：路径 -> (磁盘文件名, Content-Type)。
+# 只列出这几个固定文件，不做通用目录遍历——避免 /vendor/../xxx 这类路径
+# 逃逸到 webui 之外读取任意文件。这几个文件本地自带，纯 Web 模式下不再需要
+# 联网拉取 telegram.org / cdn.jsdelivr.net（这两个域名在部分网络环境下访问
+# 缓慢甚至超时，之前把它们当阻塞 <script> 直接写在 <head> 里，会让整个页面
+# 卡在资源加载上迟迟不能渲染——这就是"访问网页端慢死"的根因）。
+VENDOR_ASSETS: Dict[str, Any] = {
+    "/vendor/telegram-web-app.js": ("telegram-web-app.js", "application/javascript; charset=utf-8"),
+    "/vendor/marked.umd.js": ("marked.umd.js", "application/javascript; charset=utf-8"),
+    "/vendor/xterm.min.js": ("xterm.min.js", "application/javascript; charset=utf-8"),
+    "/vendor/xterm.min.css": ("xterm.min.css", "text/css; charset=utf-8"),
+    "/vendor/addon-fit.min.js": ("addon-fit.min.js", "application/javascript; charset=utf-8"),
+}
 
 # SSE 心跳间隔。低于常见反代的 60s 空闲超时。
 SSE_HEARTBEAT_SECONDS = 25.0
@@ -79,6 +94,8 @@ class WebChatConfig:
         upload_body_limit: int = MAX_UPLOAD_BODY_OFFICIAL,
         is_terminal_enabled: Optional[Callable[[], bool]] = None,
         is_web_enabled: Optional[Callable[[], bool]] = None,
+        media_allowed_roots: Optional[List[str]] = None,
+        read_health: Optional[Callable[[], Any]] = None,
     ):
         self.host = host
         self.port = port
@@ -99,6 +116,14 @@ class WebChatConfig:
         # 终端开关。默认关闭——终端是任意命令执行，必须显式开启。
         self.is_terminal_enabled = is_terminal_enabled or (lambda: False)
         self.is_web_enabled = is_web_enabled or (lambda: True)
+        # /api/media/resolve 允许换 token 的根目录白名单（xgent_storage、
+        # agent workspace 这类"本应用自己的数据目录"）。由 sections 侧组装
+        # 传入：web_server 不 import sections，保持可独立单测的约定。
+        self.media_allowed_roots = [str(r) for r in (media_allowed_roots or [])]
+        # 分通道健康快照（GET /api/health，需鉴权）。同步回调、不碰事件循环：
+        # 这个接口存在的意义就是"事件循环忙住时也能问出状态"，把它做成
+        # run_coroutine_threadsafe 就白搭了。
+        self.read_health = read_health or (lambda: {})
         self.read_history = read_history
         self.read_settings = read_settings
         self.write_setting = write_setting
@@ -141,6 +166,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
             self.wfile.write(raw)
+        if status != 200 and getattr(self, "command", "") == "POST":
+            with contextlib.suppress(Exception):
+                length = int(self.headers.get("Content-Length") or 0)
+                if 0 < length <= MAX_REQUEST_BODY:
+                    self.rfile.read(length)
 
     def _send_html(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)
@@ -307,8 +337,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._serve_index()
             elif path == "/terminal":
                 self._serve_terminal()
+            elif path in VENDOR_ASSETS:
+                self._serve_vendor_asset(path)
+            elif path.startswith("/api/media/"):
+                self._handle_media_download(path[len("/api/media/"):])
             elif path == "/api/session":
                 self._send_json({"authenticated": self._is_authenticated()})
+            elif path == "/healthz":
+                self._handle_liveness()
+            elif path == "/api/health":
+                self._handle_health()
             elif path == "/api/history":
                 self._handle_history()
             elif path == "/api/config":
@@ -345,6 +383,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._handle_command()
             elif path == "/api/stop":
                 self._handle_stop()
+            elif path == "/api/media/resolve":
+                self._handle_media_resolve()
             elif path == "/api/config":
                 self._handle_write_config()
             elif path == "/api/term/open":
@@ -476,6 +516,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _handle_logout(self) -> None:
         self._send_json({"ok": True}, extra_headers={"Set-Cookie": web_auth.build_clear_cookie()})
 
+    def _handle_liveness(self) -> None:
+        """GET /healthz —— 不鉴权，只回 {"ok": true}。
+
+        给 nginx / PM2 / 外部探针用。**刻意什么都不暴露**：降级状态属于侦查
+        情报，探活只需要区分"端口通不通"。这个接口本身就是那次 502 缺失的东西
+        ——有它就能一眼分清"进程死了"和"进程活着但 TG 断了"。
+
+        必须是同步的、不碰事件循环：探活在循环忙住时也得能回答。
+        """
+        self._send_json({"ok": True})
+
+    def _handle_health(self) -> None:
+        """GET /api/health —— 需鉴权的分通道健康详情。
+
+        与 /healthz 分开是刻意的：队列深度、熔断状态、待发条数会告诉未登录的
+        探测者"这台机器正在瘸腿"，属于侦查情报。错误串在 sections 侧已过
+        redact_sensitive_text（provider 报错里带 key）。
+        """
+        if not self._require_auth():
+            return
+        try:
+            payload = self.config.read_health() or {}
+        except Exception:  # noqa: BLE001 —— 健康接口自己不能把 500 抛出去
+            logger.exception("读取健康状态失败")
+            payload = {"error": "health unavailable"}
+        self._send_json(payload)
+
     def _handle_history(self) -> None:
         if not self._require_auth():
             return
@@ -483,10 +550,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         try:
-            limit = int((query.get("limit") or ["50"])[0])
+            limit_val = int((query.get("limit") or ["0"])[0])
         except ValueError:
-            limit = 50
-        limit = max(1, min(limit, 200))
+            limit_val = 0
+        limit = limit_val if limit_val > 0 else 1000000
         messages = self._run_coro(self.config.read_history(limit))
         self._send_json({"messages": messages})
 
@@ -659,6 +726,141 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         self._send_html(body)
 
+    def _handle_media_resolve(self) -> None:
+        """按服务器路径换一个下载 token（POST /api/media/resolve）。
+
+        为什么需要它：媒体帧里的 download_url 只在当前进程生命周期内有效，
+        而且刷新后 /api/history 只回文本——但每条媒体操作入库的文本都带着
+        服务器绝对路径（"已保存到 x""已发送服务器文件给用户: x"）。前端刷新
+        时从历史文本里挖出路径，来这里换一个**新** token，媒体卡片因此跨
+        刷新、跨进程重启都能恢复。
+
+        信任边界：不是任意路径读取。只接受 media_allowed_roots（本应用自己
+        的数据目录：xgent_storage、agent workspace）之内的**已存在文件**，
+        且要求登录 + 同源，与 /api/media/<token> 的口子等宽。
+        """
+        if not self._require_auth():
+            return
+        if not self._require_web_enabled():
+            return
+        data = self._read_json()
+        if data is None:
+            return
+        raw_path = str(data.get("path") or "").strip()
+        if not raw_path:
+            self._send_json({"error": "缺少 path"}, status=400)
+            return
+
+        try:
+            real = os.path.realpath(os.path.abspath(raw_path))
+        except (OSError, ValueError):
+            self._send_json({"error": "invalid path"}, status=400)
+            return
+
+        allowed = False
+        for root in self.config.media_allowed_roots:
+            try:
+                root_real = os.path.realpath(os.path.abspath(root))
+                if os.path.commonpath([real, root_real]) == root_real:
+                    allowed = True
+                    break
+            except (OSError, ValueError):
+                continue
+        if not allowed:
+            self._send_json({"error": "路径不在允许的目录内"}, status=403)
+            return
+        if not os.path.isfile(real):
+            self._send_json({"error": "文件不存在"}, status=404)
+            return
+
+        filename = os.path.basename(real)
+        mime_type, _ = mimetypes.guess_type(filename)
+        mime_type = mime_type or "application/octet-stream"
+        token = MEDIA_TOKEN_REGISTRY.register(real, filename)
+        try:
+            size = os.path.getsize(real)
+        except OSError:
+            size = 0
+        self._send_json({
+            "url": f"/api/media/{token}",
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": size,
+        })
+
+    def _handle_media_download(self, token: str) -> None:
+        """AI 生成/发送的图片与文件的下载出口。见 web_bridge.py 的
+        MediaTokenRegistry：send_photo/send_document 拿到本地路径时会注册
+        一个 token，SSE 帧里带上 /api/media/<token>，前端据此渲染 <img> 或
+        下载链接。
+
+        要求登录（和其它 /api/* 一致）——这不是公开静态资源，是用户自己的
+        聊天内容。token 本身只在当前进程内存里有效，重启后全部失效。
+        """
+        if not self._require_auth():
+            return
+        entry = MEDIA_TOKEN_REGISTRY.resolve(token)
+        if entry is None:
+            self._send_json({"error": "not found"}, status=404)
+            return
+        abs_path, filename, mime_type = entry
+        try:
+            size = os.path.getsize(abs_path)
+        except OSError:
+            self._send_json({"error": "file missing"}, status=404)
+            return
+
+        # inline 让 <video>/<audio> 标签能直接播放、<img> 能直接显示；
+        # 其余类型保持 attachment，浏览器落盘而不是尝试内联执行。
+        inline_mime = mime_type.startswith(("image/", "video/", "audio/", "text/"))
+        disposition = "inline" if inline_mime else "attachment"
+        # RFC 5987 编码文件名，兼容非 ASCII 文件名（中文文件名很常见）。
+        quoted_name = urllib.parse.quote(filename)
+        self.send_response(200)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{quoted_name}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.end_headers()
+        try:
+            # 流式分块读写：视频等大文件不能一次性 read() 进内存，否则一个
+            # 大文件下载就能把工作线程内存打爆（和 _read_multipart 的 50MB
+            # 量级完全不是一个数量级，这里必须流式处理）。
+            with open(abs_path, "rb") as handle:
+                while True:
+                    chunk = handle.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # 浏览器中途取消下载，或文件在两次 stat/read 之间被删除，都属正常。
+            pass
+
+    def _serve_vendor_asset(self, path: str) -> None:
+        """本地自带的第三方静态资源（xterm.js 等），不要求认证——与 index.html
+        / terminal.html 同级别的公开静态文件，浏览器渲染页面时就要加载它们，
+        这时候还没走完登录流程。真正的敏感操作都在需要认证的 /api/* 路由上。
+        """
+        filename, content_type = VENDOR_ASSETS[path]
+        asset_path = os.path.join(VENDOR_DIR, filename)
+        try:
+            with open(asset_path, "rb") as handle:
+                body = handle.read()
+        except OSError:
+            self._send_json({"error": "asset missing"}, status=404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # 静态资源内容按文件名固定，可以放心长期缓存；改版本号（文件名或加
+        # query）时浏览器会当新资源处理，不用担心缓存吃到旧内容。
+        self.send_header("Cache-Control", "public, max-age=604800")
+        self.end_headers()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            self.wfile.write(body)
+
     def _require_terminal_enabled(self) -> bool:
         if self.config.is_terminal_enabled():
             return True
@@ -807,7 +1009,7 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 class WebChatServer:
-    """生命周期封装。start() 由 setup_bot_commands 调，stop() 由 on_shutdown 调。"""
+    """生命周期封装。start() 由 runtime 的 web 组件调，stop() 由 on_shutdown 调。"""
 
     def __init__(self, config: WebChatConfig):
         self.config = config

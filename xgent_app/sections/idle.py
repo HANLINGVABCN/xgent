@@ -104,9 +104,26 @@ async def check_and_send_idle_message(context: ContextTypes.DEFAULT_TYPE):
 # 和被 lifecycle.py 调用（更晚加载）。
 
 _web_chat_server: Optional[Any] = None
+# 跨端同步观察者任务（CLI→Web 实时帧 + CLI→TG 镜像），随 bot 启停、
+# 不随 Web 服务启停（见 start_external_sync_watcher）。
+_web_external_watch_task: Optional[asyncio.Task] = None
+# 观察者当前推送的 outbox。Web 服务开着时是它的 outbox（帧直达网页），
+# 没开时是一个无订阅者的独立 outbox（put 落空，等 Web 启动后换接）。
+_web_external_outbox: Any = WebOutbox()
 # 真实 PTB bot 引用。网页发起对话时，MirrorBot 用它把消息同时投递到 Telegram。
 _web_real_bot: Optional[Any] = None
 _web_application: Optional[Any] = None
+# 本进程是否**托管** Web 服务器。只有服务进程（runtime._start_web_component）会
+# 置位；CLI（xgent）和 tools/xgent_config.py 是另外的进程，它们不该去起停监听。
+#
+# 不置位的后果实测过：CLI 里改一次 Web 密码，messages.py 会调
+# restart_web_chat(None)，stop_web_chat 因为本进程 _web_chat_server 是 None 而空转
+# （服务器在服务进程里，停不掉），紧接着 start 去 bind 服务进程占着的端口，
+# 拿一个 [Errno 98] Address already in use，被 logger.error 吞掉。用户那边表现为
+# "密码怎么改都不生效"，日志里一行提示都不给他。
+_web_managed_here: bool = False
+# 配置对账任务。见 _web_config_reconciler。
+_web_config_watch_task: Optional[asyncio.Task] = None
 
 # 网页可改的参数白名单。刻意不含提供商增删改和 API Key——那些留在 Telegram 里。
 WEB_EDITABLE_SETTINGS = {
@@ -139,11 +156,14 @@ async def _web_read_history(limit: int) -> List[Dict[str, Any]]:
                 pass  # 转换失败退回原文，总比报错好
             result.append({'role': 'assistant', 'content': content, 'parse_mode': 'HTML'})
         elif msg_type in (MessageType.TOKEN_USAGE, MessageType.AGENT_RESULT,
-                          MessageType.AGENT_CMD, MessageType.MEDIA_REPLY,
-                          MessageType.SYSTEM_OP):
+                          MessageType.AGENT_CMD, MessageType.AGENT_STATUS,
+                          MessageType.MEDIA_REPLY, MessageType.SYSTEM_OP):
             # 这些类型存库时已是 Telegram HTML，直接带 parse_mode 让前端渲染。
+            # token 统计行是元信息不是正文：降级成 system 角色，前端渲染成居中
+            # 灰条，不再混在 AI 气泡流里（对齐实时流的观感）。
             result.append({
-                'role': str(row.get('role') or 'user'),
+                'role': 'system' if msg_type == MessageType.TOKEN_USAGE
+                        else str(row.get('role') or 'user'),
                 'content': content,
                 'parse_mode': 'HTML',
             })
@@ -155,6 +175,417 @@ async def _web_read_history(limit: int) -> List[Dict[str, Any]]:
     return result
 
 
+def _relay_markup_to_telegram(rows: Any) -> Optional[Any]:
+    """中继过来的扁平按钮结构 -> InlineKeyboardMarkup。
+
+    web_bridge._markup_to_frame 的逆运算：CLI 进程里对话核心构造的是真的
+    InlineKeyboardMarkup，跨进程只能传 JSON，回放时必须还原回来——"带停止
+    按钮的占位消息"能不能在 Telegram 上真的带着按钮出现，全看这一步。
+    """
+    if not rows:
+        return None
+    keyboard = []
+    for row in rows:
+        buttons = []
+        for btn in row or []:
+            if not isinstance(btn, dict):
+                continue
+            buttons.append(InlineKeyboardButton(
+                str(btn.get('text') or ''),
+                callback_data=str(btn.get('callback_data') or ''),
+            ))
+        if buttons:
+            keyboard.append(buttons)
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+
+# --- ☆ Telegram 出站通道 ☆ ---
+# 进程级共享一条通道：熔断状态描述的是"这台机器现在连不连得上 Telegram"，
+# 属于进程级事实。每个 MirrorBot 各带一个熔断器的话，每轮对话都要重新花
+# 3×15s 去发现一次 TG 断了，熔断等于没有。
+_TELEGRAM_CHANNEL_NAME = "telegram"
+# 待发库封顶：一台连不上 Telegram 好几天的机器不该把这张表涨到几十万行，
+# 而三天前某轮对话的流式编辑补发过去只是噪音。
+_CHANNEL_OUTBOX_MAX_AGE = 7 * 24 * 3600.0
+_CHANNEL_OUTBOX_MAX_ROWS = 20000
+_channel_outbox_writes = 0
+
+
+class _ChannelOutboxStore:
+    """fanout.ChannelWorker 的持久层适配：待发操作落在 channel_outbox 表。
+
+    单独一层是为了让 fanout.py 保持"只用标准库、不认识数据库"——它只知道
+    append/fetch/delete/count 四个 await。
+    """
+
+    async def append(self, channel: str, op: Any) -> int:
+        global _channel_outbox_writes
+        db = await BotMemoryDB.get_instance()
+        row_id = await db.append_channel_op(channel, op.to_row())
+        _channel_outbox_writes += 1
+        # 每 500 次写做一次封顶清理。不每次都清：断连期间写入很密集，每条都
+        # 跑一遍 DELETE 会把写锁占满。
+        if _channel_outbox_writes % 500 == 0:
+            with contextlib.suppress(Exception):
+                removed = await db.purge_stale_channel_ops(
+                    channel, max_age_seconds=_CHANNEL_OUTBOX_MAX_AGE,
+                    max_rows=_CHANNEL_OUTBOX_MAX_ROWS)
+                if removed:
+                    logger.warning("待发库封顶：通道 %s 丢弃了 %d 条过旧/超量的操作",
+                                   channel, removed)
+        return row_id
+
+    async def fetch(self, channel: str, limit: int = 1000) -> List[Dict[str, Any]]:
+        db = await BotMemoryDB.get_instance()
+        return await db.fetch_channel_ops(channel, limit)
+
+    async def delete(self, row_ids: List[int]) -> None:
+        db = await BotMemoryDB.get_instance()
+        await db.delete_channel_ops(row_ids)
+
+    async def count(self, channel: str) -> int:
+        db = await BotMemoryDB.get_instance()
+        return await db.count_channel_ops(channel)
+
+
+async def _telegram_channel_recovered(replayed: int, skipped: int) -> None:
+    """Telegram 通道恢复、待发操作补投完之后给用户一句交代。
+
+    不发这句的话，用户看到的是"消息突然一次性涌进来"，分不清是补发还是重复。
+    """
+    bot = _web_real_bot
+    if bot is None or not replayed:
+        return
+    with contextlib.suppress(Exception):
+        await bot.send_message(
+            chat_id=BotConfig.AUTHORIZED_USER_ID,
+            text=f"🔌 Telegram 连接已恢复，断连期间的 {replayed} 条消息已补发。",
+        )
+
+
+def telegram_channel() -> Any:
+    """进程级共享的 Telegram 出站通道（惰性创建 + 注册）。"""
+    registry = get_channel_registry()
+    existing = registry.get(_TELEGRAM_CHANNEL_NAME)
+    if existing is not None:
+        return existing
+
+    async def _deliver(op: Any, native_id: Optional[int]) -> Any:
+        # bot 引用每次取最新：Telegram 可能在通道创建之后才就绪
+        # （set_telegram_channel），也可能重连后换了对象。
+        return await deliver_op_to_bot(
+            _web_real_bot, op, native_id,
+            markup_builder=_relay_markup_to_telegram,
+        )
+
+    worker = ChannelWorker(
+        _TELEGRAM_CHANNEL_NAME, _deliver,
+        is_configured=_web_external_tg_mirror_enabled,
+        timeout=15.0, maxsize=4000,
+        store=_ChannelOutboxStore(),
+        on_recovered=_telegram_channel_recovered,
+    )
+    return registry.register(worker)
+
+
+def telegram_channel_stats() -> Dict[str, Any]:
+    """通道健康快照，供 /api/health 与 /status 读。"""
+    worker = get_channel_registry().get(_TELEGRAM_CHANNEL_NAME)
+    return worker.stats() if worker is not None else {"configured": False}
+
+
+def mirror_user_line_to_telegram(text: str) -> None:
+    """把用户在网页/CLI 里说的那句话镜像到 Telegram。同步、非阻塞。
+
+    走出站通道而不是直接 await：原先两处都是 `await _web_real_bot.send_message(...)`
+    包在 suppress 里，TG 不通时每条要等满 read_timeout（30s）才继续——而这一步正好
+    在"发起一轮对话"的最前面，用户看到的就是点了发送之后半分钟毫无反应。
+    走通道之后它还顺便变成可持久重放的：断连期间说的话，恢复后照样补到 Telegram。
+
+    只发 Telegram，不推网页帧：用户自己那条气泡网页早就画出来了。
+    """
+    if _web_real_bot is None:
+        return
+    channel = telegram_channel()
+    channel.ensure_started()
+    for chunk in split_text_for_telegram(text):
+        channel.offer(Op(OP_SEND, chat_id=BotConfig.AUTHORIZED_USER_ID,
+                         payload={"text": chunk}))
+
+
+# 每个 CLI 会话一个 MirrorBot。它持有 CLI 的 message_id -> 真实 Telegram
+# message_id 的映射，回放 edit/delete 时靠它定位目标消息；丢了映射，流式回复
+# 的每一次编辑都会变成新发一条消息（历史上的"无限刷屏"）。
+# 会话结束没有明确信号（CLI 可能直接被 kill），按数量上限淘汰最旧的。
+_relay_mirrors: "OrderedDict[str, Any]" = OrderedDict()
+_RELAY_MIRROR_MAX_SESSIONS = 8
+
+
+def build_trigger_delivery_bot(chat_id: int) -> Any:
+    """给 shell_triggers 投递用的双通道 bot（TG + Web SSE）。
+
+    MirrorBot（web_bridge）原生支持 real_bot=None：纯 Web 模式退化为纯网页
+    输出，正常部署则 TG/网页同时收到 trigger 结果——可见提醒此前只发
+    Telegram，网页要刷新才看得到；走这里之后网页是实时帧。
+    outbox/real_bot 走模块级引用而不在构造时固化：Web 服务与 bot 都可能
+    晚于第一个 trigger 就绪，投递发生在未来任意时刻，必须每次取最新值。
+    Telegram 通道随 CLI 镜像开关（XGENT_CLI_NO_TG_MIRROR）一起关：用户
+    显式要"不打扰 Telegram"时，trigger 结果不该破例往里发。
+    """
+    tg_bot = _web_real_bot if _web_external_tg_mirror_enabled() else None
+    return MirrorBot(_web_external_outbox, chat_id, real_bot=tg_bot,
+                     channel=telegram_channel())
+
+
+def _relay_mirror_for(session_id: str, chat_id: int) -> Any:
+    # real_bot 按 Telegram 通道开关取：关掉（或纯 Web 模式没有真实 bot）时传
+    # None，MirrorBot 原生退化成只推网页帧——网页那一路照常同步。
+    tg_bot = _web_real_bot if _web_external_tg_mirror_enabled() else None
+    mirror = _relay_mirrors.get(session_id)
+    if mirror is None:
+        mirror = MirrorBot(_web_external_outbox, chat_id, real_bot=tg_bot,
+                           channel=telegram_channel())
+        while len(_relay_mirrors) >= _RELAY_MIRROR_MAX_SESSIONS:
+            _relay_mirrors.popitem(last=False)
+        _relay_mirrors[session_id] = mirror
+    else:
+        # outbox 和 real_bot 都可能在会话中途才就绪（Web 服务后启动、bot 重连），
+        # 每次取用时刷新，否则一个长命 CLI 会话会一直抱着启动时的空引用。
+        mirror.outbox = _web_external_outbox
+        mirror.real_bot = tg_bot
+    return mirror
+
+
+async def _replay_relay_op(mirror: Any, op: str, payload: Dict[str, Any]) -> None:
+    """把 CLI 侧的一次 bot 调用原样重放到 Telegram + 网页。
+
+    这里**不做任何过滤、不改写任何文案**：CLI 里对话核心发了什么，Telegram
+    和网页就看到什么，与在 Telegram 里直接对话逐条一致——占位消息带着停止
+    按钮出现、编辑就地更新、跑完被删掉，Agent 每轮的状态行、工具/命令返回、
+    token 用量行全都在。唯一的例外是 user_echo（用户自己的那句话），它是全
+    流程里唯一带来源标识的地方。
+    """
+    message_id = payload.get('message_id')
+
+    if op == 'user_echo':
+        text = str(payload.get('text') or '')
+        if not text:
+            return
+        # 唯一加来源标识的地方。走出站通道（非阻塞 + 断连可补投），而不是直接
+        # await 真实 bot——那样 TG 不通时每条都要等满一个超时，把整条回放流拖住。
+        if mirror.real_bot is not None:
+            mirror_user_line_to_telegram(f"🖥 [CLI]\n{text}")
+        outbox = _web_external_outbox
+        if outbox is not None:
+            # user_message 帧让网页渲染成用户气泡（右侧），而不是 AI 气泡。
+            outbox.put({"type": "user_message", "text": text,
+                        "ts": time.time(), "external": True})
+        return
+
+    if op == 'send_message':
+        await mirror.send_message(
+            chat_id=mirror.chat_id,
+            text=str(payload.get('text') or ''),
+            reply_markup=_relay_markup_to_telegram(payload.get('reply_markup')),
+            parse_mode=payload.get('parse_mode'),
+            relay_message_id=message_id,
+        )
+        return
+
+    if op == 'edit_message_text':
+        await mirror.edit_message_text(
+            text=str(payload.get('text') or ''),
+            chat_id=mirror.chat_id,
+            message_id=message_id,
+            reply_markup=_relay_markup_to_telegram(payload.get('reply_markup')),
+            parse_mode=payload.get('parse_mode'),
+        )
+        return
+
+    if op == 'edit_message_reply_markup':
+        await mirror.edit_message_reply_markup(
+            chat_id=mirror.chat_id, message_id=message_id,
+            reply_markup=_relay_markup_to_telegram(payload.get('reply_markup')),
+        )
+        return
+
+    if op == 'delete_message':
+        await mirror.delete_message(chat_id=mirror.chat_id, message_id=message_id)
+        return
+
+    if op == 'send_chat_action':
+        await mirror.send_chat_action(
+            chat_id=mirror.chat_id, action=payload.get('action') or 'typing',
+        )
+        return
+
+    if op in ('send_document', 'send_photo'):
+        # CLI 与服务端在同一台机器上（共享同一个数据库文件），中继传的是本地
+        # 路径，这里按路径把真文件发给 Telegram。文件没了就跳过——CLI 那边
+        # 早就把路径打在终端上了，为一个临时文件中断整条流不值得。
+        path = payload.get('path')
+        if not path or not os.path.exists(str(path)):
+            return
+        caption = payload.get('caption')
+        with open(str(path), 'rb') as handle:
+            if op == 'send_document':
+                await mirror.send_document(
+                    chat_id=mirror.chat_id, document=handle,
+                    filename=payload.get('filename'), caption=caption,
+                    relay_message_id=message_id,
+                    read_timeout=120, write_timeout=120,
+                )
+            else:
+                await mirror.send_photo(
+                    chat_id=mirror.chat_id, photo=handle, caption=caption,
+                    relay_message_id=message_id,
+                    read_timeout=120, write_timeout=120,
+                )
+        return
+
+    logger.debug("未知的 CLI 中继操作，已跳过: %s", op)
+
+
+def _web_external_tg_mirror_enabled() -> bool:
+    """CLI->Telegram 通道开关：要有真实 bot（纯 Web 模式没有），且环境变量
+    XGENT_CLI_NO_TG_MIRROR 未设（不想让 Telegram 被 CLI 刷屏时关掉）。
+
+    只管 Telegram 这一路。回放循环本身由 _cli_relay_enabled 控制——纯 Web
+    模式下没有真实 bot，但 CLI→网页仍然要同步（MirrorBot 原生支持
+    real_bot=None，退化成纯网页输出）。
+    """
+    return (
+        bool(BotConfig.TOKEN)
+        and _web_real_bot is not None
+        and not os.environ.get("XGENT_CLI_NO_TG_MIRROR")
+    )
+
+
+def _cli_relay_enabled() -> bool:
+    """回放循环总开关。
+
+    只要 XGENT_CLI_NO_TG_MIRROR 没设就跑：Telegram 和网页两条出口至少有一条
+    能收就有意义，而 MirrorBot 对"没有真实 bot"和"outbox 没有订阅者"都是原生
+    容错的（分别退化为纯网页输出 / put 落空）。用 Telegram 的有无来决定整个
+    循环跑不跑，会让纯 Web 模式的用户在 CLI 里说的话完全到不了网页。
+    """
+    return not os.environ.get("XGENT_CLI_NO_TG_MIRROR")
+
+
+async def _web_external_record_watcher() -> None:
+    """跨进程回放：把 CLI 进程写入的 bot 操作流原样重放到 Telegram + 网页。
+
+    CLI 与服务端是两个进程、只共享数据库。CLI 里对话核心对 bot 的每一次调用
+    都按顺序落进 cli_relay_ops（见 cli_bridge._CliRelay），这里读出来回放到
+    MirrorBot 上——MirrorBot 同时打真实 Telegram 和网页 SSE，正是 Telegram↔
+    网页之所以天然一致的那套机制。结果就是：CLI 里对话，另外两端看到的东西
+    和在 Telegram 里直接对话逐条一致。
+
+    这里**刻意不做任何过滤**。早先的实现是读 global_messages 的行、按消息
+    类型白名单重新编成文本再发——那必然丢东西：带停止按钮的占位消息、每轮的
+    Agent 状态行、工具/命令返回卡片、流式编辑、消息删除，都不是"一条落库的
+    文本"，重编不出来。丢了占位消息还得另造一条假的"生成中"提示去弥补。
+    改成回放操作流之后，这些补丁全部删除。
+
+    回放放在服务端而不是 CLI 进程里：服务端持有健康的 PTB 连接池（网页↔TG
+    的秒同步走的就是它），而 CLI 进程自己开裸连接连 Telegram，每条消息重新
+    TCP+TLS 握手，网络不好时逐条拖到 30 秒超时，就是"CLI→bot 同步极慢甚至
+    不同步"的根因。
+
+    轮询间隔比记录同步短：流式回复每秒要编辑好几次，间隔太长会把连续的编辑
+    压成一跳一跳的。操作回放完即删，这张表稳态下几乎是空的。
+    """
+    db = await BotMemoryDB.get_instance()
+    cursor_id = await db.seed_relay_cursor()
+    while True:
+        await asyncio.sleep(0.3)
+        if not _cli_relay_enabled():
+            # 关掉同步时游标要跟着走，否则重新打开的瞬间会把积压的操作
+            # 一次性全放出来（对着 Telegram 刷屏）。同样按时间划界——只丢
+            # 足够旧的，亲手刚写的别误伤。
+            with contextlib.suppress(Exception):
+                cursor_id = await db.seed_relay_cursor()
+            continue
+        try:
+            ops = await db.fetch_relay_ops(cursor_id)
+        except Exception:
+            logger.debug("CLI 中继轮询失败", exc_info=True)
+            continue
+        if not ops:
+            continue
+        for item in ops:
+            cursor_id = max(cursor_id, int(item.get('id') or 0))
+            payload = item.get('payload')
+            if not isinstance(payload, dict):
+                continue
+            session_id = str(item.get('session_id') or '')
+            chat_id = int(item.get('chat_id') or BotConfig.AUTHORIZED_USER_ID)
+            try:
+                mirror = _relay_mirror_for(session_id, chat_id)
+                await _replay_relay_op(mirror, str(item.get('op') or ''), payload)
+            except Exception:
+                # 单个操作失败不能中断整条流：后面还有这轮对话的其余部分，
+                # 与 MirrorBot._tg_call "TG 失败只记日志" 的取舍一致。
+                logger.warning("CLI 中继操作回放失败: %s", item.get('op'), exc_info=True)
+        with contextlib.suppress(Exception):
+            await db.purge_relay_ops(cursor_id)
+
+
+def set_telegram_channel(bot: Optional[Any]) -> None:
+    """登记（或清空）真实 PTB bot 引用——Telegram 通道的唯一开关点。
+
+    只由 runtime.telegram_supervisor 在长轮询真的起来之后调用。**刻意不再从
+    app.bot 顺手取**：Application 一建好 app.bot 就存在了，但那时 get_me() 还
+    没成功，网络可能整个不通。此时把它登记进来会让
+    _web_external_tg_mirror_enabled() 立刻变成 True，于是每一条 CLI 中继操作、
+    每一次 trigger 投递都会去打一个注定超时的 HTTP 请求——TG 断连时网页反而
+    被拖慢。用"通道已就绪"而不是"对象已存在"作为判据。
+
+    就绪之后不因偶发失败清空：那属于"暂时打不通"，由 MirrorBot 的超时+熔断
+    处理；清空会让上层误判成"这台机器没配 Telegram"。
+    """
+    global _web_real_bot
+    _web_real_bot = bot
+
+
+def _notify_owner_soon(text: str) -> None:
+    """尽力给主人发一条 Telegram 通知，但绝不阻塞调用方。
+
+    原先这些通知是 `await app.bot.send_message(...)` 包在 suppress 里——看着
+    无害，实际上 TG 不通时每条要卡满一个 read_timeout（30s）才抛，而调用点正在
+    启动流程中间。改成通道就绪才发、且丢进后台任务。
+    """
+    if _web_real_bot is None:
+        return
+    async def _send() -> None:
+        with contextlib.suppress(Exception):
+            await _web_real_bot.send_message(
+                chat_id=BotConfig.AUTHORIZED_USER_ID, text=text,
+            )
+    with contextlib.suppress(RuntimeError):
+        asyncio.get_running_loop().create_task(_send())
+
+
+async def start_external_sync_watcher(outbox: Any = None, app: Any = None) -> None:
+    """启动/接线跨端回放器（CLI 的 bot 操作流 → Telegram + 网页）。
+
+    与 Web 服务开关**解耦**：Web 关着时网页帧没有订阅者（put 落空，无害），
+    但 CLI→Telegram 同步仍然要工作，所以它跟随进程生命周期而不是 Web
+    服务生命周期——此前它挂在 start_web_chat_if_enabled 里，Web 一关 CLI 的
+    跨端同步就整个停摆。（这也是中继走数据库而不是走 Web 服务 HTTP 接口的
+    原因：走 HTTP 会让关掉 Web 的用户直接失去 CLI→Telegram 同步。）
+    outbox 给了就记住（Web 服务启动后把自己的 outbox 接进来）。
+
+    ``app`` 参数保留只为兼容历史调用点，**不再**从它身上取 bot 引用：
+    Telegram 通道由 set_telegram_channel 在真正就绪时单独登记。
+    """
+    global _web_external_watch_task, _web_external_outbox
+    if outbox is not None:
+        _web_external_outbox = outbox
+    if _web_external_watch_task is None or _web_external_watch_task.done():
+        _web_external_watch_task = asyncio.create_task(_web_external_record_watcher())
+
+
 async def _web_read_settings() -> Dict[str, Any]:
     """返回当前值 + 下拉框选项，供网页渲染设置面板。"""
     await UserDataManager.init()
@@ -162,8 +593,15 @@ async def _web_read_settings() -> Dict[str, Any]:
     prov_name = get_model_target_provider_name('chat')
     model_options = []
     for name, data in providers.items():
+        # 🟢 有效 / 🔴 失效：依据该提供商最近一次联网拉取结果（与 Telegram 端同一份数据）。
+        fetch_record = get_provider_fetch_record(name) or {}
+        fetched_models = set(fetch_record.get('models') or [])
         for model in (data.get('models') or []):
-            model_options.append({'value': f"{name}|{model}", 'label': f"{name} / {model}"})
+            if fetch_record:
+                status_icon = '🟢 ' if model in fetched_models else '🔴 '
+            else:
+                status_icon = ''
+            model_options.append({'value': f"{name}|{model}", 'label': f"{status_icon}{name} / {model}"})
 
     current_model = UserDataManager.get('default_model') or ''
     # skill 列表供前端渲染勾选项：每个 skill 的相对路径 + 显示名（stem）
@@ -269,6 +707,9 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
         if prov_name not in providers or model not in (providers[prov_name].get('models') or []):
             raise ValueError("提供商或模型不存在")
         await save_model_target_selection('chat', prov_name, model)
+        # 会话绑定要一起换：发消息优先读 chat_sessions.model，只改全局层
+        # 会出现"前台显示新模型、实际拿旧模型请求"的错配。
+        await sync_chat_session_model(model)
     elif key == 'thinking_level':
         level = normalize_thinking_level(value)
         UserDataManager.set(key, level)
@@ -378,6 +819,7 @@ async def _web_run_conversation(text: str, outbox: Any) -> None:
     """
     update, context, _bot = build_web_mirror_objects(
         BotConfig.AUTHORIZED_USER_ID, outbox, _web_real_bot,
+        channel=telegram_channel(),
     )
     # 配置状态（设置密码/端口/地址/提示词/Key 等）：走 Telegram 同款状态机，
     # 不要当 AI 对话。否则网页输入 cancel 或配置值会被发给 AI（既有 bug）。
@@ -387,8 +829,8 @@ async def _web_run_conversation(text: str, outbox: Any) -> None:
             update.message.text = text
         except Exception:
             pass
-        # 状态处理器（设密码/端口）会调 restart_web_chat(context.application)，
-        # mirror context 默认无该属性，这里补上真实 application。
+        # 状态处理器（设密码/端口）会读 context.application（apply_web_config_change
+        # 要用它记 _web_application），mirror context 默认无该属性，这里补上。
         context.application = _web_application
         try:
             await handle_text_message(update, context)
@@ -399,13 +841,9 @@ async def _web_run_conversation(text: str, outbox: Any) -> None:
             outbox.put({"type": "turn_end"})
         return
     try:
-        # 先把用户消息镜像到 Telegram，再记录到记忆、跑对话。
-        if _web_real_bot is not None:
-            with contextlib.suppress(Exception):
-                await _web_real_bot.send_message(
-                    chat_id=BotConfig.AUTHORIZED_USER_ID,
-                    text=f"💬 [网页]\n{text}",
-                )
+        # 先把用户消息镜像到 Telegram，再记录到记忆、跑对话。走出站通道：非阻塞，
+        # 且 TG 断连期间说的话恢复后会补投过去。
+        mirror_user_line_to_telegram(f"💬 [网页]\n{text}")
         await GlobalRecorder.record_user_message(
             text, MessageType.USER_TEXT, BotConfig.AUTHORIZED_USER_ID
         )
@@ -440,6 +878,7 @@ async def _web_handle_command(command: str, outbox: Any) -> None:
     handler = _WEB_COMMAND_MAP.get(name)
     update, context, _bot = build_web_command_objects(
         BotConfig.AUTHORIZED_USER_ID, outbox, command, _web_real_bot,
+        channel=telegram_channel(),
     )
     # 命令可能触发 restart_web_chat（设端口/密码），状态处理器会取 context.application。
     context.application = _web_application
@@ -521,6 +960,20 @@ async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) ->
     """
     if _web_real_bot is None:
         return  # 纯网页模式，无 TG 可同步
+
+    # 这条路径刻意绕过出站通道（要处理 file:// 容器路径与硬链清理），所以必须
+    # 自己看一眼熔断状态：这里的上传超时最高开到 1800s，通道明摆着不通时还硬试
+    # 一次，会把整轮网页对话拖住半小时。
+    if telegram_channel().is_open():
+        logger.info("Telegram 通道熔断中，跳过网页文件同步: %s", filename)
+        server_obj = _web_chat_server
+        if server_obj is not None:
+            server_obj.outbox.put({
+                "type": "message",
+                "text": f"⚠️ Telegram 暂时连不上，文件 {filename} 未同步到 Telegram（网页侧已正常处理）。",
+                "ts": time.time(),
+            })
+        return
 
     chat_id = BotConfig.AUTHORIZED_USER_ID
     # 发到 TG 的 caption 带 [网页] 标记，与网页文本消息的镜像标记一致，
@@ -618,77 +1071,131 @@ async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) ->
 
 async def _web_run_file_conversation(filename: str, content: bytes,
                                      caption: str, outbox: Any) -> None:
-    """网页上传文件后跑一轮对话。镜像 Telegram 端 handle_document_message 的普通分支
-    （messages.py:245-297）：存盘→记记忆→以路径+内联文本作 content_override 进对话核心。
+    """网页上传文件后跑一轮处理，复用 Telegram 端 process_incoming_document
+    （messages.py）的状态机分流，保证提供商配置导入 / 黑名单导入 / 记忆导入 /
+    提示词更新 / 普通文件对话这五条路径在网页和 Telegram 上行为完全一致。
 
-    与 TG 端唯一的差别在「文件来源」：TG 端用 get_file 下载，这里直接拿上传字节。
-    文件本体也同步发到 Telegram——走与 agent_sendfile.py 同款的三段分流：
-    ≤MAX_FILE_SIZE 原生 send_document 直发；超限且配了本地 Bot API server 则硬链到
-    .local-api-data/ 用 file:// 容器路径直发；超限且没配 server 则只告警不发（对话照跑）。
-    TG 失败不阻断网页对话，与 MirrorBot._tg_call 同样的容错策略。
+    历史 bug：本函数曾经只硬编码"普通文件对话"这一条路径，完全不检查
+    UserDataManager 的 state，导致网页上传 JSON 发起"覆盖导入提供商配置"
+    时，文件被当成普通附件喂给了 AI，而不是真正触发导入。现在改为调用
+    共享的 process_incoming_document，状态判断只维护一份。
+
+    与 TG 端唯一的差别在「文件来源」：TG 端用 get_file 下载，这里直接拿
+    上传字节。文件本体同步到 Telegram 这一步通过 sync_to_telegram 回调传入
+    process_incoming_document，只会在“普通文件”分支被调用——提供商配置等
+    配置类文件不会被转发进 Telegram 聊天记录（避免 API Key 泄露到聊天历史）。
     """
     try:
         update, context, _bot = build_web_mirror_objects(
             BotConfig.AUTHORIZED_USER_ID, outbox, _web_real_bot,
+            channel=telegram_channel(),
         )
 
-        saved_file = ArtifactManager.save_binary_upload(filename, content)
-        note = ArtifactManager.shorten_text(caption, 80) if caption else ""
-        memory_text = ArtifactManager.build_index_message(
-            "文件", filename, saved_file['rel_path'], note
+        async def _sync_to_tg(abs_path: str, file_name: str, file_caption: str) -> None:
+            # 三段分流对齐 agent_sendfile.py:79-174，阈值用同源的
+            # AgentExecutor.MAX_FILE_SIZE，保证两端「能发多大」一致。
+            # abs_path 是 process_incoming_document 里 save_binary_upload
+            # 已经落盘的路径，这里不重复存盘，避免同一份文件产生两个路径。
+            await _web_deliver_file_to_tg(abs_path, file_name, file_caption)
+
+        await process_incoming_document(
+            update, context,
+            doc_name=filename,
+            content_bytes=content,
+            caption=caption,
+            file_size=len(content),
+            sync_to_telegram=_sync_to_tg,
         )
-
-        # 文件本体同步到 Telegram。三段分流对齐 agent_sendfile.py:79-174，
-        # 阈值用同源的 AgentExecutor.MAX_FILE_SIZE，保证两端「能发多大」一致。
-        await _web_deliver_file_to_tg(saved_file['abs_path'], filename, caption)
-
-        await GlobalRecorder.record_user_message(
-            memory_text, MessageType.USER_FILE, BotConfig.AUTHORIZED_USER_ID
-        )
-
-        # 构造本轮临时上下文：附言 + 保存通知 + 内联文本（小文件）/ 路径提示（大文件）。
-        # 复刻 messages.py:257-286，保证网页上传与 TG 上传对模型完全一致。
-        turn_parts: List[Dict[str, str]] = []
-        if caption:
-            turn_parts.append({"type": "text", "text": f"用户附言：{caption}"})
-        turn_parts.append({
-            "type": "text",
-            "text": ArtifactManager.build_saved_notice(
-                "文件", saved_file['rel_path'], f"原文件名：{filename}"
-            )
-        })
-        inline_text = ArtifactManager.try_decode_text(content)
-        if inline_text is not None:
-            clipped_text, was_clipped = ArtifactManager.clip_inline_text(inline_text)
-            clip_note = (
-                "\n[系统提示] 文件内容过长，本轮只内联了前半部分，完整内容仍可通过保存路径重新读取。"
-                if was_clipped else ""
-            )
-            turn_parts.append({
-                "type": "text",
-                "text": (
-                    f"[文件内容开始]\n{clipped_text}{clip_note}\n[文件内容结束]\n"
-                    "请直接基于文件内容回答，并说明文件保存路径。"
-                )
-            })
-        else:
-            turn_parts.append({
-                "type": "text",
-                "text": (
-                    "这份文件已经保存到路径里了，但不会把全文长期塞在上下文里。"
-                    "如果后面还要继续分析，请优先按保存路径重新读取。"
-                )
-            })
-
-        await process_conversation(update, context, memory_text, content_override=turn_parts)
         outbox.put({"type": "turn_end"})
     except Exception as e:
         logger.exception("Web 文件对话失败")
         outbox.put({"type": "turn_error", "text": redact_sensitive_text(str(e))[:300]})
 
 
+async def _web_run_photo_conversation(filename: str, content: bytes,
+                                      caption: str, outbox: Any) -> None:
+    """网页上传图片后跑一轮对话，让 AI 真正"看懂"图片内容。
+
+    历史 bug：网页上传的图片此前统一走 _web_run_file_conversation（文档
+    语义），只存盘、记路径索引，从不构造 multimodal image content——AI
+    完全看不到图里画的是什么，只知道"有个文件"。这与 Telegram 端
+    handle_photo_message（other_messages.py）把图片 base64 编码后塞进
+    content_override 的行为不对等。
+
+    现在改为调用 build_photo_multimodal_payload（other_messages.py 里从
+    _prepare_photo_payload 抽取的纯函数），构造与 Telegram 端完全一致的
+    multimodal content，让 Web 上传图片时 AI 的识图能力和 Telegram 对齐。
+
+    图片本体仍同步到 Telegram（与文件上传路径一致），但图片是纯二进制，
+    不存在提供商配置/黑名单等需要按状态机分流的场景，所以不需要复用
+    process_incoming_document——这与 Telegram 端 handle_photo_message
+    不检查文档状态机、直接处理的行为一致。
+    """
+    try:
+        update, context, _bot = build_web_mirror_objects(
+            BotConfig.AUTHORIZED_USER_ID, outbox, _web_real_bot,
+            channel=telegram_channel(),
+        )
+
+        payload = build_photo_multimodal_payload(content, caption, filename)
+        saved_photo = payload["saved_photo"]
+        memory_text = payload["index_text"]
+
+        # 图片本体同步到 Telegram，对齐 _web_run_file_conversation 的现状行为。
+        await _web_deliver_file_to_tg(saved_photo['abs_path'], filename, caption)
+
+        await GlobalRecorder.record_user_message(
+            memory_text, MessageType.USER_PHOTO, BotConfig.AUTHORIZED_USER_ID
+        )
+
+        multimodal_content: List[Dict[str, str]] = []
+        if payload["caption"]:
+            multimodal_content.append({"type": "text", "text": f"用户附言：{payload['caption']}"})
+        multimodal_content.append({"type": "text", "text": payload["saved_notice"]})
+        multimodal_content.append({
+            "type": "image",
+            "mime_type": "image/jpeg",
+            "data": payload["image_b64"],
+        })
+
+        await process_conversation(update, context, memory_text, content_override=multimodal_content)
+        outbox.put({"type": "turn_end"})
+    except Exception as e:
+        logger.exception("Web 图片对话失败")
+        outbox.put({"type": "turn_error", "text": redact_sensitive_text(str(e))[:300]})
+
+
+# 图片文件后缀白名单，用于网页上传时区分"图片"（走 multimodal，AI 能看懂）
+# 和"普通文件"（走 process_incoming_document，只是路径索引）。与
+# Telegram 端 filters.PHOTO 依赖 Telegram 自己的媒体分类不同，网页上传
+# 只能拿到文件名，所以退化成按后缀判断——覆盖常见格式即可，不追求完备
+# （不在名单里的图片格式，比如小众的 .heic，会走普通文件路径，只是
+# AI 看不懂内容，不影响文件本身正常存盘和发送）。
+_WEB_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+
+
 def _web_submit_upload(filename: str, content: bytes, caption: str, outbox: Any) -> None:
-    """HTTP 线程调用：把网页上传文件的对话丢进事件循环，不等它跑完。"""
+    """HTTP 线程调用：把网页上传文件的对话丢进事件循环，不等它跑完。
+
+    按文件名后缀分流：图片走 _web_run_photo_conversation（AI 能看懂图片
+    内容），其余走 _web_run_file_conversation（process_incoming_document
+    的状态机分流，覆盖提供商配置导入等场景）。仅当当前不处于任何配置类
+    状态时才按图片处理——如果用户正在"覆盖导入提供商配置"流程中发了张
+    图片（几乎不会发生，但保持行为可预期），仍应交给状态机处理并提示
+    格式错误，而不是被当成图片直接喂给 AI。
+    """
+    _, ext = os.path.splitext(filename.lower())
+    state = UserDataManager.get('state')
+    if ext in _WEB_IMAGE_EXTENSIONS and state == BotState.IDLE:
+        loop = _web_chat_server.config.loop if _web_chat_server else None
+        if loop is None:
+            outbox.put({"type": "turn_error", "text": "服务未就绪"})
+            return
+        asyncio.run_coroutine_threadsafe(
+            _web_run_photo_conversation(filename, content, caption, outbox), loop,
+        )
+        return
+
     loop = _web_chat_server.config.loop if _web_chat_server else None
     if loop is None:
         outbox.put({"type": "turn_error", "text": "服务未就绪"})
@@ -771,31 +1278,45 @@ def _web_is_busy() -> bool:
     return _conversation_processing_lock.locked()
 
 
-async def start_web_chat_if_enabled(app: Any) -> None:
-    """按开关启动 Web 服务。失败只记日志，绝不影响 bot 主流程。"""
-    global _web_chat_server, _web_real_bot, _web_application
+async def start_web_chat_if_enabled(app: Optional[Any] = None, *,
+                                    force: bool = False) -> Optional[str]:
+    """按开关启动 Web 服务。失败只记日志，绝不影响任何其他组件。
+
+    ``app`` 只用来记 ``_web_application``（网页里改密码/端口时状态处理器要取
+    ``context.application``）。**不**从它身上取 bot 引用——Telegram 通道由
+    ``set_telegram_channel`` 在真正就绪时登记，见那里的说明。所以本函数在
+    Telegram 完全不通时也能正常跑完。
+
+    ``force=True`` 时跳过 ``web_enabled`` 开关检查。**只**给"库里从没写过这个
+    开关"的迁移路径用（见 runtime._start_web_component）——以前这里是"没有
+    BOT_TOKEN 就一律强制启动"，于是用户显式关掉 Web 之后一重启就被无声打开。
+
+    返回 ``None`` 表示起来了、或按开关本就不该起；返回字符串表示**想起却没起
+    成**的原因，调用方可以直接把它显示给用户。以前这条路径全静音：网页/CLI 里
+    改完配置看不到任何反馈，日志里那行 error 只有翻日志的人才看得见。
+    """
+    global _web_chat_server, _web_application
     if _web_chat_server is not None:
-        return
+        return None
+    # 跨端同步观察者无论 Web 开不开都要跑（它还承担 CLI→TG 镜像），先启动；
+    # Web 开着时下面再把新服务器的 outbox 接给它。
+    await start_external_sync_watcher()
     web_on = normalize_bool(UserDataManager.get('web_enabled', False), False)
     term_on = normalize_bool(UserDataManager.get('terminal_enabled', False), False)
-    if not (web_on or term_on):
-        return
+    if not force and not (web_on or term_on):
+        return None
 
-    # 记下真实 bot，网页发起对话时 MirrorBot 用它把消息同步到 Telegram。
-    _web_real_bot = getattr(app, "bot", None)
     # 记下 application：网页触发配置状态（设密码/端口需 restart_web_chat）时，
     # 状态处理器会取 context.application，mirror context 默认没有该属性。
     _web_application = app
 
-    password_hash = await read_web_password_hash()
+    password_hash = await read_web_password_hash(fresh=True)
     if not password_hash:
         logger.warning("Web Chat 已开启但未设置密码，跳过启动")
-        with contextlib.suppress(Exception):
-            await app.bot.send_message(
-                chat_id=BotConfig.AUTHORIZED_USER_ID,
-                text="⚠️ Web/终端服务已开启但没有设置密码，未启动。请在 /start → 🌐 Web 里设置密码。",
-            )
-        return
+        _notify_owner_soon(
+            "⚠️ Web/终端服务已开启但没有设置密码，未启动。请在 /start → 🌐 Web 里设置密码。"
+        )
+        return "没有设置访问密码，Web 服务不会启动"
 
     config = WebChatConfig(
         host=DEFAULT_WEB_HOST,
@@ -818,41 +1339,220 @@ async def start_web_chat_if_enabled(app: Any) -> None:
         read_history=_web_read_history,
         read_settings=_web_read_settings,
         write_setting=_web_write_setting,
+        # 分通道健康详情。同步回调（runtime.runtime_health 不 await 任何东西）：
+        # 这个接口最需要被用到的时刻，正是事件循环或某个通道出问题的时刻。
+        read_health=runtime_health,
         request_stop=_web_request_stop,
         is_busy=_web_is_busy,
         is_terminal_enabled=lambda: normalize_bool(UserDataManager.get('terminal_enabled', False), False),
-        is_web_enabled=lambda: normalize_bool(UserDataManager.get('web_enabled', False), False),
+        # /api/media/resolve 的白名单根：本应用自己的数据目录。xgent_storage
+        # 覆盖 uploads/generated_media/exports；workspace 是 Agent 的默认
+        # 工作目录（sendfile/file 协议产出的文件大多在这里）。除此之外的
+        # 服务器路径一律不给换 token——那等于开放任意文件读取。
+        media_allowed_roots=[
+            ArtifactManager.ROOT_DIR,
+            os.path.join(AgentExecutor.WORK_DIR, 'workspace'),
+        ],
+        # 纯 Web 模式（force=True）下 Web 服务本身就是唯一入口，不受
+        # web_enabled 开关影响，始终视为已开启。
+        # force=True 是"无视开关强行起"，那时把 is_web_enabled 也接成常真——
+        # 否则监听起来了、每个请求又被 _require_web_enabled 403 掉，等于起了一个
+        # 没用的服务。正常路径不再走 force，见 runtime._start_web_component。
+        is_web_enabled=(
+            (lambda: True) if force
+            else (lambda: normalize_bool(UserDataManager.get('web_enabled', False), False))
+        ),
     )
     server = WebChatServer(config)
     try:
         await asyncio.to_thread(server.start)
     except Exception as e:
         logger.error(f"Web Chat 启动失败: {e}")
-        with contextlib.suppress(Exception):
-            await app.bot.send_message(
-                chat_id=BotConfig.AUTHORIZED_USER_ID,
-                text=f"⚠️ Web Chat 启动失败：{safe_text(str(e)[:200])}",
-            )
-        return
+        _notify_owner_soon(f"⚠️ Web Chat 启动失败：{safe_text(str(e)[:200])}")
+        return f"启动失败：{str(e)[:200]}"
     _web_chat_server = server
+    # 跨端同步观察者已在函数开头启动，这里把新服务器的 outbox 接给它：
+    # 此后 CLI 写库的实时帧直达当前在线的网页订阅者。
+    await start_external_sync_watcher(server.outbox)
+    return None
 
 
 async def stop_web_chat() -> None:
-    global _web_chat_server
+    global _web_chat_server, _web_external_outbox
     if _web_chat_server is None:
         return
     server, _web_chat_server = _web_chat_server, None
     with contextlib.suppress(Exception):
         await asyncio.to_thread(server.stop)
+    # 观察者**不**随 Web 服务停止：CLI→Telegram 镜像与 Web 开关无关。
+    # 只把 outbox 换回无订阅者的独立实例——旧 outbox 已 close，继续用它
+    # 会让后续帧全部落空；等下次 Web 启动再接新的。
+    _web_external_outbox = WebOutbox()
 
 
-async def restart_web_chat(app: Any) -> None:
-    """改端口/密码后重启，让新配置立即生效。"""
+async def restart_web_chat(app: Optional[Any] = None, *,
+                           force: bool = False) -> Optional[str]:
+    """改端口后重启，让新配置立即生效。返回值同 start_web_chat_if_enabled。
+
+    以前 ``force`` 省略时按 ``app is None`` 推断，意思是"没有 PTB Application 就
+    当纯 Web 模式，强制起服务"。但 ``app is None`` 同样成立于 **CLI 进程**（见
+    cli_bridge.CliContext.application），于是在 CLI 里改一次密码就会让 CLI 自己去
+    抢服务进程占着的端口。判据换成显式传参，不再猜。
+    """
     await stop_web_chat()
-    await start_web_chat_if_enabled(app)
+    return await start_web_chat_if_enabled(app, force=force)
 
 
 def is_web_chat_running() -> bool:
     return _web_chat_server is not None and _web_chat_server.running
+
+
+def set_web_managed_here(managed: bool = True) -> None:
+    """标记"本进程托管 Web 服务器"。只由服务进程的组件启动流程调用。"""
+    global _web_managed_here
+    _web_managed_here = managed
+
+
+def web_managed_here() -> bool:
+    """本进程是不是那个持有监听 socket 的进程。
+
+    CLI（xgent）里改 Web 配置时用它决定是"自己起停服务器"还是"只写库，交给
+    服务进程去对账"。CLI 自己起停的后果见 _web_managed_here 的注释。
+    """
+    return _web_managed_here
+
+
+def web_service_reachable(port: Optional[int] = None) -> bool:
+    """Web 端口上有没有人在听——跨进程的、可信的那个答案。
+
+    is_web_chat_running() 只知道**本进程**有没有服务器对象，在 CLI 里永远是
+    False。拿它当"Web 在不在跑"显示给用户，cli+web 部署下就固定显示"🟡 已开启
+    但未运行"，而网页明明好得很。跨进程的事实只能问端口。
+
+    用连接而不是 ss/netstat：Android（含 Termux）不给普通应用读 /proc/net/tcp，
+    那两个工具在那儿答不上话，理由同 tools/xgent_config.py 的 _probe_port。
+    超时 0.3s——127.0.0.1 上连不上是立刻 ECONNREFUSED，慢就是别的问题。
+    """
+    if _web_managed_here:
+        return is_web_chat_running()
+    if port is None:
+        port = normalize_web_port(UserDataManager.get('web_port', DEFAULT_WEB_PORT))
+    try:
+        with socket.create_connection((DEFAULT_WEB_HOST, int(port)), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+# 配置对账间隔。用户在 CLI/install.sh 里按下开关之后最多等这么久看到效果。
+_WEB_CONFIG_POLL_SECONDS = 3.0
+
+
+async def reconcile_web_config_once() -> None:
+    """把库里的 Web 配置对到本进程的运行状态上。
+
+    这里存在的理由：Web 配置有三个写入方（服务进程自己、xgent CLI、install.sh），
+    但每个进程读到的都是**自己启动时**那份快照——UserDataManager._data 和
+    BotMemoryDB._config_cache 都是进程内的。于是"在 CLI 里把密码改了、网页登录
+    还是报认证失败"，而 CLI 那边看着一切正常（哈希确实写进库了）。以前 CLI 试图
+    自己 restart_web_chat 来解决，结果是去抢服务进程占着的端口、拿一个
+    EADDRINUSE、被日志吞掉。
+
+    只在托管 Web 的进程里跑（由 runtime 拉起），所以不会有两个进程抢端口。
+    """
+    db = await BotMemoryDB.get_instance()
+    web_on = normalize_bool(await db.get_config_fresh('web_enabled', False), False)
+    term_on = normalize_bool(await db.get_config_fresh('terminal_enabled', False), False)
+    port = normalize_web_port(await db.get_config_fresh('web_port', DEFAULT_WEB_PORT))
+    password_hash = await read_web_password_hash(fresh=True)
+
+    # 1) 先对齐内存快照。菜单文案、/api/health、传给 WebChatServer 的
+    #    is_web_enabled / is_terminal_enabled 回调读的都是它——单这一步就修好了
+    #    "别的进程改完，这边还在报旧值"。
+    UserDataManager.set('web_enabled', web_on)
+    UserDataManager.set('terminal_enabled', term_on)
+    UserDataManager.set('web_port', port)
+    UserDataManager.set('_web_has_password', bool(password_hash))
+
+    state = component_state("web")
+    should_run = bool((web_on or term_on) and password_hash)
+
+    # 2) 该开没开 / 该停还在跑。
+    if should_run and not is_web_chat_running():
+        error = await start_web_chat_if_enabled(_web_application)
+        if error:
+            state.set(COMPONENT_DOWN, error=error)
+        else:
+            state.set(COMPONENT_UP, host=DEFAULT_WEB_HOST, port=port)
+        return
+    if not should_run:
+        if is_web_chat_running():
+            await stop_web_chat()
+            logger.info("Web 服务已按配置关闭（web_enabled=%s terminal_enabled=%s）",
+                        web_on, term_on)
+        state.set(COMPONENT_DISABLED, reason="未开启或未设置访问密码")
+        return
+
+    # 3) 在跑着：只有端口变了才值得重启——重启会换掉 session_key，把所有已登录的
+    #    浏览器踢下线。密码变了就地换哈希：它只在登录那一刻被读（web_server
+    #    _handle_login），没必要为此断开在线连接。
+    server = _web_chat_server
+    if server is None:
+        return
+    if int(getattr(server.config, 'port', port) or port) != int(port):
+        logger.info("Web 端口已改为 %s，重启服务生效", port)
+        error = await restart_web_chat(_web_application)
+        if error:
+            state.set(COMPONENT_DOWN, error=error)
+        else:
+            state.set(COMPONENT_UP, host=DEFAULT_WEB_HOST, port=port)
+        return
+    if str(getattr(server.config, 'password_hash', '') or '') != password_hash:
+        server.config.password_hash = password_hash
+        logger.info("Web 访问密码已更新，就地生效（未重启，在线会话不受影响）")
+
+
+async def apply_web_config_change(app: Optional[Any] = None) -> str:
+    """刚把 Web 配置写进库之后调它。返回一句给用户看的说明（不需要说就是空串）。
+
+    托管 Web 的进程立刻对账一次：该起就起、该停就停、端口变了才重启、密码就地换。
+    非托管进程（xgent CLI）什么都不做——服务进程的对账任务几秒内会做同样的事，而
+    CLI 自己动手只会去抢服务进程占着的端口。
+    """
+    global _web_application
+    if not web_managed_here():
+        return "已保存。后台服务几秒内自动生效，不用重启。"
+    if app is not None:
+        _web_application = app
+    await reconcile_web_config_once()
+    return ""
+
+
+async def _web_config_reconciler() -> None:
+    while True:
+        await asyncio.sleep(_WEB_CONFIG_POLL_SECONDS)
+        try:
+            await reconcile_web_config_once()
+        except Exception:
+            # 单轮失败不能带走这个任务：下一轮照旧。取舍同
+            # _web_external_record_watcher 的轮询。
+            logger.debug("Web 配置对账失败", exc_info=True)
+
+
+async def start_web_config_reconciler() -> None:
+    global _web_config_watch_task
+    if _web_config_watch_task is None or _web_config_watch_task.done():
+        _web_config_watch_task = asyncio.create_task(
+            _web_config_reconciler(), name="xgent-web-config-reconciler")
+
+
+async def stop_web_config_reconciler() -> None:
+    global _web_config_watch_task
+    task, _web_config_watch_task = _web_config_watch_task, None
+    if task is None or task.done():
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 # --- ☆ 其他类型消息处理 ☆ ---

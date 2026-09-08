@@ -31,37 +31,43 @@ from xgent_app.agent_presenter import (
     build_standard_operation_presentation,
 )
 
-async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_authorized_user_middleware(update, context):
-        return
+async def process_incoming_document(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    doc_name: str,
+    content_bytes: bytes,
+    caption: str,
+    file_size: Optional[int] = None,
+    mime_type: Optional[str] = None,
+    sync_to_telegram: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+) -> None:
+    """处理一份已经拿到字节的文档，按当前状态机分流。
 
-    # 处理中锁（仅对非提示词编辑状态生效）
-    await UserDataManager.init()
+    Telegram 端（handle_document_message）用 download_telegram_file 拿字节，
+    Web 端（idle.py 的 _web_run_file_conversation）直接拿上传字节——取字节
+    的方式是两端唯一的差异，取到之后的全部逻辑（状态判断、格式校验、落库、
+    回复文案、记忆记录）必须一致，否则会出现"文本能导入、文件不能导入"
+    这类只有一端支持的分裂 bug（历史上 Web 端就是因为没有这个共享函数，
+    完全没做状态判断，把配置导入文件当成普通附件喂给了 AI）。
+
+    ``mime_type`` 仅 Telegram 端能提供（Document.mime_type），用于放宽 txt/md
+    后缀校验（历史行为：mime_type 含 "text" 时也接受）；Web 端上传没有可靠
+    的 mime_type 来源，传 None 即可，退化为仅按扩展名校验。
+
+    ``sync_to_telegram(abs_path, doc_name, caption)`` 仅在网页上传时传入，
+    用于把落盘后的文件同步发到 Telegram；只在「普通文件」分支被调用——
+    提供商配置/黑名单/记忆/提示词这几个状态对应的都是配置类文件（提供商
+    配置还含明文 API Key），不应该被转发进 Telegram 聊天记录再留一份底稿，
+    这与 Telegram 原生行为一致（TG 收到这几类状态下的文件时，本来也不会
+    把文件转发回自己）。传 abs_path 而不是原始字节，是因为该分支下文件
+    已经用 save_binary_upload 落盘一次，同步和记忆/AI 上下文必须引用同一份
+    文件，不能各存一份产生两个路径。
+    """
+    def _looks_like_text_file(name: str) -> bool:
+        return name.endswith('.txt') or name.endswith('.md') or bool(mime_type and 'text' in mime_type)
+
     state = UserDataManager.get('state')
-    if (not is_prompt_edit_state(state)
-            and state != BotState.SET_COMMAND_BLACKLIST
-            and state != BotState.SET_MEMORY
-            and state != BotState.IMPORT_PROVIDER_CONFIG):
-        if _conversation_processing_lock.locked():
-            await update.message.reply_text(
-                "⏳ 系统仍在处理上一个请求... 请稍等。"
-            )
-            return
-
-    doc = update.message.document
-    doc_name = doc.file_name or f"document_{uuid.uuid4().hex[:8]}.bin"
-    # 使用 caption 保留格式
-    caption = ""
-    if update.message.caption:
-        try:
-            caption = (update.message.caption_markdown or update.message.caption or "").strip()
-        except Exception:
-            caption = (update.message.caption or "").strip()
-    # 转发的富文本消息：caption 可能为空，文字在 rich_message.blocks 里
-    if not caption:
-        caption = _extract_rich_message_text(update.message).strip()
-        if caption:
-            logger.warning(f"handle_document_message: extracted caption via rich_message, len={len(caption)}: {caption[:200]}")
 
     if state == BotState.IMPORT_PROVIDER_CONFIG:
         await GlobalRecorder.record_user_message(
@@ -72,14 +78,13 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         if not doc_name.lower().endswith('.json'):
             await update.message.reply_text("⚠️ 请发送 JSON 配置文件，或发送 cancel 取消。")
             return
-        if doc.file_size and doc.file_size > PROVIDER_CONFIG_MAX_BYTES:
+        if file_size and file_size > PROVIDER_CONFIG_MAX_BYTES:
             await update.message.reply_text(
                 f"⚠️ 配置文件不能超过 {PROVIDER_CONFIG_MAX_BYTES // 1024 // 1024} MB。"
             )
             return
         status_msg = await update.message.reply_text("📥 正在校验并导入提供商配置...")
         try:
-            content_bytes = bytes(await download_telegram_file(doc))
             providers, defaults = parse_provider_config_import(content_bytes)
             import_mode = UserDataManager.get('provider_import_mode')
             if import_mode not in {'merge', 'replace'}:
@@ -91,6 +96,10 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             skipped = (
                 f"\n⚠️ 未恢复：{'、'.join(result['skipped_defaults'])}（提供商或模型不存在）"
                 if result['skipped_defaults'] else ''
+            )
+            dangling = (
+                f"\n🧹 已清空失效选择：{'、'.join(result['cleared_dangling'])}（原模型已不在新配置中，请重新选择）"
+                if result.get('cleared_dangling') else ''
             )
             await GlobalRecorder.record_system_op(
                 "导入提供商配置",
@@ -111,7 +120,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
                 f"新增：{result['added']} 个\n"
                 f"更新同名：{result['overwritten']} 个\n"
                 f"{removed_line}"
-                f"默认项：{safe_text(restored)}{safe_text(skipped)}",
+                f"默认项：{safe_text(restored)}{safe_text(skipped)}{safe_text(dangling)}",
                 reply_markup=get_providers_menu(),
                 parse_mode=constants.ParseMode.HTML
             )
@@ -140,13 +149,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             MessageType.USER_FILE,
             update.effective_chat.id
         )
-        if not (doc_name.endswith('.txt') or doc_name.endswith('.md') or
-                (doc.mime_type and 'text' in doc.mime_type)):
+        if not _looks_like_text_file(doc_name):
             await update.message.reply_text("🫠 黑名单批量导入只接受 txt / md / text 文件。")
             return
         try:
-            content_bytes = await download_telegram_file(doc)
-            text_content = ArtifactManager.try_decode_text(bytes(content_bytes))
+            text_content = ArtifactManager.try_decode_text(content_bytes)
             if text_content is None:
                 raise ValueError("unsupported blacklist file encoding")
             current_buffer = UserDataManager.get('command_blacklist_buffer', "")
@@ -173,13 +180,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             MessageType.USER_FILE,
             update.effective_chat.id
         )
-        if not (doc_name.endswith('.txt') or doc_name.endswith('.md') or
-                (doc.mime_type and 'text' in doc.mime_type)):
+        if not _looks_like_text_file(doc_name):
             await update.message.reply_text("🫠 记忆导入只接受 txt / md / text 文件。")
             return
         try:
-            content_bytes = await download_telegram_file(doc)
-            text_content = ArtifactManager.try_decode_text(bytes(content_bytes))
+            text_content = ArtifactManager.try_decode_text(content_bytes)
             if text_content is None:
                 raise ValueError("unsupported memory file encoding")
             current_buffer = UserDataManager.get('memory_buffer', "")
@@ -206,15 +211,13 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             update.effective_chat.id
         )
 
-        if not (doc_name.endswith('.txt') or doc_name.endswith('.md') or
-                (doc.mime_type and 'text' in doc.mime_type)):
+        if not _looks_like_text_file(doc_name):
             await update.message.reply_text("🫠 该文件类型仅可用于更新 txt / md 提示词。")
             return
 
         status_msg = await update.message.reply_text("📝 正在读取用户提供的提示词文件...")
         try:
-            content_bytes = await download_telegram_file(doc)
-            text_content = ArtifactManager.try_decode_text(bytes(content_bytes))
+            text_content = ArtifactManager.try_decode_text(content_bytes)
             if text_content is None:
                 raise ValueError("unsupported prompt file encoding")
 
@@ -242,9 +245,15 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             await status_msg.edit_text("提示词文件读取失败。")
         return
 
+    # 默认：普通文件，喂给 AI 对话。只有这个分支才可能同步到 Telegram
+    # （sync_to_telegram 只在网页上传时传入；TG 原生入口没有必要转发给自己）。
+    # 注意：save_binary_upload 必须只调用一次——sync_to_telegram 和下面的
+    # 记忆/AI 上下文必须引用同一份落盘文件，不能各存一份产生两个路径。
     try:
-        content_bytes = await download_telegram_file(doc)
         saved_file = ArtifactManager.save_binary_upload(doc_name, content_bytes)
+        if sync_to_telegram is not None:
+            await sync_to_telegram(saved_file['abs_path'], doc_name, caption)
+
         note = ArtifactManager.shorten_text(caption, 80) if caption else ""
         memory_text = ArtifactManager.build_index_message("文件", doc_name, saved_file['rel_path'], note)
 
@@ -298,6 +307,44 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         logger.error(f"File save/process error: {e}")
         await update.message.reply_text(f"文件 {safe_text(doc_name)} 已收到，但保存或转交模型失败。")
+
+
+async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_authorized_user_middleware(update, context):
+        return
+
+    # 处理中锁（仅对非提示词编辑状态生效）
+    await UserDataManager.init()
+    state = UserDataManager.get('state')
+    if (not is_prompt_edit_state(state)
+            and state != BotState.SET_COMMAND_BLACKLIST
+            and state != BotState.SET_MEMORY
+            and state != BotState.IMPORT_PROVIDER_CONFIG):
+        if _conversation_processing_lock.locked():
+            await update.message.reply_text(
+                "⏳ 系统仍在处理上一个请求... 请稍等。"
+            )
+            return
+
+    doc = update.message.document
+    doc_name = doc.file_name or f"document_{uuid.uuid4().hex[:8]}.bin"
+    # caption 同样只取原文：格式属性丢弃，字符一字不差。
+    caption = (update.message.caption or "").strip()
+    # 转发的富文本消息：caption 可能为空，文字在 rich_message.blocks 里
+    if not caption:
+        caption = _extract_rich_message_text(update.message).strip()
+        if caption:
+            logger.warning(f"handle_document_message: extracted caption via rich_message, len={len(caption)}: {caption[:200]}")
+
+    content_bytes = bytes(await download_telegram_file(doc))
+    await process_incoming_document(
+        update, context,
+        doc_name=doc_name,
+        content_bytes=content_bytes,
+        caption=caption,
+        file_size=doc.file_size,
+        mime_type=doc.mime_type,
+    )
 
 
 def _rich_part_to_markdown(part):
@@ -488,6 +535,20 @@ def _extract_rich_message_plain_text(msg):
     )
 
 
+def _initial_message_text(message, state) -> str:
+    r"""handle_text_message 的第一步取文本：Telegram 原文，一字不差。
+
+    这里曾经走过 text_markdown（想给 AI 保留加粗/代码等格式标记），但它会
+    给普通文本插转义符（\_ \*），API Key 两度被改写；后来试过自研"无转义
+    重构"，又引入实体偏移这类新的出错面。最终取舍：格式属性直接丢弃，
+    字符字节直传——"用户发什么，AI 和记忆库就收到什么"是唯一硬性要求，
+    任何为了锦上添花而改写正文的路径都不值得。
+    """
+    if message.text:
+        return message.text.strip()
+    return (getattr(message, "caption", None) or "").strip()
+
+
 def _extract_rich_message_text(msg):
     """Extract text from rich_message (Telegram rich text format), preserving formatting as markdown."""
     extra = getattr(msg, 'api_kwargs', None) or {}
@@ -568,17 +629,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         # URL 含下划线和连字符，转义会写出无法访问的地址。
         BotState.SET_WEB_PUBLIC_URL,
     }
-    text = ""
-    if update.message.text:
-        if state in exact_value_states:
-            text = update.message.text.strip()
-        else:
-            try:
-                text = (update.message.text_markdown or update.message.text or "").strip()
-            except Exception:
-                text = (update.message.text or "").strip()
-    else:
-        text = (update.message.caption or "").strip()
+    # 原文直传，无任何改写层（见 _initial_message_text 的注释）。
+    text = _initial_message_text(update.message, state)
 
     # 转发消息 text 可能为 None（python-telegram-bot 解析问题），
     # 用 forwardMessage API 重新拉取完整消息内容
@@ -685,6 +737,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"\n⚠️ 未恢复：{'、'.join(result['skipped_defaults'])}（提供商或模型不存在）"
                 if result['skipped_defaults'] else ''
             )
+            dangling = (
+                f"\n🧹 已清空失效选择：{'、'.join(result['cleared_dangling'])}（原模型已不在新配置中，请重新选择）"
+                if result.get('cleared_dangling') else ''
+            )
             await GlobalRecorder.record_system_op(
                 "通过文本导入提供商配置",
                 {
@@ -703,7 +759,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"新增：{result['added']} 个\n"
                 f"更新同名：{result['overwritten']} 个\n"
                 f"{removed_line}"
-                f"默认项：{safe_text(restored)}{safe_text(skipped)}",
+                f"默认项：{safe_text(restored)}{safe_text(skipped)}{safe_text(dangling)}",
                 reply_markup=get_providers_menu(),
                 parse_mode=constants.ParseMode.HTML
             )
@@ -828,10 +884,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         UserDataManager.set('state', BotState.IDLE)
         await GlobalRecorder.record_system_op("设置 Web 访问密码")
-        # 密码变了要重启服务，否则旧进程还在用旧哈希校验。
-        await restart_web_chat(context.application)
+        # 密码变了要让在跑的服务用上新哈希。托管进程立刻就地换掉；CLI 只写库，由
+        # 服务进程的对账任务几秒内换过去。以前这里无条件 restart_web_chat(
+        # context.application)，而 CLI 的 application 是 None——于是 CLI 去 bind
+        # 服务进程占着的端口，拿一个 EADDRINUSE 被日志吞掉，用户那边看到的就是
+        # "密码怎么改都不生效"。
+        note = await apply_web_config_change(context.application)
         await update.message.reply_text(
-            build_web_text(),
+            build_web_text() + (f"\n\n{note}" if note else ""),
             reply_markup=get_web_menu(),
             parse_mode=constants.ParseMode.HTML
         )
@@ -849,9 +909,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         UserDataManager.set('state', BotState.IDLE)
         await UserDataManager.save_config('web_port', port)
         await GlobalRecorder.record_system_op(f"设置 Web 端口: {port}")
-        await restart_web_chat(context.application)
+        note = await apply_web_config_change(context.application)
         await update.message.reply_text(
-            build_web_text(),
+            build_web_text() + (f"\n\n{note}" if note else ""),
             reply_markup=get_web_menu(),
             parse_mode=constants.ParseMode.HTML
         )
@@ -1300,6 +1360,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     reply_text += f"\nℹ️ 已跳过 {len(skipped_models)} 个重复模型。"
             else:
                 reply_text = "ℹ️ 这些模型以前都保存过了。"
+            reply_text += format_fetch_status_note(p, compact=True)
             await update.message.reply_text(
                 reply_text,
                 reply_markup=kb,
@@ -1626,9 +1687,18 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
         trigger_status_iteration = agent_iteration
         if agent_iteration > max_agent_iterations:
             return
-    model = cdata.get('model') or UserDataManager.get('default_model')
     prov_name, prov_data = get_current_provider()
-    
+    # 防御性回退：模型取值优先读会话绑定（chat_sessions.model），若某条
+    # 配置变更路径漏了会话同步（历史上导入配置和 Web 设置都漏过），会话
+    # 里残留的旧模型名会配着换掉后的新提供商通道发出去，上游 502
+    # unknown provider。解析收进 resolve_effective_chat_model：全局默认
+    # 仍有效就回退；两层都失效则返回 None，走下面"未配置模型"的提示——
+    # 不拿一个必然 502 的旧模型名发出去。三端（TG/Web/CLI）都走
+    # process_conversation，全覆盖。
+    model = resolve_effective_chat_model(
+        cdata.get('model'), UserDataManager.get('default_model'), prov_data
+    )
+
     if not prov_data or not model:
         if trigger_status_msg is not None and trigger_status_iteration is not None:
             with contextlib.suppress(Exception):
@@ -1735,7 +1805,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
         await db.remove_last_chat_message(cid)
         return
     
-    # 保存 AI 回复
+    # 保存 AI 回复。
     await GlobalRecorder.record_ai_reply(response, update.effective_chat.id)
     await db.add_chat_message(cid, 'assistant', response)
     # token 用量在正文落库之后落库，保证 timestamp 晚于正文，刷新后顺序为「输出 + tokens」。
@@ -1831,7 +1901,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                     return (
                         "⚠️ 协议块 nonce 不相同，已智能匹配"
                         f"（相似度 {sim_pct}%），下次务必注意 "
-                        "AGENT_BEGIN 和 AGENT_END 的 nonce 保持完全一致。"
+                        "<<BEGIN_ 和 <<END_ 的 nonce 保持完全一致。"
                     )
 
                 def _ctx_with_notice(msg: Dict[str, Any], notice: str) -> Dict[str, Any]:
@@ -1848,6 +1918,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         break
                     smart_notice = _smart_match_notice(block)
                     block_type = block['type']
+                    round_state.note_over_eligibility(block_type)
 
                     # 智能匹配时，先把"系统提示"发到聊天，放在执行结果前面，让用户也能看到
                     if smart_notice:
@@ -1866,6 +1937,21 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             notice=sys_notice,
                         )
 
+                    # over 协议：模型声明"这一轮不必把结果回灌给我"，并把收尾语预先写在
+                    # 块里。这里只发出去，不执行、不进回灌载荷。拦不拦得住由循环末尾的
+                    # apply_over 定——白名单外的协议或任何一个失败都会作废它。
+                    # 收尾语无条件发出：即便 over 随后作废，模型改口的话会跟在它后面。
+                    # 不单独落库：这段文字本来就在助手回复里，再记一份等于给下一轮添噪音。
+                    if block_type == 'over':
+                        round_state.over_text = str(block.get('body') or '').strip()
+                        if round_state.over_text:
+                            await safe_send_message(
+                                context,
+                                update.effective_chat.id,
+                                round_state.over_text,
+                            )
+                        continue
+
                     standard_operation = await dispatch_standard_protocol(
                         block,
                         executor=AgentExecutor,
@@ -1875,6 +1961,8 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         search_api_key=BotConfig.TAVILY_API_KEY,
                     )
                     if standard_operation is not None:
+                        if not standard_operation.get('success'):
+                            round_state.over_blocked = True
                         operation_notice = standard_operation['notice']
                         operation_presentation = build_standard_operation_presentation(
                             standard_operation
@@ -1893,6 +1981,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             conversation_id=cid,
                             chat_id=update.effective_chat.id,
                             operation=standard_operation,
+                            presentation=operation_presentation,
                         )
                         round_state.add_context(
                             _ctx_with_notice(standard_operation['context_message'], smart_notice)
@@ -1949,6 +2038,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             )
                         except Exception as e:
                             logger.error(f"Agent写入文件失败: {e}")
+                            round_state.over_blocked = True
                             file_notice = f"[file结果] 写入失败: {filename}。错误: {str(e)[:200]}"
                             await safe_send_message(
                                 context,
@@ -1990,6 +2080,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             )
                         except Exception as e:
                             logger.error(f"Agent base64 写入文件失败: {e}")
+                            round_state.over_blocked = True
                             file_notice = f"[file:base64结果] 写入失败: {filename}。错误: {str(e)[:200]}"
                             await safe_send_message(
                                 context,
@@ -2045,6 +2136,8 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             stop_requested=is_stop_requested,
                         )
                         shell_result = shell_execution['result']
+                        if not shell_result.get('success'):
+                            round_state.over_blocked = True
                         session_id = shell_execution['session_id']
                         command = shell_execution['command']
                         output = shell_execution['output']
@@ -2165,6 +2258,11 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                 typing_stop.set()
                 await cancel_task_quietly(typing_task)
 
+            # over 协议的拦截点，全局就这一处：模型说了不必回灌，且这一轮每个操作都成功，
+            # 就把回灌载荷丢掉，让下面的协调器落到"没有新上下文"那条既有分支——正常收尾、
+            # 不再叫一次模型。该发的结果已经发了，该落库的也已经落库了。
+            round_state.apply_over()
+
             round_decision = plan_agent_round_transition(
                 round_state,
                 stop_requested=is_stop_requested(),
@@ -2187,6 +2285,28 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         round_decision['status_text'],
                         reply_markup=None,
                     )
+                if not round_decision['continue_loop']:
+                    # 终态状态（停止/超限/失败）是这条消息最终呈现的文字，落库一份
+                    with contextlib.suppress(Exception):
+                        await GlobalRecorder.record(
+                            MessageType.AGENT_STATUS, 'assistant',
+                            round_decision['status_text'],
+                            chat_id=update.effective_chat.id,
+                        )
+
+            round_status_text = build_agent_round_status(
+                operation_iteration,
+                "completed",
+                origin=agent_origin,
+                operation_count=len(protocol_blocks),
+            )
+            # 每轮的 ✅ 状态行是用户在 Telegram/网页上真实看到的内容，落库一份：
+            # 刷新后的历史显示与实时流逐字一致（AGENT_STATUS 只进显示，不进 AI 上下文）。
+            with contextlib.suppress(Exception):
+                await GlobalRecorder.record(
+                    MessageType.AGENT_STATUS, 'assistant', round_status_text,
+                    chat_id=update.effective_chat.id,
+                )
 
             if not round_decision['continue_loop']:
                 if round_decision['show_completion_status'] and round_decision['status_text'] is None:
@@ -2195,12 +2315,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         agent_stop_msg,
                         context,
                         update.effective_chat.id,
-                        build_agent_round_status(
-                            operation_iteration,
-                            "completed",
-                            origin=agent_origin,
-                            operation_count=len(protocol_blocks),
-                        ),
+                        round_status_text,
                     )
                 break
 
@@ -2209,12 +2324,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                 agent_stop_msg,
                 context,
                 update.effective_chat.id,
-                build_agent_round_status(
-                    operation_iteration,
-                    "completed",
-                    origin=agent_origin,
-                    operation_count=len(protocol_blocks),
-                ),
+                round_status_text,
             )
 
             # Continue from this turn's in-memory transcript. Re-reading global history here would
