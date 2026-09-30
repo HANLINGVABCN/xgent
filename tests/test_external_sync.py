@@ -398,6 +398,46 @@ print(json.dumps({
         self.assertTrue(result["ai_row"], "AI 回复要走 Markdown 渲染并带 XGent 头")
         self.assertTrue(result["sys_row"])
 
+    def test_sync_folds_protocol_block_when_hidden(self):
+        """折叠开时，跨端历史回放里 AI 回复的 *-x 协议块折成 <blockquote expandable>，
+        与 Telegram/网页同源（同一个 _folded_display_html→render_folded_html）；
+        协议标记/nonce/围栏不外泄，正文放进可展开 <pre> 里可见。只改显示。"""
+        result = self.run_probe(r'''
+import json, xgent_cli
+# 隔离掉 DB/开关初始化：把折叠开关钉成 ON，只验证 CLI 折叠接线本身。
+xgent_cli._ns["_should_hide_protocol_blocks"] = lambda: True
+NONCE = "0123456789AB"
+block = "```run-x\n<<BEGIN_" + NONCE + "\ndf -h\ndu -sh /var\n<<END_" + NONCE + "\n```"
+content = "先看磁盘：\n" + block + "\n完成。"
+folded = xgent_cli._fold_ai_reply_for_cli(content)
+print(json.dumps({
+    "expandable": "<blockquote expandable" in folded,
+    "no_begin": "<<BEGIN_" not in folded,
+    "no_nonce": NONCE not in folded,
+    "no_fence": "```" not in folded,
+    "body_visible": "df -h" in folded,
+}))
+''')
+        self.assertTrue(result["expandable"], "折叠开时协议块要折成可展开 blockquote")
+        self.assertTrue(result["no_begin"])
+        self.assertTrue(result["no_nonce"])
+        self.assertTrue(result["no_fence"])
+        self.assertTrue(result["body_visible"], "正文放进可展开 <pre>，应可见")
+
+    def test_sync_off_keeps_ai_reply_raw_markdown(self):
+        """折叠关时，AI 回复照旧走 markdown，不折、不外泄结构。"""
+        result = self.run_probe(r'''
+import json, xgent_cli
+xgent_cli._ns["_should_hide_protocol_blocks"] = lambda: False
+NONCE = "0123456789AB"
+block = "```run-x\n<<BEGIN_" + NONCE + "\ndf -h\n<<END_" + NONCE + "\n```"
+folded = xgent_cli._fold_ai_reply_for_cli("看：\n" + block)
+print(json.dumps({
+    "no_expandable": "<blockquote expandable>" not in folded,
+}))
+''')
+        self.assertTrue(result["no_expandable"], "折叠关时不应折成可展开 blockquote")
+
 
 class RestartFromCliTests(SectionsProbeMixin, unittest.TestCase):
     """CLI 发起 /restart：检测外部 PM2 托管、CLI 会话不退出。"""
@@ -530,7 +570,7 @@ async def main():
     web = await ns["_web_read_history"](10)
     ctx = await db.get_conversation_messages(50)
     status_rows = [r for r in rows if r["msg_type"] == MT.AGENT_STATUS]
-    token_web = [r for r in web if r.get("parse_mode") and "21825" in r["content"]]
+    token_web = [r for r in web if r.get("msg_type") == MT.TOKEN_USAGE and "21825" in r["content"]]
     all_display = " ".join(r["content"] for r in rows)
     all_ctx = " ".join(str(m.get("content") or "") for m in ctx)
     print(json.dumps({
@@ -539,7 +579,9 @@ async def main():
         "no_raw_fence": "```" not in all_display,
         "no_media_prompt": "Please generate" not in all_display,
         "token_gray": token_web and token_web[0]["role"] == "system",
-        "ai_reply_html": any("<b>" in r["content"] for r in web if r.get("parse_mode") == "HTML"),
+        "ai_reply_markdown": any(r["content"] == "正文回复 **加粗**"
+                                 and r.get("parse_mode") != "HTML" for r in web),
+        "display_ids": all(r.get("id") and r.get("timestamp") for r in web),
         "status_not_in_ctx": "Agent 第 1 轮" not in all_ctx,
         "cmd_prefixed_in_ctx": "[命令] /restart" in all_ctx or "[命令]" in all_ctx,
     }))
@@ -554,7 +596,8 @@ asyncio.run(main())
         self.assertTrue(result["no_raw_fence"], "刷新后的显示里不允许出现协议围栏原文")
         self.assertTrue(result["no_media_prompt"], "媒体生成的完整提示词不该出现在显示里")
         self.assertTrue(result["token_gray"], "token 统计行要降级成 system 灰条")
-        self.assertTrue(result["ai_reply_html"], "AI 正文仍走 Markdown->HTML，不受影响")
+        self.assertTrue(result["ai_reply_markdown"], "历史必须保留 Markdown 原文，由网页统一渲染")
+        self.assertTrue(result["display_ids"], "历史必须保留原始记录 ID 和时间")
 
 
 class CliUserEchoTests(ProbeMixin, unittest.TestCase):

@@ -21,9 +21,51 @@
     那类操作，比在几百个 token 之后回忆一串随机字符可靠得多。
 """
 
+import html
 import re
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from xgent_app.text_utils import head_lines
+
+
+def _truncate_to_escaped_budget(s: str, budget: int) -> str:
+    """返回 ``s`` 的最长前缀，使其经 ``html.escape(quote=False)`` 后长度 ≤ budget。
+
+    单行代码本身就超预算时（压缩 JS/CSS、无换行长行）不能按原始字符数截——``<``/``&``
+    转义后各膨胀成 4/5 字符，按原始长度截仍可能让整块超过 Telegram 单条上限、被分段
+    硬切成残缺 HTML。这里按转义后的实际长度逐字符累加，保证前缀塞得进配额。
+    """
+    used = 0
+    for i, ch in enumerate(s):
+        w = len(html.escape(ch, quote=False))
+        if used + w > budget:
+            return s[:i]
+        used += w
+    return s
+
+
+def _elide_middle_to_escaped_budget(s: str, budget: int) -> str:
+    """中段省略 ``s``（保留头尾、中间填 …），使其经 ``html.escape(quote=False)`` 后 ≤ budget。
+
+    用于块头里的 path/命令：它无长度上限（深层嵌套路径、带 query 的长 URL、长命令行），
+    只截尾会把「是哪个文件/命令」这类关键信息丢在两端之一，故保留头尾、省略中段。按
+    **转义后**长度二分——path/命令可能含 ``<`` ``&`` ``"``，转义后膨胀，按原始长度截不安全。
+    """
+    if len(html.escape(s, quote=False)) <= budget:
+        return s
+    ell = "…"
+    lo, hi, best = 0, len(s), ""
+    while lo <= hi:
+        keep = (lo + hi) // 2
+        head_keep = (keep + 1) // 2
+        tail_keep = keep - head_keep
+        cand = s[:head_keep] + ell + (s[-tail_keep:] if tail_keep else "")
+        if len(html.escape(cand, quote=False)) <= budget:
+            best, lo = cand, keep + 1
+        else:
+            hi = keep - 1
+    return best or ell
 
 
 class ProtocolParser:
@@ -44,10 +86,10 @@ class ProtocolParser:
     # 路径里可以有空格，尾部空白由调用方 .strip() 掉。
     _OPEN_RE = re.compile(
         r"^[^\n]*?```(?P<tag>"
-        r"run-x|shell-x|stdin-x:[^\n]+|shellread-x:[^\n]+|shellkill-x:[^\n]+|"
-        r"trigger-x(?::[^\n]+)?|sendfile-x|read-x:[^\n]+|read-x|edit-x(?::[^\n]+)?|grep-x|"
+        r"run-x|shell-x|stdin-x:[^\n]+|shellkill-x:[^\n]+|"
+        r"sendfile-x|read-x|edit-x(?::[^\n]+)?|grep-x|"
         r"search-x|fetch-x|"
-        r"media-x|file-x(?::[^\n]+)?|over-x"
+        r"media-x|file-x(?::[^\n]+)?|ask-x|intel-x|over-x"
         r")\s*$"
     )
 
@@ -61,6 +103,27 @@ class ProtocolParser:
     # 1.0 = 精确匹配；0.9-0.99 = 容错匹配，执行但在结果回灌时给 AI 提示；
     # < 0.9 = 视为不匹配，协议块不执行。
     _SMART_MATCH_THRESHOLD = 0.9
+
+    # 折叠协议块时的一行占位图标/标签（按 _build_block 归一化后的 type 索引）。
+    # 覆盖全部 tag；未知 type 回落到 ("🔧", type)，见 _placeholder_icon_label。
+    _PLACEHOLDER_ICON_LABEL: Dict[str, Tuple[str, str]] = {
+        "run": ("🔧", "run"),
+        "shell": ("🔧", "shell"),
+        "edit": ("📝", "edit"),
+        "file": ("📄", "file"),
+        "file_base64": ("📄", "file"),
+        "read": ("📖", "read"),
+        "grep": ("🔍", "grep"),
+        "search": ("🔍", "search"),
+        "fetch": ("🌐", "fetch"),
+        "media": ("🖼️", "media"),
+        "stdin": ("⌨️", "stdin"),
+        "shellkill": ("⏹️", "shellkill"),
+        "sendfile": ("📎", "sendfile"),
+        "ask": ("❓", "ask"),
+        "intel": ("🧠", "intel"),
+        "over": ("✅", "over"),
+    }
 
     @classmethod
     def _collect_marked_body(
@@ -172,34 +235,10 @@ class ProtocolParser:
                 **common,
             }
 
-        if normalized_tag.startswith("shellread:"):
-            return {
-                "type": "shellread",
-                "path": normalized_tag[10:].strip(),
-                "body": raw_body.strip(),
-                **common,
-            }
-
         if normalized_tag.startswith("shellkill:"):
             return {
                 "type": "shellkill",
                 "path": normalized_tag[10:].strip(),
-                "body": raw_body.strip(),
-                **common,
-            }
-
-        if normalized_tag == "trigger" or normalized_tag.startswith("trigger:"):
-            return {
-                "type": "trigger",
-                "path": normalized_tag[8:].strip() if normalized_tag.startswith("trigger:") else "",
-                "body": raw_body,
-                **common,
-            }
-
-        if normalized_tag.startswith("read:"):
-            return {
-                "type": "read",
-                "path": normalized_tag[5:].strip(),
                 "body": raw_body.strip(),
                 **common,
             }
@@ -347,3 +386,317 @@ class ProtocolParser:
             cleaned.append(line)
             previous_blank = is_blank
         return "\n".join(cleaned)
+
+    @classmethod
+    def _placeholder_icon_label(cls, block_type: str) -> Tuple[str, str]:
+        """按归一化 type 取占位图标与标签；未知 type 回落到 ("🔧", type)。"""
+        return cls._PLACEHOLDER_ICON_LABEL.get(block_type, ("🔧", block_type))
+
+    @classmethod
+    def _format_block_placeholder(cls, block: Dict[str, Any]) -> str:
+        """把一个闭合协议块渲染成一行占位：〔{icon} {label}[ path] · {N} 行已折叠〕。"""
+        icon, label = cls._placeholder_icon_label(block.get("type", ""))
+        path = (block.get("path") or "").strip()
+        head = f"{label} {path}".strip() if path else label
+        body = block.get("body") or ""
+        line_count = 0 if not body else body.count("\n") + 1
+        return f"〔{icon} {head} · {line_count} 行已折叠〕"
+
+    @classmethod
+    def redact_protocol_blocks(cls, ai_response: str, hide_unclosed: bool = False) -> str:
+        """把 AI 回复里的 Agent 协议块折叠成一行占位——只改「显示」，不改执行/存储。
+
+        与 strip_protocol_blocks 共用 _match_open/_collect_marked_body/_build_block
+        的同一套文法，逐块处理：
+
+        - 每个「闭合」协议块（围栏行 → 收尾```）折成一行 _format_block_placeholder。
+        - hide_unclosed=True（仅流式中途用）：结尾若有「已写围栏+BEGIN、还没闭合」
+          的真协议块，折成一行〔{icon} {label} · 生成中…〕并收尾（丢弃未闭合尾巴的
+          原始内容，等定稿再原样显示）。裸围栏（无 BEGIN，_match_open 失败）不算
+          协议块，原样保留。
+        - hide_unclosed=False（定稿默认）：**不折叠未闭合尾巴**——截断/写错/缺 END
+          的块原样完整显示，绝不折成「生成中…」、绝不把整段回复吞成一行。
+        - 普通 ```lang 演示块（不含 -x）不被 _OPEN_RE 识别 → 原样保留。
+        - 有折叠时收尾合并连续空行（照抄 strip_protocol_blocks）；无折叠 / 空输入
+          原样返回。占位行不匹配围栏文法，故 redact(redact(x)) == redact(x)。
+        """
+        if not ai_response:
+            return ai_response
+
+        lines = ai_response.split("\n")
+        n = len(lines)
+        out: List[str] = []
+        changed = False
+        i = 0
+        while i < n:
+            opened = cls._match_open(lines, i)
+            if opened is None:
+                out.append(lines[i])
+                i += 1
+                continue
+            tag, nonce, body_start = opened
+            body_lines, end_i, _smart, _ratio = cls._collect_marked_body(
+                lines, body_start, f"{cls._END_PREFIX}{nonce}", smart_match=True
+            )
+            if end_i is None:
+                # 未闭合块：围栏 + BEGIN 都在，但一直没等到 END + 收尾```。
+                if hide_unclosed:
+                    stub_type = cls._build_block(tag, "", i, i).get("type", "")
+                    icon, label = cls._placeholder_icon_label(stub_type)
+                    out.append(f"〔{icon} {label} · 生成中…〕")
+                    changed = True
+                else:
+                    # 定稿：未闭合尾巴原样完整显示，绝不折叠。
+                    out.extend(lines[i:])
+                break
+            # 闭合块 → 一行占位。
+            block = cls._build_block(tag, "\n".join(body_lines), i, end_i)
+            out.append(cls._format_block_placeholder(block))
+            changed = True
+            i = end_i + 1
+
+        if not changed:
+            return ai_response
+
+        # 合并折叠后产生的连续空行（与 strip_protocol_blocks 收尾一致）。
+        cleaned: List[str] = []
+        previous_blank = False
+        for line in out:
+            is_blank = line.strip() == ""
+            if is_blank and previous_blank:
+                continue
+            cleaned.append(line)
+            previous_blank = is_blank
+        return "\n".join(cleaned)
+
+    # ------------------------------------------------------------------
+    # 真·可展开折叠：把回复切成 [散文|协议块] 序列，块渲染成可展开元素。
+    # 与 strip/redact 共用 _match_open/_collect_marked_body/_build_block 同一文法。
+    # scan_folded_segments 是纯结构解析（无渲染依赖），供 CLI TUI 直接建消息模型；
+    # render_folded_html 在其上产出最终 Telegram-HTML（散文经注入的 prose_renderer，
+    # 协议块→<blockquote expandable>），同一份 HTML 同时喂电报原生折叠与网页折叠。
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def scan_folded_segments(
+        cls,
+        ai_response: str,
+        hide_unclosed: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """把回复切成有序的 [散文段 | 协议块] 段序列（纯结构，不渲染）。
+
+        返回每段是 dict：
+          - 散文：{"kind": "prose", "text": str}
+          - 闭合块：{"kind": "block", "type", "icon", "label", "path",
+                     "body"(完整正文), "line_count", "closed": True, "generating": False}
+          - 未闭合尾块（仅 hide_unclosed=True）：同上但 closed=False, generating=True,
+                     body="" —— 流式中途「生成中…」占位，原始正文从不外泄。
+
+        hide_unclosed=False（定稿）时，未闭合尾巴原样并入 prose（不折叠、防吞），
+        与 redact_protocol_blocks 一致：命中首个未闭合块即停止扫描。
+        """
+        if not ai_response:
+            return []
+        lines = ai_response.split("\n")
+        n = len(lines)
+        segments: List[Dict[str, Any]] = []
+        prose_buf: List[str] = []
+
+        def flush_prose() -> None:
+            if prose_buf:
+                segments.append({"kind": "prose", "text": "\n".join(prose_buf)})
+                prose_buf.clear()
+
+        i = 0
+        while i < n:
+            opened = cls._match_open(lines, i)
+            if opened is None:
+                prose_buf.append(lines[i])
+                i += 1
+                continue
+            tag, nonce, body_start = opened
+            body_lines, end_i, _smart, _ratio = cls._collect_marked_body(
+                lines, body_start, f"{cls._END_PREFIX}{nonce}", smart_match=True
+            )
+            if end_i is None:
+                if hide_unclosed:
+                    flush_prose()
+                    stub_type = cls._build_block(tag, "", i, i).get("type", "")
+                    icon, label = cls._placeholder_icon_label(stub_type)
+                    segments.append({
+                        "kind": "block", "type": stub_type, "icon": icon,
+                        "label": label, "path": "", "body": "",
+                        "line_count": 0, "closed": False, "generating": True,
+                    })
+                else:
+                    prose_buf.extend(lines[i:])
+                    flush_prose()
+                break
+            block = cls._build_block(tag, "\n".join(body_lines), i, end_i)
+            flush_prose()
+            btype = block.get("type", "")
+            icon, label = cls._placeholder_icon_label(btype)
+            body = block.get("body") or ""
+            line_count = 0 if not body else body.count("\n") + 1
+            segments.append({
+                "kind": "block", "type": btype, "icon": icon, "label": label,
+                "path": (block.get("path") or "").strip(), "body": body,
+                "line_count": line_count, "closed": True, "generating": False,
+                "raw": "\n".join(lines[i:end_i + 1]),  # BEGIN..END 完整原文（网页「复制全部」）
+            })
+            i = end_i + 1
+        flush_prose()
+        return segments
+
+    # 单块展开后最多显示的正文行数。① 展开 = 块头 + 前 N 行(+②)；第 N+1 行起
+    # 永不渲染。正文 ≤ N 行时无 ②，展开即整块。spec 固定 50。
+    _FOLD_MAX_LINES = 50
+    # 展开预览的字符预算：前 50 行若超长（如长 CSS/压缩代码行），少显示几行，
+    # 「已折叠 N 行」相应变大——保证单个折叠块在 Telegram 形态下 < 4096，不会被
+    # 分段硬切成残缺 HTML（残块 → 400 → 退回纯文本）。三端同一份预览，显示一致。
+    _FOLD_MAX_CHARS = 3200
+    # 块头（<b>icon name path</b> · N 行）里的 path/命令无长度上限：正文预算保住了正文，
+    # 却保不住块头——长路径/长命令行会把整块 tg 形态顶过 Telegram 单条上限，重蹈「单块被
+    # 分段硬切成残缺 <blockquote>」的覆辙。故块头也设预算，中段省略过长 path。512 + 正文
+    # 3200 + 标签开销 ≈ 3780 < 4000，保证任何单个折叠块必 < 单条上限、永不进硬切兜底。
+    _HEAD_MAX_CHARS = 512
+
+    @classmethod
+    def _render_block_blockquote(
+        cls,
+        seg: Dict[str, Any],
+        max_lines: Optional[int] = None,
+        monospace: bool = True,
+        raw_copy: bool = False,
+    ) -> str:
+        """把一个协议块段渲染成 Telegram-HTML 的 <blockquote expandable>。
+
+        闭合块 → <blockquote expandable>：首行块头 "{icon} {label}[ path] · {N} 行"
+        （N=正文总行数，收起态电报原生预览即这一行），其后 <pre>{escape(前 max_lines 行)}</pre>；
+        正文超过 max_lines 时，末尾追加纯文字标签「已折叠 K 行」(K=总行数−max_lines)，
+        标注第 max_lines+1 行起被折且永不渲染。正文 ≤ max_lines：无标签，展开即整块。
+        未闭合块（generating）→ 不带 expandable 的「⚡ … · 生成中…」，正文为空，
+        绝不外泄在写的原始内容。**只改显示**，落库/执行/镜像永远用完整原文。
+
+        monospace=False（Telegram）：blockquote 内不嵌 <pre>，正文为转义纯文本——
+        Bot API 对 blockquote 里嵌 pre/code 会 400，整条回退成不折叠。
+        raw_copy=True（仅网页）：把 BEGIN..END 完整原文放进 data-raw，供「复制全部」。
+        「已折叠 K 行」包在 <i> 里：它是标注不是正文，各端据此特殊显示。
+        """
+        limit = cls._FOLD_MAX_LINES if max_lines is None else max_lines
+        icon = seg.get("icon") or "🔧"
+        btype = (seg.get("type") or seg.get("label") or "").strip()
+        # 块头显示协议原名（file-x / run-x …），加粗：它是标注不是正文，各端特殊显示
+        name = btype if (not btype or btype.endswith("-x")) else f"{btype}-x"
+        path = (seg.get("path") or "").strip()
+        if path:
+            # path/命令无长度上限：中段省略，使块头有界——否则长路径把整块顶过单条上限、
+            # 被分段硬切成残缺 <blockquote>（正文已限长，块头是唯一漏网的膨胀源）。
+            prefix = f"{icon} {name} "
+            path = _elide_middle_to_escaped_budget(
+                path, max(cls._HEAD_MAX_CHARS - len(html.escape(prefix, quote=False)), 16))
+            head = (prefix + path).strip()
+        else:
+            head = f"{icon} {name}".strip()
+
+        if seg.get("generating"):
+            return f"<blockquote>⚡ <b>{html.escape(head)}</b> · 生成中…</blockquote>"
+
+        body = seg.get("body") or ""
+        line_count = seg.get("line_count", 0)
+        header_line = f"<b>{html.escape(head)}</b> · {line_count} 行"
+        preview, dropped = head_lines(body, limit)
+        escaped_body = html.escape(preview, quote=False)
+        if len(escaped_body) > cls._FOLD_MAX_CHARS:
+            kept: List[str] = []
+            used = 0
+            for ln in preview.split("\n"):
+                # 单行本身就可能超预算（压缩代码/无换行长行）：按【转义后】长度截，
+                # 防止 escape 膨胀后整块超过 Telegram 单条上限 → 被分段硬切成残缺 HTML。
+                esc_len = len(html.escape(ln, quote=False))
+                if esc_len > cls._FOLD_MAX_CHARS:
+                    ln = _truncate_to_escaped_budget(ln, cls._FOLD_MAX_CHARS)
+                    esc_len = len(html.escape(ln, quote=False))
+                cost = esc_len + 1
+                if kept and used + cost > cls._FOLD_MAX_CHARS:
+                    break
+                kept.append(ln)
+                used += cost
+            dropped += preview.count("\n") + 1 - len(kept)
+            preview = "\n".join(kept)
+            escaped_body = html.escape(preview, quote=False)
+        if monospace:
+            inner = f"{header_line}\n<pre>{escaped_body}</pre>"
+        elif escaped_body:
+            inner = f"{header_line}\n{escaped_body}"
+        else:
+            inner = header_line
+        if dropped > 0:
+            inner += f"\n<i>{html.escape(f'已折叠 {dropped} 行')}</i>"
+        attrs = " expandable"
+        if raw_copy and seg.get("raw"):
+            # 换行编成 &#10;：属性保持单行，按行分段的 split_html_for_telegram 不会切进属性
+            attrs += ' data-raw="' + html.escape(seg["raw"], quote=True).replace("\n", "&#10;") + '"'
+        return f"<blockquote{attrs}>{inner}</blockquote>"
+
+    _TG_FOLD_RE = re.compile(r"<blockquote expandable[^>]*>(.*?)</blockquote>", re.S)
+
+    @classmethod
+    def to_telegram_html(cls, html_text: str) -> str:
+        """标准折叠 HTML（网页形态）→ Telegram 可接受形态。幂等。
+
+        全链路只渲染一种标准形态（<blockquote expandable data-raw=…> 内含 <pre>），
+        网页/CLI/历史回放/镜像帧都用它，保证多端与刷新前后显示一致；只有真正打到
+        Telegram Bot API 的那一刻经这里转换：去掉 data-raw、拆掉 blockquote 里的
+        <pre>（Bot API 对 blockquote 嵌 pre/code 报 400 → 整条回退成不折叠）。
+        """
+        if not html_text or "<blockquote expandable" not in html_text:
+            return html_text
+
+        def _one(m: "re.Match[str]") -> str:
+            inner = m.group(1).replace("<pre>", "").replace("</pre>", "")
+            return f"<blockquote expandable>{inner}</blockquote>"
+
+        return cls._TG_FOLD_RE.sub(_one, html_text)
+
+    @classmethod
+    def render_folded_html(
+        cls,
+        ai_response: str,
+        hide_unclosed: bool = False,
+        prose_renderer: Optional[Callable[[str], str]] = None,
+        max_lines: Optional[int] = None,
+        monospace: bool = True,
+        raw_copy: bool = False,
+    ) -> str:
+        """把回复渲染成最终 Telegram-HTML：协议块折成 <blockquote expandable>。
+
+        散文段经 ``prose_renderer``（调用方注入 markdown_to_telegram_html，保持与全局
+        一致的渲染；协议解析器是独立模块、拿不到 section 命名空间里的渲染器，故用注入）；
+        prose_renderer=None 时退化为 html.escape（供无 app 依赖的单元测试）。
+
+        无任何协议块时原样返回输入（上层再按需过 markdown→HTML）。产出的
+        <blockquote>/<pre> 不匹配围栏文法且正文已转义，故 f(f(x)) == f(x)。
+        **只改显示**：不触碰 DB/执行/镜像的原始文本。
+        """
+        if not ai_response:
+            return ai_response
+        segments = cls.scan_folded_segments(ai_response, hide_unclosed=hide_unclosed)
+        if not any(s.get("kind") == "block" for s in segments):
+            return ai_response
+        parts: List[str] = []
+        for seg in segments:
+            if seg.get("kind") == "prose":
+                text = seg.get("text") or ""
+                if not text.strip():
+                    continue
+                if prose_renderer is not None:
+                    rendered = prose_renderer(text)
+                else:
+                    rendered = html.escape(text, quote=False)
+                if rendered and rendered.strip():
+                    parts.append(rendered)
+            else:
+                parts.append(cls._render_block_blockquote(seg, max_lines, monospace, raw_copy))
+        return "\n".join(p for p in parts if p)
+

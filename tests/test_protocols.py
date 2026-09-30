@@ -22,12 +22,12 @@ class ProtocolParserTests(unittest.TestCase):
             "先说明\n"
             f"{protocol_block('run-x', 'echo ok', NONCE_A)}\n"
             "中间文字\n"
-            f"{protocol_block('read-x:/tmp/demo.txt:1-3', '', NONCE_B)}\n"
+            f"{protocol_block('read-x', '/tmp/demo.txt:1-3', NONCE_B)}\n"
         )
         blocks = ProtocolParser.extract_protocol_blocks(response)
         self.assertEqual(["run", "read"], [block["type"] for block in blocks])
         self.assertEqual("echo ok", blocks[0]["body"])
-        self.assertEqual("/tmp/demo.txt:1-3", blocks[1]["path"])
+        self.assertEqual("/tmp/demo.txt:1-3", blocks[1]["body"])
 
     def test_search_and_fetch_blocks_keep_multiline_body(self):
         # 反斜杠不能出现在 f-string 表达式里（Python 3.12 前）。
@@ -168,12 +168,10 @@ class ProtocolParserTests(unittest.TestCase):
             ("run-x", "echo ok", "run", "", "echo ok"),
             ("shell-x", "sleep 1", "shell", "", "sleep 1"),
             ("stdin-x:shell_1", "line: echo ok", "stdin", "shell_1", "line: echo ok"),
-            ("shellread-x:shell_1", "check", "shellread", "shell_1", "check"),
             ("shellkill-x:shell_1", "done", "shellkill", "shell_1", "done"),
-            ("trigger-x:show", "", "trigger", "show", ""),
+            ("intel-x", "callers foo .", "intel", "", "callers foo ."),
             ("sendfile-x", "/tmp/demo.txt", "sendfile", "", "/tmp/demo.txt"),
             ("read-x", "/tmp/demo.txt:1-2", "read", "", "/tmp/demo.txt:1-2"),
-            ("read-x:/tmp/demo.txt:1-2", "", "read", "/tmp/demo.txt:1-2", ""),
             ("edit-x", "edit body", "edit", "", "edit body"),
             ("grep-x", "grep body", "grep", "", "grep body"),
             ("media-x", "draw image", "media", "", "draw image"),
@@ -189,6 +187,27 @@ class ProtocolParserTests(unittest.TestCase):
                 self.assertEqual(expected_type, block["type"])
                 self.assertEqual(expected_path, block["path"])
                 self.assertEqual(expected_body, block["body"])
+
+    def test_shellread_tag_no_longer_executes(self):
+        # shellread-x 已并入 stdin-x（空 body / 只 wait 即纯读）；旧写法不得再执行。
+        response = protocol_block("shellread-x:shell_1", "读取原因", NONCE_A)
+        self.assertEqual([], ProtocolParser.extract_protocol_blocks(response))
+        self.assertEqual(response, ProtocolParser.strip_protocol_blocks(response))
+
+    def test_read_x_fence_line_path_no_longer_executes(self):
+        # read-x 路径统一写正文；围栏行写路径的旧写法不再被识别为协议。
+        response = protocol_block("read-x:/tmp/demo.txt:1-2", "", NONCE_A)
+        self.assertEqual([], ProtocolParser.extract_protocol_blocks(response))
+        self.assertEqual(response, ProtocolParser.strip_protocol_blocks(response))
+
+    def test_read_x_body_path_still_executes(self):
+        # 正文写路径是唯一保留的 read-x 写法，必须照常解析。
+        block = ProtocolParser.extract_protocol_blocks(
+            protocol_block("read-x", "/tmp/demo.txt:1-2", NONCE_A)
+        )[0]
+        self.assertEqual("read", block["type"])
+        self.assertEqual("", block["path"])
+        self.assertEqual("/tmp/demo.txt:1-2", block["body"])
 
     def test_begin_and_end_nonce_must_match(self):
         response = (
@@ -342,7 +361,7 @@ class FenceLineShapeTests(unittest.TestCase):
     def test_tag_parameters_may_contain_spaces(self):
         # 路径带空格是真事；标签参数一路吃到行尾，不能按空白切。
         blocks = ProtocolParser.extract_protocol_blocks(
-            self.block("edit-x:/app/my file.py", "-----OLD-----\na\n-----NEW-----\nb")
+            self.block("edit-x:/app/my file.py", "<<OLD\na\n<<NEW\nb")
         )
         self.assertEqual(1, len(blocks))
         self.assertEqual("/app/my file.py", blocks[0]["path"])
@@ -362,6 +381,285 @@ class FenceLineShapeTests(unittest.TestCase):
         # 标签后面还有别的东西 -> 不是协议围栏行，别猜。
         response = f"```run-x 顺便说一句\n<<BEGIN_{self.NONCE}\necho ok\n<<END_{self.NONCE}\n```"
         self.assertEqual([], ProtocolParser.extract_protocol_blocks(response))
+
+
+class RedactProtocolBlocksTests(unittest.TestCase):
+    def test_single_block_folds_to_one_line(self):
+        response = protocol_block("run-x", "df -h\ndu -sh /var", NONCE_A)
+        out = ProtocolParser.redact_protocol_blocks(response)
+        self.assertEqual(1, len(out.splitlines()))
+        self.assertIn("🔧", out)
+        self.assertIn("run", out)
+        self.assertIn("2 行已折叠", out)
+        self.assertNotIn("df -h", out)
+        self.assertNotIn("<<BEGIN_", out)
+        self.assertNotIn("```", out)
+
+    def test_edit_block_placeholder_includes_path(self):
+        response = protocol_block("edit-x:/etc/app/config.py", "old\nnew", NONCE_A)
+        out = ProtocolParser.redact_protocol_blocks(response)
+        self.assertIn("📝", out)
+        self.assertIn("/etc/app/config.py", out)
+        self.assertNotIn("old", out)
+
+    def test_prose_preserved_blocks_each_one_line(self):
+        response = (
+            "先看磁盘：\n"
+            f"{protocol_block('run-x', 'df -h', NONCE_A)}\n"
+            "再读配置：\n"
+            f"{protocol_block('read-x', '/tmp/a.txt', NONCE_B)}\n"
+            "完成。"
+        )
+        out = ProtocolParser.redact_protocol_blocks(response)
+        self.assertIn("先看磁盘：", out)
+        self.assertIn("再读配置：", out)
+        self.assertIn("完成。", out)
+        self.assertNotIn("df -h", out)
+        self.assertNotIn("/tmp/a.txt", out)
+        self.assertEqual(2, out.count("行已折叠"))
+
+    def test_plain_code_fence_untouched(self):
+        response = "示例：\n```python\nprint('hi')\n```\n讲完了。"
+        self.assertEqual(response, ProtocolParser.redact_protocol_blocks(response))
+
+    def test_hide_unclosed_true_folds_in_progress_tail(self):
+        response = (
+            "开始执行：\n"
+            f"```run-x\n<<BEGIN_{NONCE_A}\nfor i in range(100):\n    print(i)"
+        )
+        out = ProtocolParser.redact_protocol_blocks(response, hide_unclosed=True)
+        self.assertIn("开始执行：", out)
+        self.assertIn("生成中", out)
+        self.assertIn("🔧", out)
+        self.assertNotIn("range(100)", out)
+        self.assertNotIn("<<BEGIN_", out)
+
+    def test_hide_unclosed_false_keeps_truncated_tail_raw(self):
+        # 防「全文折叠」回归：定稿遇未闭合/截断块，原样保留、不折叠。
+        response = (
+            "开始执行：\n"
+            f"```run-x\n<<BEGIN_{NONCE_A}\nfor i in range(100):\n    print(i)"
+        )
+        out = ProtocolParser.redact_protocol_blocks(response, hide_unclosed=False)
+        self.assertEqual(response, out)
+        self.assertNotIn("生成中", out)
+        self.assertNotIn("行已折叠", out)
+
+    def test_hide_unclosed_false_folds_closed_but_keeps_truncated_tail(self):
+        response = (
+            f"{protocol_block('run-x', 'echo done', NONCE_A)}\n"
+            "然后继续：\n"
+            f"```edit-x:/a.py\n<<BEGIN_{NONCE_B}\nprint('unfinished')"
+        )
+        out = ProtocolParser.redact_protocol_blocks(response, hide_unclosed=False)
+        self.assertIn("行已折叠", out)
+        self.assertNotIn("echo done", out)
+        self.assertIn("print('unfinished')", out)
+        self.assertIn("<<BEGIN_", out)
+        self.assertNotIn("生成中", out)
+
+    def test_bare_fence_without_begin_not_folded(self):
+        response = "```run-x\ndf -h\n```"
+        self.assertEqual(response, ProtocolParser.redact_protocol_blocks(response, hide_unclosed=True))
+        self.assertEqual(response, ProtocolParser.redact_protocol_blocks(response, hide_unclosed=False))
+
+    def test_idempotent(self):
+        response = (
+            "文字\n"
+            f"{protocol_block('run-x', 'echo ok', NONCE_A)}\n"
+            f"{protocol_block('shell-x', 'ls -la', NONCE_B)}\n"
+            "尾巴"
+        )
+        once = ProtocolParser.redact_protocol_blocks(response)
+        self.assertEqual(once, ProtocolParser.redact_protocol_blocks(once))
+
+    def test_empty_and_no_block_input_unchanged(self):
+        self.assertEqual("", ProtocolParser.redact_protocol_blocks(""))
+        plain = "就是一段普通文字\n没有任何协议块\n\n结束"
+        self.assertEqual(plain, ProtocolParser.redact_protocol_blocks(plain))
+
+    def test_consecutive_blanks_collapsed_after_fold(self):
+        response = (
+            "上文\n\n"
+            f"{protocol_block('run-x', 'echo ok', NONCE_A)}\n\n\n"
+            "下文"
+        )
+        out = ProtocolParser.redact_protocol_blocks(response)
+        self.assertNotIn("\n\n\n", out)
+        self.assertIn("上文", out)
+        self.assertIn("下文", out)
+
+
+class RenderFoldedTests(unittest.TestCase):
+    """render_folded_html：把协议块折成「真·可展开」的 <blockquote expandable>。
+
+    与旧的 redact_protocol_blocks（一行死占位、代码全藏）不同：这里代码**是可见的**
+    （放在可展开的 <pre> 里），用户能点开看全。测试守住的是：
+      - 折成合法的 Telegram-HTML（<blockquote expandable> + 转义过的 <pre>）；
+      - 协议标记 / 围栏 / nonce 绝不泄漏到显示层；
+      - 散文经注入的 prose_renderer（生产里是 markdown_to_telegram_html）；
+      - 未闭合尾巴的两种语义（流式=生成中占位、定稿=原样不折，防吞）；
+      - 幂等、空输入/无块原样；正文按「前 50 行 + 已折叠 N 行」封顶，第 51 行永不外泄。
+    """
+
+    def test_single_block_becomes_expandable_blockquote(self):
+        response = protocol_block("run-x", "df -h\ndu -sh /var", NONCE_A)
+        out = ProtocolParser.render_folded_html(response)
+        self.assertIn("<blockquote expandable>", out)
+        self.assertIn("</blockquote>", out)
+        self.assertIn("<pre>", out)
+        self.assertIn("🔧", out)
+        self.assertIn("run", out)
+        self.assertIn("· 2 行", out)          # 行数进 header
+        self.assertIn("df -h", out)            # 代码可见（可展开），不再一行都看不到
+        self.assertIn("du -sh /var", out)
+        self.assertNotIn("<<BEGIN_", out)      # 协议标记不外泄
+        self.assertNotIn(NONCE_A, out)
+        self.assertNotIn("```", out)
+
+    def test_telegram_mode_has_no_pre_inside_blockquote(self):
+        # Bot API 对 blockquote 内嵌 <pre>/<code> 会 400 → 整条回退不折叠。
+        body = "\n".join(f"line {i} <x>" for i in range(1, 61))
+        response = protocol_block("run-x", body, NONCE_A)
+        out = ProtocolParser.render_folded_html(response, monospace=False)
+        self.assertIn("<blockquote expandable>", out)
+        self.assertNotIn("<pre>", out)
+        self.assertNotIn("<code>", out)
+        self.assertIn("line 50 &lt;x&gt;", out)
+        self.assertNotIn("line 51 ", out)
+        self.assertTrue(out.endswith("<i>已折叠 10 行</i></blockquote>"))
+
+    def test_telegram_mode_short_block_has_no_folded_label(self):
+        response = protocol_block("run-x", "a\nb", NONCE_A)
+        out = ProtocolParser.render_folded_html(response, monospace=False)
+        self.assertIn("a\nb</blockquote>", out)
+        self.assertNotIn("已折叠", out)
+
+    def test_block_body_is_html_escaped(self):
+        # 正文里的 < & > 必须转义，否则 Telegram 报 "Unclosed start tag"（真机踩过）。
+        response = protocol_block("run-x", "echo '<a> & <b>'", NONCE_A)
+        out = ProtocolParser.render_folded_html(response)
+        self.assertIn("&lt;a&gt; &amp; &lt;b&gt;", out)
+        self.assertNotIn("<a>", out)
+
+    def test_edit_block_header_includes_path(self):
+        response = protocol_block("edit-x:/etc/app/config.py", "old\nnew", NONCE_A)
+        out = ProtocolParser.render_folded_html(response)
+        self.assertIn("📝", out)
+        self.assertIn("/etc/app/config.py", out)
+        self.assertIn("<blockquote expandable>", out)
+        self.assertIn("old", out)              # 正文可见
+
+    def test_prose_and_multiple_blocks_interleave(self):
+        response = (
+            "先看磁盘：\n"
+            f"{protocol_block('run-x', 'df -h', NONCE_A)}\n"
+            "再读配置：\n"
+            f"{protocol_block('read-x', '/tmp/a.txt', NONCE_B)}\n"
+            "完成。"
+        )
+        # 注入一个可辨认的散文渲染器，模拟 markdown_to_telegram_html。
+        out = ProtocolParser.render_folded_html(
+            response, prose_renderer=lambda t: "<p>" + t + "</p>")
+        self.assertEqual(2, out.count("<blockquote expandable>"))
+        self.assertIn("<p>先看磁盘：</p>", out)
+        self.assertIn("<p>再读配置：</p>", out)
+        self.assertIn("<p>完成。</p>", out)
+
+    def test_plain_code_fence_not_folded(self):
+        response = "示例：\n```python\nprint('hi')\n```\n讲完了。"
+        self.assertEqual(response, ProtocolParser.render_folded_html(response))
+
+    def test_bare_fence_without_begin_not_folded(self):
+        response = "```run-x\ndf -h\n```"
+        self.assertEqual(response, ProtocolParser.render_folded_html(response, hide_unclosed=True))
+        self.assertEqual(response, ProtocolParser.render_folded_html(response, hide_unclosed=False))
+
+    def test_hide_unclosed_true_tail_is_generating_not_expandable(self):
+        response = (
+            "开始执行：\n"
+            f"```run-x\n<<BEGIN_{NONCE_A}\nfor i in range(100):\n    print(i)"
+        )
+        out = ProtocolParser.render_folded_html(response, hide_unclosed=True)
+        self.assertIn("生成中", out)
+        self.assertIn("<blockquote>", out)
+        self.assertNotIn("<blockquote expandable>", out)   # 生成中不带 expandable
+        self.assertNotIn("range(100)", out)                # 未闭合正文绝不外泄
+        self.assertNotIn("<<BEGIN_", out)
+
+    def test_hide_unclosed_false_tail_kept_raw(self):
+        # 防「全文折没」：定稿遇未闭合块 → 无 block 段 → 原样返回（identity）。
+        response = (
+            "开始执行：\n"
+            f"```run-x\n<<BEGIN_{NONCE_A}\nfor i in range(100):\n    print(i)"
+        )
+        out = ProtocolParser.render_folded_html(response, hide_unclosed=False)
+        self.assertEqual(response, out)
+
+    def test_hide_unclosed_false_folds_closed_keeps_open_tail_raw(self):
+        response = (
+            f"{protocol_block('run-x', 'echo done', NONCE_A)}\n"
+            "然后继续：\n"
+            f"```edit-x:/a.py\n<<BEGIN_{NONCE_B}\nprint('unfinished')"
+        )
+        out = ProtocolParser.render_folded_html(
+            response, hide_unclosed=False, prose_renderer=lambda t: t)
+        self.assertIn("<blockquote expandable>", out)   # 闭合块照折
+        self.assertIn("echo done", out)                 # 闭合块代码可见
+        self.assertIn("print('unfinished')", out)       # 未闭合尾巴原样
+        self.assertNotIn("生成中", out)
+
+    def test_idempotent(self):
+        response = (
+            "文字\n"
+            f"{protocol_block('run-x', 'echo ok', NONCE_A)}\n"
+            f"{protocol_block('shell-x', 'ls -la', NONCE_B)}\n"
+            "尾巴"
+        )
+        once = ProtocolParser.render_folded_html(response, prose_renderer=lambda t: t)
+        twice = ProtocolParser.render_folded_html(once, prose_renderer=lambda t: t)
+        self.assertEqual(once, twice)
+
+    def test_empty_and_no_block_input_unchanged(self):
+        self.assertEqual("", ProtocolParser.render_folded_html(""))
+        plain = "就是一段普通文字\n没有任何协议块\n\n结束"
+        self.assertEqual(plain, ProtocolParser.render_folded_html(plain))
+
+    def test_body_over_50_lines_capped_with_fold_label(self):
+        # spec ②：正文 > 50 行 → 只显示前 50 行 + 一行「已折叠 N 行」(N=总行数−50)，
+        # 第 51 行起永不渲染。
+        body = "\n".join(f"line{i}" for i in range(1, 61))   # 60 行
+        response = protocol_block("read-x", body, NONCE_A)
+        out = ProtocolParser.render_folded_html(response)
+        self.assertIn("<blockquote expandable>", out)
+        self.assertIn("· 60 行", out)          # header 标总行数
+        self.assertIn("已折叠 10 行", out)      # ② 标签：60 − 50
+        self.assertIn("line50", out)            # 第 50 行仍在
+        self.assertNotIn("line51", out)         # 第 51 行起永不外泄
+        self.assertNotIn("line60", out)
+
+    def test_body_at_50_lines_no_fold_label(self):
+        body = "\n".join(f"L{i}" for i in range(1, 51))      # 正好 50 行
+        response = protocol_block("read-x", body, NONCE_A)
+        out = ProtocolParser.render_folded_html(response)
+        self.assertIn("<blockquote expandable>", out)
+        self.assertNotIn("已折叠", out)         # ≤50 行：无 ②
+        self.assertIn("L50", out)               # 整块可见
+
+    def test_body_under_50_full_no_label(self):
+        response = protocol_block("run-x", "a\nb\nc", NONCE_A)
+        out = ProtocolParser.render_folded_html(response)
+        self.assertNotIn("已折叠", out)
+        for ln in ("a", "b", "c"):
+            self.assertIn(ln, out)
+
+    def test_max_lines_override_caps_preview(self):
+        body = "\n".join(f"row{i}" for i in range(1, 11))     # 10 行
+        response = protocol_block("run-x", body, NONCE_A)
+        out = ProtocolParser.render_folded_html(response, max_lines=3)
+        self.assertIn("row3", out)
+        self.assertNotIn("row4", out)
+        self.assertIn("已折叠 7 行", out)        # 10 − 3
 
 
 if __name__ == "__main__":
