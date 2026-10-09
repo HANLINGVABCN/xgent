@@ -69,10 +69,13 @@ _RECORDER_SOURCE_ID = f"pid{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 
 def current_ui_workflow_guard() -> str:
-    state = {key: value for key, value in UserDataManager._data.items()
+    from xgent_app.interaction import selection_key
+    state = {key: value for key, value in UserDataManager.ui_data().items()
              if key == 'state' or key.startswith(('temp_', 'editing_')) or key.endswith('_buffer')}
     digest = hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode('utf-8')).hexdigest()
-    return f'{UI_PROCESS_ID}:{UserDataManager._ui_state_revision}:{digest}'
+    revision = (UserDataManager._telegram_ui_revision if selection_key() == 'telegram_conversation_id'
+                else UserDataManager._ui_state_revision)
+    return f'{UI_PROCESS_ID}:{revision}:{digest}'
 
 
 def validate_saved_menu_action(action: str) -> None:
@@ -140,12 +143,12 @@ class GlobalRecorder:
                 msg_type=msg_type,
                 role=role,
                 content=content,
-                session_id=session_id or UserDataManager.get('current_chat_id'),
+                session_id=session_id or current_scope().conversation_id,
                 metadata=stamped_metadata,
                 **({'stop_event': stop_event} if stop_event is not None else {}),
             )
         except Exception as e:
-            if isinstance(e, UiHistoryError):
+            if isinstance(e, (UiHistoryError, ConversationError)):
                 raise
             if 'compression_job_id' in stamped_metadata:
                 raise CompressionError(f"恢复回复写入失败：{e}") from e
@@ -170,7 +173,7 @@ class GlobalRecorder:
                 "role": role,
                 "chat_id": chat_id or BotConfig.AUTHORIZED_USER_ID,
                 "user_id": user_id or 0,
-                "session_id": session_id or UserDataManager.get('current_chat_id'),
+                "session_id": session_id or current_scope().conversation_id,
                 "content": content,
                 "metadata": metadata,
             })
@@ -197,6 +200,8 @@ class GlobalRecorder:
             text = '⚠️ ' + text
         metadata = {**(display_metadata or {}), 'error_source': source, 'error_type': type(error).__name__ if isinstance(error, BaseException) else 'reported_error',
                     'display': {'content': '<pre>' + html.escape(text) + '</pre>', 'parse_mode': 'HTML'}}
+        if source in {'web_menu', 'workbench'}:
+            metadata['ui_only'] = True
         if context and context[0] == chat_id:
             metadata['ui_generation'] = context[1]
         try:
@@ -912,8 +917,9 @@ async def sync_chat_session_model(model_name: Optional[str]) -> None:
     UPDATE 对不存在的会话行是 no-op，早于首次对话调用也安全。
     """
     db = await BotMemoryDB.get_instance()
-    cid = UserDataManager.get('current_chat_id') or SINGLE_MEMORY_SESSION_ID
-    await db.update_session(cid, model=model_name)
+    # Global model selection; the legacy session.model column is not an override.
+    async with db._write() as conn:
+        await conn.execute('UPDATE chat_sessions SET model=NULL')
 
 
 def resolve_effective_chat_model(
@@ -1191,12 +1197,16 @@ def get_skill_state(path: str) -> str:
 
 
 async def save_skill_state(path: str, state: str) -> None:
-    if path not in list_skill_files():
-        raise ValueError('技能文件已不存在，请重新打开技能菜单。')
+    from xgent_app.knowledge import document_operation
     db = await BotMemoryDB.get_instance()
-    values = await db.set_skill_state(path, state)
-    for key, items in values.items():
-        UserDataManager.set(key, items)
+    async with document_operation(db.db_path):
+        if path not in list_skill_files():
+            raise ValueError('技能文件已不存在，请重新打开技能菜单。')
+        values = await db.set_skill_state(path, state)
+        for key, items in values.items():
+            UserDataManager.set(key, items)
+    if '_sync_knowledge_state' in globals():
+        await _sync_knowledge_state(db, force=True)
 
 def build_absolute_path_prompt_section() -> str:
     project_root = to_display_path(os.path.dirname(os.path.abspath(__file__)))
@@ -2119,7 +2129,7 @@ def get_current_provider() -> Tuple[Optional[str], Optional[Dict]]:
 
 async def get_or_create_chat_session() -> Tuple[str, Dict]:
     db = await BotMemoryDB.get_instance()
-    cid = SINGLE_MEMORY_SESSION_ID
+    cid = current_scope().conversation_id
     session = await db.get_session(cid)
 
     if not session:
@@ -2127,13 +2137,10 @@ async def get_or_create_chat_session() -> Tuple[str, Dict]:
         await db.update_session(cid, name=SINGLE_MEMORY_SESSION_NAME)
         session = await db.get_session(cid)
 
-    UserDataManager.set('current_chat_id', cid)
-    await UserDataManager.save_config('current_chat_id', cid)
-
     messages = await db.get_chat_messages(cid)
     return cid, {
         'name': session['name'] if session else SINGLE_MEMORY_SESSION_NAME,
-        'model': (session['model'] if session else None) or UserDataManager.get('default_model'),
+        'model': UserDataManager.get('default_model'),
         'last_active': session['last_active'] if session else time.time(),
         'history': messages
     }
@@ -2164,3 +2171,174 @@ def short_hash(s: str) -> str:
     return hashlib.md5(s.encode()).hexdigest()[:8]
 
 # --- ☆ Callback Data 管理（解决64字节限制）☆ ---
+
+
+async def _conversation_state_changed(state):
+    terminal = get_conversations().terminal_enabled
+    choices = (('terminal_conversation_id', 'terminal'),) if terminal else (('current_chat_id', 'shared'), ('telegram_conversation_id', 'telegram'))
+    for key, side in choices:
+        previous = UserDataManager.get(key)
+        selected = state.get(key)
+        UserDataManager.set(key, selected)
+        if previous != selected:
+            UserDataManager.clear_ui_state(side)
+    db = await BotMemoryDB.get_instance()
+    frame = {'type': 'conversation_state', **state, 'items': await db.get_all_sessions()}
+    outbox = get_web_outbox() if 'get_web_outbox' in globals() else None
+    outbox = outbox or globals().get('_web_external_outbox')
+    if outbox is not None:
+        outbox.put(frame)
+    notifier = globals().get('_cli_conversation_notifier')
+    if notifier is not None:
+        notifier(frame)
+
+
+configure_conversations(lambda: BotMemoryDB.get_instance(), BotConfig.DB_FILE, _conversation_state_changed)
+configure_callback_encoder(lambda value: CallbackDataStore.store(value), lambda value: CallbackDataStore.get(value))
+
+
+async def clear_current_conversation():
+    # Stopping can cancel the model task that happens to be awaiting this clear.
+    # Complete the atomic invalidation/cleanup before propagating cancellation.
+    task = asyncio.create_task(_clear_current_conversation_inner())
+    try:
+        counts = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+        raise
+    from xgent_app.conversations import advance_generation
+    db = await BotMemoryDB.get_instance()
+    advance_generation(await db.get_attachment_generation())
+    await advance_ui_generation()
+    return counts
+
+
+async def _clear_current_conversation_inner():
+    manager = get_conversations()
+    scope = current_scope()
+    state = await manager.state()
+    running = state.get('running')
+    if running and running['conversation_id'] == scope.conversation_id:
+        # Stop is requested before the atomic generation change. Do not wait on
+        # a blocked upload/network read (or on our own task): stale writes are
+        # rejected by the version guard and the execution slot remains occupied
+        # until the old task really exits.
+        await manager.request_stop(running['run_id'], scope.conversation_id)
+    db = await BotMemoryDB.get_instance()
+    old_generation = await db.get_attachment_generation()
+    counts = await db.clear_all_conversation_memory()
+    SECRET_STORE.purge(scope.conversation_id)
+    PENDING_ASKS.purge_generation(old_generation)
+    cancel_pending_album_conversations()
+    with _pending_text_conversations_lock:
+        for key, pending in list(_pending_text_conversations.items()):
+            if (pending.conversation_context or {}).get('conversation_id') == scope.conversation_id:
+                _pending_text_conversations.pop(key, None)
+    await advance_ui_generation()
+    return counts
+
+
+from xgent_app.conversations import conversation_operation, stamp_frame
+
+_conversation_delete_tasks = {}
+
+async def _finish_conversation_deletion(cid):
+    manager = get_conversations()
+    db = await BotMemoryDB.get_instance()
+    # Only the scheduler owner can confirm that remote command processes stopped.
+    from xgent_app.conversations import ExecutionFileLock
+    if SelfTriggerManager._scheduler is None and ExecutionFileLock(str(db.db_path) + '.scheduler').busy():
+        return
+    for task in await db.list_trigger_tasks(active_only=False):
+        if task['conversation_id'] == cid:
+            await SelfTriggerManager.cancel(task['id'])
+    while True:
+        running = (await manager.state()).get('running')
+        if not running or running['conversation_id'] != cid:
+            break
+        await manager.request_stop(running['run_id'], cid)
+        await asyncio.sleep(.1)
+    SECRET_STORE.purge(cid)
+    PENDING_ASKS.purge_conversation(cid)
+    with _pending_text_conversations_lock:
+        for key, pending in list(_pending_text_conversations.items()):
+            if (pending.conversation_context or {}).get('conversation_id') == cid:
+                _pending_text_conversations.pop(key, None)
+    with _pending_album_conversations_lock:
+        for key, pending in list(_pending_album_conversations.items()):
+            if (pending.conversation_context or {}).get('conversation_id') == cid:
+                pending.closed = True
+                if pending.flush_task is not None:
+                    pending.flush_task.cancel()
+                _pending_album_conversations.pop(key, None)
+    await db.finish_conversation_delete(cid)
+    from xgent_app.web_bridge import MEDIA_TOKEN_REGISTRY
+    MEDIA_TOKEN_REGISTRY.purge_conversation(cid)
+    frame = {'type': 'conversation_deleted', 'conversation_id': cid}
+    for outbox in dict.fromkeys((get_web_outbox(), globals().get('_web_external_outbox'))):
+        if outbox is not None:
+            outbox.put(frame)
+    await manager.poll_once()
+
+async def _conversation_maintenance():
+    db = await BotMemoryDB.get_instance()
+    if '_sync_web_appearance' in globals():
+        await _sync_web_appearance(db)
+    await _sync_knowledge_state(db)
+    for cid in await db.pending_conversation_deletions():
+        previous = _conversation_delete_tasks.get(cid)
+        if previous is not None and not previous.done():
+            continue
+        task = asyncio.create_task(_finish_conversation_deletion(cid), name='delete-conversation:' + cid)
+        _conversation_delete_tasks[cid] = task
+        get_conversations().track_background(task)
+        def report(done, target=cid):
+            if _conversation_delete_tasks.get(target) is done:
+                _conversation_delete_tasks.pop(target, None)
+            if not done.cancelled() and done.exception():
+                logger.error('会话删除待重试: %s', done.exception())
+        task.add_done_callback(report)
+
+async def delete_conversation(cid):
+    db = await BotMemoryDB.get_instance()
+    await db.begin_conversation_delete(cid)
+    await _conversation_maintenance()
+    await get_conversations().poll_once()
+    task = _conversation_delete_tasks.get(cid)
+    if task is not None:
+        await asyncio.wait({task}, timeout=1)
+    return {'ok': True, 'deleting': await db.get_session(cid) is not None}
+
+async def reset_conversation_context(cid):
+    async with conversation_operation(cid, fresh=True, allow_archived=True):
+        result = await clear_current_conversation()
+        for outbox in dict.fromkeys((get_web_outbox(), globals().get('_web_external_outbox'))):
+            if outbox is not None:
+                outbox.put(stamp_frame({'type': 'context_reset'}))
+    await get_conversations().poll_once()
+    return result
+
+get_conversations().maintenance = _conversation_maintenance
+
+
+_knowledge_seen_revision = None
+
+async def _sync_knowledge_state(db, force=False):
+    global _knowledge_seen_revision
+    from xgent_app.knowledge import read_knowledge_state
+    snapshot = await read_knowledge_state(db)
+    revision = snapshot['revision']
+    if not force and revision == _knowledge_seen_revision:
+        return
+    _knowledge_seen_revision = revision
+    for key in ('disabled_skills','hidden_skills'):
+        UserDataManager.set(key, snapshot[key])
+    frame = {'type':'knowledge_state', 'revision':revision}
+    for outbox in dict.fromkeys((get_web_outbox(),globals().get('_web_external_outbox'))):
+        if outbox is not None:
+            outbox.put(frame)

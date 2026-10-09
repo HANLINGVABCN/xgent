@@ -50,7 +50,7 @@ def browser_context(workspace_url):
 
 def ready(page,url,route='chat'):
     page.goto(url+'/#/'+route)
-    if route=='chat':page.locator('#wb-chat-controls select').first.wait_for()
+    if route=='chat':page.locator('#wb-chat-controls select').first.wait_for(state='attached')
     else:page.locator('#wb-page .wb-page-head').wait_for()
 
 
@@ -105,7 +105,7 @@ def test_history_is_paged_search_locates_unloaded_messages_and_draft_survives(br
     assert page.locator('#input').input_value()=='跨页保留的输入草稿'
     for _ in range(5):
         with page.expect_response('**/api/workbench/history?limit=50&before=*'):
-            page.locator('#wb-earlier').click()
+            page.locator('#log').evaluate('(e)=>e.scrollTop=0');page.locator('#wb-earlier').click()
         page.wait_for_timeout(80)
     assert page.locator('#log>.msg-row').count()<=200
     before=page.locator('#log').inner_text()
@@ -113,8 +113,8 @@ def test_history_is_paged_search_locates_unloaded_messages_and_draft_survives(br
         page.locator('#wb-newer').click()
     page.wait_for_timeout(100)
     assert page.locator('#log').inner_text()!=before
-    page.locator('#btn-search').click()
-    page.get_by_placeholder('搜索全部共享历史…').fill('历史记录 1234：')
+    page.locator('#chat-options-toggle').click();page.locator('#btn-search').click()
+    page.get_by_placeholder('搜索当前会话历史…').fill('历史记录 1234：')
     page.locator('#wb-dialog .wb-command-result').first.wait_for()
     page.locator('#wb-dialog .wb-command-result').first.click()
     page.wait_for_function('document.querySelector("#log").textContent.includes("历史记录 1234：")')

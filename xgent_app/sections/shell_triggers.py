@@ -372,7 +372,8 @@ class AgentShellSession:
         self.pty_enabled = os.name != 'nt'
 
     def start(self):
-        env = {**os.environ, 'LANG': 'en_US.UTF-8', 'TERM': os.environ.get('TERM') or 'xterm-256color'}
+        from xgent_app.conversations import conversation_secret_environment
+        env = {**os.environ, **conversation_secret_environment(), 'LANG': 'en_US.UTF-8', 'TERM': os.environ.get('TERM') or 'xterm-256color'}
         if self.pty_enabled:
             import pty
 
@@ -1710,6 +1711,7 @@ class SelfTriggerManager:
             'updated_at': now,
         }
         db = await BotMemoryDB.get_instance()
+        await get_conversations().resolve(conversation_id, allow_archived=True)
         await db.create_trigger_task(task)
 
         # 归属判断：只有持有自持调度器的进程（服务端：PTB / 纯 Web）才激活
@@ -1796,6 +1798,7 @@ class SelfTriggerManager:
             'updated_at': now,
         }
         db = await BotMemoryDB.get_instance()
+        await get_conversations().resolve(conversation_id, allow_archived=True)
         await db.create_trigger_task(task_row)
 
         schedule_text = cls._format_schedule(task_row)
@@ -1821,7 +1824,7 @@ class SelfTriggerManager:
         """取消一个触发任务。"""
         db = await BotMemoryDB.get_instance()
         task = await db.get_trigger_task(task_id)
-        if task is None or task['status'] in {'completed', 'cancelled', 'failed'}:
+        if task is None:
             return f"❌ 未找到活跃的触发任务: {task_id}"
         await db.cancel_trigger_tasks(task_id)
         cls._remove_scheduler_job(task_id)
@@ -1878,6 +1881,9 @@ class SelfTriggerManager:
         cls._processes.clear()
         cls._delivery_run_ids.clear()
         cls._delivery_tasks_by_task.clear()
+        owner = getattr(cls, '_owner_lock', None)
+        if owner is not None:
+            owner.release()
 
     @classmethod
     async def format_active_tasks(cls) -> str:
@@ -1963,6 +1969,11 @@ class SelfTriggerManager:
         if cls._started and not cls._stopping:
             if application is not None:
                 cls._application = application
+            return
+        from xgent_app.conversations import ExecutionFileLock
+        db = await BotMemoryDB.get_instance()
+        cls._owner_lock = ExecutionFileLock(str(db.db_path) + '.scheduler')
+        if not cls._owner_lock.acquire():
             return
         cls._application = application
         cls._stopping = False
@@ -2469,7 +2480,8 @@ class SelfTriggerManager:
         process = await asyncio.create_subprocess_shell(
             command,
             cwd=AgentExecutor.WORK_DIR,
-            env={**os.environ, 'LANG': 'en_US.UTF-8'},
+            env={**os.environ, **SECRET_STORE.environment(task['conversation_id']), 'LANG': 'en_US.UTF-8',
+                 'XGENT_CHAT_ID': str(task['chat_id']), 'XGENT_CONVERSATION_ID': str(task['conversation_id'])},
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -2556,6 +2568,26 @@ class SelfTriggerManager:
 
     @classmethod
     async def _deliver_run(cls, run_id: str):
+        db = await BotMemoryDB.get_instance()
+        run = await db.get_trigger_run(run_id)
+        if run is None:
+            return
+        task = await db.get_trigger_task(run['task_id'])
+        if task is None:
+            return
+        if task['status'] == 'cancelled':
+            return
+        try:
+            from xgent_app.interaction import interaction
+            with interaction('task', 'notification'):
+                async with conversation_operation(task['conversation_id'], execution=True, wait=True,
+                                                  allow_archived=True, fresh=True):
+                    await cls._deliver_run_inner(run_id)
+        except ConversationError:
+            return  # Deleted conversations must never wake or retarget a task.
+
+    @classmethod
+    async def _deliver_run_inner(cls, run_id: str):
         db = await BotMemoryDB.get_instance()
         run = await db.get_trigger_run(run_id)
         if run is None or run.get('delivered_at') is not None or run.get('finished_at') is None:

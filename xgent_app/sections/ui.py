@@ -24,7 +24,13 @@ class CallbackDataStore:
     @classmethod
     def get(cls, short_id: str) -> str:
         """获取原始数据"""
-        return cls._store.get(short_id, short_id)
+        value = short_id
+        for _ in range(8):
+            resolved = decode_conversation_callback(cls._store.get(value, value))
+            if resolved == value:
+                return resolved
+            value = resolved
+        raise ConversationError('按钮关联无效，请重新打开菜单。')
 
 # --- ☆ UI 构建 ☆ ---
 def build_magic_keyboard(items: List[str], page: int, callback_prefix: str, back_callback: str,
@@ -328,7 +334,7 @@ def get_more_settings_menu():
         [InlineKeyboardButton(f"🌊 流式:{stream_style_label}", callback_data="toggle_stream_style"),
          InlineKeyboardButton("🚫 Agent黑名单", callback_data="menu_command_blacklist")],
         [InlineKeyboardButton("🔐 凭据" + _credentials_badge(), callback_data="menu_credentials"),
-         InlineKeyboardButton("🧹 清空上下文", callback_data="cmd_delete")],
+         InlineKeyboardButton("🧹 重置上下文", callback_data="cmd_delete")],
         [InlineKeyboardButton(f"🔇 静默未授权:{'🟢 开' if normalize_bool(UserDataManager.get('silent_unauthorized', False), False) else '🔴 关'}", callback_data="toggle_silent_unauthorized")],
         [InlineKeyboardButton(f"📎 工具结果留存:{'🟢 开' if normalize_bool(UserDataManager.get('readx_persist_context', False), False) else '🔴 关'}", callback_data="toggle_readx_persist_context")],
         [InlineKeyboardButton(f"🗂 折叠代码块:{'🟢 开' if normalize_bool(UserDataManager.get('hide_protocol_blocks', True), True) else '🔴 关'}", callback_data="toggle_hide_protocol_blocks")],

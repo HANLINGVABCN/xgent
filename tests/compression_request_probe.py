@@ -126,13 +126,13 @@ async def clear_chain(bot, root):
         old_id = (await h.db.get_display_history(0))[0]['id']
         await bot.cmd_delete_chat(h.update, h.context)
         assert not await h.db.get_latest_compression()
-        assert await h.db.get_display_message(old_id) is None
+        assert await h.db.get_display_message(old_id) is not None  # History survives reset.
         assert Path(old['archive_path']).is_file()
         await h.retry(old['job_id'])
         assert not await h.db.get_latest_compression()
         await bot.GlobalRecorder.record_user_message('NEW-CHAIN')
         await h.compress(summary='NEW-CHAIN-SUMMARY')
-        assert (await h.db.get_latest_compression())['sequence'] == 1
+        assert (await h.db.get_latest_compression())['sequence'] == old['sequence'] + 1
         return {'clear_resets_chain_without_deleting_files': True}
 
 
@@ -198,9 +198,13 @@ async def export_equivalence(bot, root):
             await h.compress()
         assert len(bundles) == 2
         with zipfile.ZipFile(bundles[0]['archive_path']) as left, zipfile.ZipFile(bundles[1]['archive_path']) as right:
-            assert left.namelist() == right.namelist()
-            assert all(left.read(name) == right.read(name) for name in left.namelist())
-        return {'one_exporter_identical_files': True}
+            # Ordinary exports have sortable stages; model snapshots keep their
+            # old a/b/c paths. With no reset, corresponding payloads are identical.
+            assert '上下文范围.txt' in left.namelist()
+            for name in right.namelist():
+                normal = ('001-当前-00' + name) if name.startswith(('1a','1b')) else name
+                assert left.read(normal) == right.read(name), name
+        return {'ordinary_payloads_match_frozen_snapshot': True}
 
 
 async def legacy_saved(bot, root):
@@ -218,7 +222,7 @@ async def legacy_saved(bot, root):
                                      'timestamp': 1, 'content': 'LEGACY-ORIGINAL-END'}],
                  'attachments': [], 'mirror_records': [], 'sessions': []}
         async with h.db._transaction() as conn:
-            await conn.execute('INSERT INTO context_compressions (sequence, payload) VALUES (?, ?)',
+            await conn.execute("INSERT INTO context_compressions (session_id, sequence, payload) VALUES ('global_memory', ?, ?)",
                                (1, json.dumps(entry)))
         await bot.GlobalRecorder.record_user_message('LEGACY-ACTIVE-CONVERSATION')
         return {'legacy_seed_saved': True}

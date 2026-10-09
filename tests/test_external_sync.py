@@ -31,8 +31,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 PROBE_PREAMBLE = """
-import json, sys
+import json, sys, os
 sys.path.insert(0, %r)
+def _fail_fast(kind, value, tb):
+    sys.__excepthook__(kind, value, tb)
+    sys.stderr.flush()
+    os._exit(1)
+sys.excepthook = _fail_fast
 """ % str(ROOT)
 
 
@@ -70,6 +75,9 @@ class SectionsProbeMixin(ProbeMixin):
 from xgent_app.bootstrap import load_sections
 ns = {"__file__": "xgent_server.py"}
 load_sections(ns)
+from xgent_app.conversations import ConversationScope, bind_conversation
+_default_scope_guard = bind_conversation(ConversationScope('global_memory', 0))
+_default_scope_guard.__enter__()
 """
 
 
@@ -187,10 +195,11 @@ async def main():
     sends = [c for c in calls if c[0] == "send"]
     edits = [c for c in calls if c[0] == "edit"]
     deletes = [c for c in calls if c[0] == "delete"]
+    # Same-conversation Telegram output is plain; relayed bodies stay exact.
     placeholder = [c for c in sends if c[1] == "流式输出中..."]
     print(json.dumps({
         "user_echo_once": sum(1 for c in sends if "帮我看下这个 bug" in c[1]) == 1,
-        "user_echo_marked": any(c[1].startswith("🖥 [CLI]") for c in sends),
+        "user_echo_marked": any(c[1] == "🖥 [CLI]" + chr(10) + "帮我看下这个 bug" for c in sends),
         "only_user_marked": sum(1 for c in sends if "[CLI]" in c[1]) == 1,
         "placeholder_verbatim": len(placeholder) == 1,
         "placeholder_has_stop_button": bool(placeholder) and placeholder[0][2] != [],
@@ -209,9 +218,9 @@ asyncio.run(main())
         self.assertTrue(result["user_echo_once"], "用户消息必须恰好同步一次")
         self.assertTrue(result["user_echo_marked"], "用户自己的话要带 🖥 [CLI] 来源标识")
         self.assertTrue(result["only_user_marked"],
-                        "**只有**用户消息带来源标识——其余任何一条都不该被加标记或改写")
+                        "只有用户消息带 CLI 来源标识；会话标签不应改变消息正文")
         self.assertTrue(result["placeholder_verbatim"],
-                        "占位提示必须是原生那条『流式输出中...』本身，一字不改，"
+                        "除会话标签外，占位正文必须是原生那条『流式输出中...』，一字不改，"
                         "不能替换成另编的提示语")
         self.assertTrue(result["placeholder_has_stop_button"],
                         "占位提示要带着停止按钮到 Telegram——这正是用户要的那条『带暂停按钮的提示』")
@@ -584,7 +593,7 @@ async def main():
         "ai_context_raw": "正文回复 **加粗**" in all_ctx,
         "display_ids": all(r.get("id") and r.get("timestamp") for r in web),
         "status_not_in_ctx": "Agent 第 1 轮" not in all_ctx,
-        "cmd_prefixed_in_ctx": "[命令] /restart" in all_ctx or "[命令]" in all_ctx,
+        "cmd_hidden_from_ctx": "[命令] /restart" not in all_ctx and "/restart" not in all_ctx,
     }))
     await db.close()
 
@@ -593,7 +602,7 @@ asyncio.run(main())
         self.assertTrue(result["cmd_hidden"], "AGENT_CMD 协议原文在显示历史里应整体隐藏")
         self.assertTrue(result["status_shown"], "落库的轮次状态行要原样显示（与 bot 界面逐字一致）")
         self.assertTrue(result["status_not_in_ctx"], "轮次状态是 UI 信息，不进 AI 上下文")
-        self.assertTrue(result["cmd_prefixed_in_ctx"], "命令记录在 AI 上下文里要带 [命令] 前缀")
+        self.assertTrue(result["cmd_hidden_from_ctx"], "菜单管理命令不能混进模型上下文")
         self.assertTrue(result["no_raw_fence"], "刷新后的显示里不允许出现协议围栏原文")
         self.assertTrue(result["no_media_prompt"], "媒体生成的完整提示词不该出现在显示里")
         self.assertTrue(result["token_gray"], "token 统计行要降级成 system 灰条")

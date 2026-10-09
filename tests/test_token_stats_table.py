@@ -57,6 +57,9 @@ SECTIONS_PREAMBLE = """
 from xgent_app.bootstrap import load_sections
 ns = {"__file__": "xgent_server.py"}
 load_sections(ns)
+from xgent_app.conversations import ConversationScope, bind_conversation
+_scope_guard = bind_conversation(ConversationScope('global_memory', 0))
+_scope_guard.__enter__()
 """
 
 USAGE = {"input_tokens": 100, "output_tokens": 50, "cached_tokens": 10,
@@ -119,7 +122,7 @@ async def main():
 asyncio.run(main())
 """ % USAGE)
         self.assertEqual(len(result["stats_after_clear"]), 1)
-        self.assertEqual(result["display_rows_after_clear"], 0)  # 老表显示行随对话清掉
+        self.assertEqual(result["display_rows_after_clear"], 1)  # 重置上下文保留历史提示；统计仍不重复
         records = result["records_after_clear"]
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["model"], "test-model")

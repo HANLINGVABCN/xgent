@@ -1,6 +1,7 @@
 # This file is executed by xgent_server.py in the shared application namespace.
 # Keep cross-section names available through the loader until the next decoupling phase.
 
+@conversation_entry()
 async def cmd_delete_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_authorized_user_middleware(update, context):
         return
@@ -8,48 +9,25 @@ async def cmd_delete_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await UserDataManager.init()
     
     db = await BotMemoryDB.get_instance()
-    if _compression_running and _stop_generation_event is not None:
-        _stop_generation_event.set()
-    # 清空上下文会 bump attachment_generation。ask 协议的私密变量与挂起表单都
-    # 锚在旧 generation 上：这里连同环境变量、脱敏名单一起清掉（压缩不走这条路，
-    # 故压缩不会清私密变量，符合"对话内长期有效、清空即失效"）。
-    old_generation = await db.get_attachment_generation()
-    counts = await db.clear_all_conversation_memory()
-    SECRET_STORE.purge(old_generation)
-    PENDING_ASKS.purge_generation(old_generation)
-    await advance_ui_generation()
-    publish_conversation_event(context, {'type': 'history_reset'})
-    cancel_pending_album_conversations()
-    UserDataManager.set('current_chat_id', SINGLE_MEMORY_SESSION_ID)
-    await UserDataManager.save_config('current_chat_id', SINGLE_MEMORY_SESSION_ID)
+    counts = await clear_current_conversation()
+    publish_conversation_event(context, {'type': 'context_reset'})
 
     message = update.message or update.callback_query.message
-    deleted_total = counts['global_messages']
-    deleted_mirror = counts['chat_messages']
-    deleted_sessions = counts['chat_sessions']
 
     if update.callback_query:
         await message.edit_text(
-            "🧹 全局记忆已经清空了。\n"
-            f"🌐 删除了 {deleted_total} 条全局记忆记录\n"
-            f"🪞 删除了 {deleted_mirror} 条内部镜像消息\n"
-            f"📦 清掉了 {deleted_sessions} 条内部索引记录\n\n"
-            "Provider 配置、提示词、.env 都还在，token 用量统计（/stats）也保留了。",
+            "🧹 上下文已重置，历史和附件仍保留。",
             reply_markup=get_main_menu()
         )
     else:
         await message.reply_text(
-            "🧹 全局记忆已经清空了。\n"
-            f"🌐 删除了 {deleted_total} 条全局记忆记录\n"
-            f"🪞 删除了 {deleted_mirror} 条内部镜像消息\n"
-            f"📦 清掉了 {deleted_sessions} 条内部索引记录\n\n"
-            "Provider 配置、提示词、.env 都还在，token 用量统计（/stats）也保留了。",
+            "🧹 上下文已重置，历史和附件仍保留。",
             reply_markup=get_main_menu()
         )
 
 async def create_conversation_export(snapshot: Optional[Dict] = None) -> Tuple[Dict, Dict]:
     db = await BotMemoryDB.get_instance()
-    snapshot = snapshot if snapshot is not None else await db.get_compression_snapshot()
+    snapshot = snapshot if snapshot is not None else await db.get_export_snapshot()
     instruction = PromptFileManager.get_required('compression_prompt')
     system_prompt = build_conversation_system_prompt(bool(UserDataManager.get('agent_mode', False)))
     logs = await db.get_unauthorized_access_logs(1000)
@@ -171,6 +149,8 @@ async def generate_compression_summary(provider, data, model, history, stop_even
 
 
 @without_ui_history
+@conversation_reply
+@conversation_entry(execution=True)
 async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    retry_job_id: Optional[str] = None):
     global _is_processing, _stop_generation_event, _compression_running
@@ -183,7 +163,8 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
         return
     async with _conversation_processing_lock:
         _is_processing = _compression_running = True
-        stop_event = _stop_generation_event = asyncio.Event()
+        stop_event = _stop_generation_event = get_conversations().stop_event() or asyncio.Event()
+        get_conversations().attach_stop_event(stop_event)
         status = db = entry = snapshot = None
         warning = None
         usage_sink = []
@@ -194,10 +175,9 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
         typing_stop = asyncio.Event()
         typing_task = None
         try:
-            if is_web_chat_running() and not getattr(context.bot, '_is_xgent_web_bot', False):
-                outbox = get_web_outbox()
-                if outbox is not None:
-                    restore_mirror = install_tg_to_web_mirror(get_web_real_bot(), outbox)
+            if not getattr(context.bot, '_is_xgent_web_bot', False) and not getattr(context.bot, '_is_xgent_cli_bot', False):
+                outbox = get_web_outbox() or globals().get('_web_external_outbox')
+                restore_mirror = install_tg_to_web_mirror(context.bot, outbox)
             publish_conversation_event(context, {'type': 'compression_state', 'busy': True})
             typing_task = asyncio.create_task(keep_typing_while_waiting(
                 context, update.effective_chat.id, typing_stop, max_duration=TYPING_MAX_DURATION_SECONDS))
@@ -227,7 +207,7 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                     await message.reply_text(warning)
             # Create this message only after archive delivery: editing an earlier
             # placeholder would leave the compression status above the ZIP in chat.
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception), telegram_label('inline'):
                 status = await message.reply_text('正在压缩，成功前保留原上下文...', reply_markup=build_stop_keyboard())
             entry = await db.start_compression_attempt(entry['job_id'], provider, model)
             await asyncio.to_thread(verify_export, entry)
@@ -235,11 +215,11 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
             summary = await generate_compression_summary(provider, data, model, history, stop_event, usage_sink)
             await asyncio.to_thread(verify_export, entry)
             entry = await db.commit_compression(entry, summary, stop_event)
+            await advance_ui_generation()
             changed = True
             cancel_pending_album_conversations()
-            UserDataManager.set('current_chat_id', SINGLE_MEMORY_SESSION_ID)
             await get_or_create_chat_session()
-            publish_conversation_event(context, {'type': 'history_reset'})
+            publish_conversation_event(context, {'type': 'context_reset'})
             # Delivery is after commit; a Telegram outage cannot undo the summary.
             with contextlib.suppress(Exception):
                 await safe_send_message(context, update.effective_chat.id, summary)
@@ -272,7 +252,7 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                     return
                 await db.record_global_message(
                     update.effective_chat.id, 0, MessageType.SYSTEM_OP, 'system', result,
-                    SINGLE_MEMORY_SESSION_ID, {'attachment_generation': snapshot['generation'],
+                    current_scope().conversation_id, {'attachment_generation': snapshot['generation'],
                                                'src': _RECORDER_SOURCE_ID})
             with contextlib.suppress(Exception):
                 if status is not None:
@@ -293,11 +273,17 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                         await status.delete()
                 if (db is not None and entry is not None
                         and entry.get('generation') == await db.get_attachment_generation()):
+                    elapsed = time.monotonic() - started
                     for usage in usage_sink:
                         with contextlib.suppress(Exception):
                             await GlobalRecorder.record_token_usage(
-                                build_token_usage_message(usage, time.monotonic() - started) or '',
+                                build_token_usage_message(usage, elapsed) or '',
                                 update.effective_chat.id, usage=usage, model=model)
+                        # Recording makes usage visible in refreshed history; Telegram
+                        # also needs an actual send through the active channel/mirror.
+                        with contextlib.suppress(Exception):
+                            await send_token_usage_message(
+                                context, update.effective_chat.id, usage, elapsed)
             finally:
                 _stop_generation_event = None
                 _is_processing = _compression_running = False
@@ -338,11 +324,11 @@ async def cmd_show_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💬 当前对话模型: {safe_text(format_model_target_summary('chat'))}\n"
         f"🖼️ 当前媒体模型: {safe_text(format_model_target_summary('media'))}\n"
         f"🪞 内部镜像消息数: {len(cdata.get('history', []))}\n"
-        f"🌐 全局记忆数: {global_count}\n"
+        f"🗂 当前会话记录数: {global_count}\n"
         f"👤 绑定用户ID: <code>{BotConfig.AUTHORIZED_USER_ID}</code>\n"
         f"🌐 全局模式: 常驻开启\n"
         f"🤖 Agent模式: {'开启' if UserDataManager.get('agent_mode', False) else '关闭'}\n"
-        f"📊 全局记忆深度: {UserDataManager.get('global_depth', 30)}条\n"
+        f"📊 普通历史深度: {UserDataManager.get('global_depth', 30)}条\n"
         f"━━━━━━━━━━━━━━\n"
         f"📈 <b>全局记录分类:</b>\n{type_stats}\n"
         f"━━━━━━━━━━━━━━\n"

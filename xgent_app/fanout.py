@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from xgent_app.conversations import conversation_snapshot, replay_conversation
 import contextlib
 import json
 import logging
@@ -176,7 +177,7 @@ class Op:
     """
 
     __slots__ = ("kind", "logical_id", "chat_id", "payload", "transient",
-                 "durable", "seq", "created_at", "row_id", "attempts", "superseded")
+                 "durable", "seq", "created_at", "row_id", "attempts", "superseded", "conversation_context", "presentation_context")
 
     def __init__(self, kind: str, *, logical_id: Optional[int] = None,
                  chat_id: Optional[int] = None,
@@ -188,7 +189,10 @@ class Op:
         self.kind = kind
         self.logical_id = logical_id
         self.chat_id = chat_id
-        self.payload = payload or {}
+        self.payload = dict(payload or {})
+        self.conversation_context = self.payload.pop('_conversation_context', conversation_snapshot())
+        from xgent_app.telegram_presentation import presentation_snapshot
+        self.presentation_context = self.payload.pop('_telegram_presentation', presentation_snapshot())
         self.transient = transient or {}
         self.durable = bool(durable)
         self.seq = seq
@@ -208,12 +212,24 @@ class Op:
             return None
         return f"{self.kind}:{self.logical_id}"
 
+    @property
+    def muted(self) -> bool:
+        context = self.conversation_context or {}
+        if context.get('telegram_delivery') is False:
+            return True
+        # Exact legacy control signature, not a heuristic over user/model text.
+        text = self.payload.get('text', '')
+        return (self.kind == OP_SEND and not context.get('run_id') and
+                self.presentation_context == {'label': False} and isinstance(text, str) and
+                text.startswith('🗂 ') and
+                text.endswith('\n已切换会话，三端同步；未提交的设置输入已取消。'))
+
     def to_row(self) -> Dict[str, Any]:
         return {
             "kind": self.kind,
             "logical_id": self.logical_id,
             "chat_id": self.chat_id,
-            "payload": json.dumps(self.payload, ensure_ascii=False),
+            "payload": json.dumps({**self.payload, '_conversation_context': self.conversation_context, '_telegram_presentation': self.presentation_context}, ensure_ascii=False),
             "created_at": self.created_at,
             "seq": self.seq,
             "attempts": int(self.attempts or 0),
@@ -231,6 +247,8 @@ class Op:
             attempts = int(row.get("attempts") or 0)
         except (TypeError, ValueError):
             attempts = 0
+        if isinstance(payload, dict):
+            payload.setdefault('_conversation_context', None)
         return cls(
             str(row.get("kind") or ""),
             logical_id=row.get("logical_id"),
@@ -389,6 +407,8 @@ class ChannelWorker:
         永远不抛异常：调用方是对话核心，它正握着全局对话锁，任何异常或阻塞都会
         变成"整轮对话卡住"。
         """
+        if op.muted:
+            return False
         try:
             with self._lock:
                 self._seq += 1
@@ -634,9 +654,16 @@ class ChannelWorker:
         self._deferred_rows += 1
 
     async def _deliver_one(self, op: Op, native: Optional[int]) -> Any:
-        if op.kind in UPLOAD_KINDS:
-            return await self._deliver(op, native)
-        return await asyncio.wait_for(self._deliver(op, native), timeout=self._timeout)
+        from xgent_app.conversations import conversation_still_exists
+        if op.muted:
+            return None
+        if not await conversation_still_exists(op.conversation_context):
+            return None
+        from xgent_app.telegram_presentation import replay_presentation
+        with replay_conversation(op.conversation_context), replay_presentation(op.presentation_context):
+            if op.kind in UPLOAD_KINDS:
+                return await self._deliver(op, native)
+            return await asyncio.wait_for(self._deliver(op, native), timeout=self._timeout)
 
     async def _drain_store(self, skipped: int) -> None:
         """通道恢复后按序补投待发库。
@@ -677,6 +704,9 @@ class ChannelWorker:
             replayed = 0
             bad_streak = 0
             for op in keep:
+                if op.muted:
+                    await self._forget(op)
+                    continue
                 if self._closing or not self._breaker.allow():
                     break
                 if int(op.attempts or 0) >= MAX_OP_ATTEMPTS:

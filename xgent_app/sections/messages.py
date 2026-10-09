@@ -51,6 +51,7 @@ def build_document_attachment_payload(doc_name: str, content_bytes: bytes, capti
     }
 
 
+@conversation_entry(execution=True)
 async def process_incoming_document(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -308,6 +309,7 @@ async def process_incoming_document(
         )
 
 
+@media_conversation_entry
 async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     received_at_ns = time.time_ns()
     if not await check_authorized_user_middleware(update, context):
@@ -611,12 +613,31 @@ def _extract_rich_message_text(msg):
     logger.warning(f"_extract_rich_message_text: total len={len(result)}, paragraphs={len(paragraphs)}")
     return result
 
+def management_input_output(function):
+    @wraps(function)
+    async def wrapped(update, context):
+        if UserDataManager.get('state', BotState.IDLE) == BotState.IDLE:
+            return await function(update, context)
+        restore = None
+        if not getattr(context.bot, '_is_xgent_web_bot', False) and not getattr(context.bot, '_is_xgent_cli_bot', False):
+            restore = install_tg_to_web_mirror(context.bot, get_web_outbox() or globals().get('_web_external_outbox'))
+        try:
+            async with ui_operation(capture_text=True):
+                return await function(update, context)
+        finally:
+            if restore is not None:
+                restore()
+    return wrapped
+
+
+@conversation_entry(execution=lambda: UserDataManager.get('state', BotState.IDLE) == BotState.IDLE, guard=authorize_before_conversation)
+@management_input_output
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_authorized_user_middleware(update, context):
         return
     
-    # 处理中锁：防止媒体生成/长回复期间发消息冲突
-    if _conversation_processing_lock.locked():
+    # Configuration/menu input is not a new model turn.
+    if _conversation_processing_lock.locked() and UserDataManager.get('state') == BotState.IDLE:
         await update.message.reply_text(
             "⏳ 系统仍在处理上一个请求... 请稍后再发送新请求。"
         )
@@ -714,25 +735,44 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _handle_ask_text_input(update, context, state, text)
         return
 
-    # 普通聊天按拼接模式决定：直接发送，或累计到“完成”按钮后再写入记忆。
+    # Consume management values before ordinary recording/title/model admission.
+    # Only structured audit is retained; raw names, secrets and cancel are not prompts.
     if state != BotState.IDLE:
-        recorded_text = (
-            "[已填入 UPDATE_GITHUB_TOKEN，内容已隐藏]"
-            if state == BotState.SET_UPDATE_TOKEN
-            else "[已填入搜索 API Key，内容已隐藏]"
-            if state == BotState.SET_SEARCH_KEY
-            else "[已设置 Web 访问密码，内容已隐藏]"
-            if state == BotState.SET_WEB_PASSWORD
-            else "[已提交提供商配置 JSON，内容已隐藏]"
-            if state == BotState.IMPORT_PROVIDER_CONFIG
-            else "[已填入 API Key，内容已隐藏]"
-            if state in (BotState.EDIT_PROV_KEY, BotState.ADD_PROV_KEY)
-            else "[已录入表单密钥，内容已隐藏]"
-            if state == BotState.ASK_SECRET_INPUT
-            else text
-        )
-        await GlobalRecorder.record_user_message(recorded_text, MessageType.USER_TEXT, update.effective_chat.id)
-    
+        await GlobalRecorder.record_system_op('提交管理输入', {'workflow': str(state), 'ui_only': True}, update.effective_chat.id)
+
+    if state == BotState.RENAME_CHAT:
+        pending = UserDataManager.get('temp_conversation_rename') or {}
+        scope = current_scope()
+        if pending.get('conversation_id') != scope.conversation_id or pending.get('generation') != scope.generation:
+            UserDataManager.set('state', BotState.IDLE)
+            UserDataManager.set('temp_conversation_rename', None)
+            await update.message.reply_text('重命名操作已过期，请重新打开 /chats；本条输入未提交给模型。')
+            return
+        from xgent_app.ui_history import saved_ui_binding, restore_ui_binding
+        with restore_ui_binding(pending.get('ui_binding')):
+            try:
+                if text.lower() == 'cancel':
+                    UserDataManager.set('state', BotState.IDLE)
+                    UserDataManager.set('temp_conversation_rename', None)
+                    await show_conversation_menu(update, context, message=pending.get('message'), notice='已取消重命名。')
+                    return
+                try:
+                    await get_conversations().manage('rename', pending['conversation_id'], text.strip())
+                except ConversationError as exc:
+                    await edit_conversation_card(update, context,
+                        f'🗂 {safe_text(scope.name)} · {scope.conversation_id[:6]}\n{safe_text(str(exc))}\n请重新输入，或 cancel 取消。',
+                        InlineKeyboardMarkup([[InlineKeyboardButton('🔙 返回', callback_data='conv_cancel_rename')]]),
+                        message=pending.get('message'))
+                    return
+                UserDataManager.set('state', BotState.IDLE)
+                UserDataManager.set('temp_conversation_rename', None)
+                await GlobalRecorder.record_system_op('会话已重命名', {'conversation_id': pending['conversation_id'], 'ui_only': True})
+                await show_conversation_menu(update, context, message=pending.get('message'), notice='🏷️ 会话已重命名。')
+                return
+
+            finally:
+                pending['ui_binding'] = saved_ui_binding()
+
     # 取消操作
     if text.lower() == 'cancel' and state != BotState.IDLE:
         UserDataManager.set('state', BotState.IDLE)
@@ -1426,14 +1466,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(title, reply_markup=kb)
         return
     
-    if state == BotState.RENAME_CHAT:
-        UserDataManager.set('state', BotState.IDLE)
-        await update.message.reply_text(
-            "🏷️ 现在只有一份全局记忆，不再支持单独重命名。",
-            reply_markup=get_main_menu()
-        )
-        return
-    
     # --- 正常对话处理 ---
     context_prefix = build_incoming_context_prefix(update.message)
     if context_prefix:
@@ -1441,6 +1473,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await handle_normal_text_conversation(update, context, text)
 
 
+@conversation_entry(execution=True)
 async def handle_normal_text_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if has_pending_text_conversation(update):
         await queue_text_conversation(update, context, text)
@@ -1540,19 +1573,11 @@ async def cancel_text_conversation(update: Update):
         logger.debug(f"清空拼接提示更新失败: {e}")
 
 async def _reset_agent_turn_iteration(db: BotMemoryDB) -> int:
-    await db.set_config(AGENT_TURN_ITERATION_CONFIG_KEY, 0)
-    return 0
+    return await db.reset_agent_iteration()
 
 
 async def _reserve_agent_turn_iteration(db: BotMemoryDB) -> int:
-    raw_value = await db.get_config(AGENT_TURN_ITERATION_CONFIG_KEY, 0)
-    try:
-        current = max(0, int(raw_value))
-    except (TypeError, ValueError):
-        current = 0
-    next_iteration = int(current) + 1
-    await db.set_config(AGENT_TURN_ITERATION_CONFIG_KEY, next_iteration)
-    return next_iteration
+    return await db.reserve_agent_iteration()
 
 
 async def _move_status_message_to_bottom(msg, context, chat_id: int, text: str) -> None:
@@ -1639,6 +1664,8 @@ async def _record_user_stopped_reply(db, cid, chat_id, partial_text: str) -> str
 
 
 @without_ui_history
+@conversation_reply
+@conversation_entry(execution=True)
 async def process_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
                                content_override: Optional[Any] = None,
                                lock_acquired_event: Optional[asyncio.Event] = None,
@@ -1658,16 +1685,17 @@ async def process_conversation(update: Update, context: ContextTypes.DEFAULT_TYP
         # 否则补丁会残留，下次 install 把残留 wrapper 当“原方法”再次包裹，
         # real_bot 被注入成 chat_id → “got multiple values for argument 'chat_id'”。
         # 详见 web_bridge._ACTIVE_MIRRORS 的重入引用计数保护。
-        if is_web_chat_running() and not getattr(context.bot, "_is_xgent_web_bot", False):
-            _web_outbox = get_web_outbox()
+        if not getattr(context.bot, "_is_xgent_web_bot", False) and not getattr(context.bot, "_is_xgent_cli_bot", False):
+            _web_outbox = get_web_outbox() or globals().get('_web_external_outbox')
+            restore_mirror = install_tg_to_web_mirror(context.bot, _web_outbox)
             if _web_outbox is not None:
-                restore_mirror = install_tg_to_web_mirror(get_web_real_bot(), _web_outbox)
                 _web_outbox.put({"type": "user_message", "text": str(text or ""), "ts": time.time()})
         async with _conversation_processing_lock:
             if lock_acquired_event is not None:
                 lock_acquired_event.set()
             _is_processing = True
-            _stop_generation_event = asyncio.Event()
+            _stop_generation_event = get_conversations().stop_event() or asyncio.Event()
+            get_conversations().attach_stop_event(_stop_generation_event)
 
             from xgent_app.error_reporting import runtime_error_scope
             try:
@@ -2201,6 +2229,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         ask_id = PENDING_ASKS.new_id()
                         pending = PendingAsk(
                             ask_id=ask_id,
+                            conversation_id=cid,
                             form=ask_form,
                             generation=attachment_generation,
                             turn_history_snapshot=list(agent_turn_history),
@@ -2604,12 +2633,16 @@ async def persist_ask_answer(text, chat_id, generation):
     return answer
 
 
+@conversation_entry(execution=True)
 async def resume_from_ask(ask_id: str) -> str:
     """用户提交（或取消）ask 表单后恢复 Agent 循环。
 
     返回给回调层一句可展示的短提示。**原子 pop 天然防重复提交**：
     第二次点击拿不到 pending，返回"已处理"。
     """
+    pending = PENDING_ASKS.get(ask_id)
+    if pending is not None and pending.conversation_id != current_scope().conversation_id:
+        return '请先切回该表单所属会话。'
     pending = PENDING_ASKS.pop(ask_id)
     if pending is None:
         return "这个表单已经处理过或已失效。"
@@ -2620,6 +2653,8 @@ async def resume_from_ask(ask_id: str) -> str:
         # 期间被 /清空上下文：快照历史已作废，别拿旧上下文继续。
         return "上下文已清空，这个表单已失效——如需继续，请让 AI 重新发起提问。"
 
+    from xgent_app.conversations import restore_reply_route
+    restore_reply_route(pending.conversation_context)
     answer_text = pending.form.assemble_answer(pending.draft)
 
     # 记录一条用户消息（表单回答，不含明文密钥）到全局记忆，供三端展示与后续历史。
@@ -2633,7 +2668,7 @@ async def resume_from_ask(ask_id: str) -> str:
         'turn_history_snapshot': pending.turn_history_snapshot,
         'answer_message': answer_message,
     }
-    asyncio.create_task(process_conversation(
+    await process_conversation(
         update,
         context,
         answer_text,
@@ -2641,12 +2676,16 @@ async def resume_from_ask(ask_id: str) -> str:
         reset_agent_iterations=False,
         agent_origin=pending.origin or AgentTurnOrigin.ask(),
         resume_state=resume_state,
-    ))
+    )
     return "已提交，正在继续处理。"
 
 
+@conversation_entry(execution=True)
 async def cancel_ask(ask_id: str) -> str:
     """用户取消 ask 表单：丢弃挂起表单，把"用户取消"回灌给模型让它自行收尾。"""
+    pending = PENDING_ASKS.get(ask_id)
+    if pending is not None and pending.conversation_id != current_scope().conversation_id:
+        return '请先切回该表单所属会话。'
     pending = PENDING_ASKS.pop(ask_id)
     if pending is None:
         return "这个表单已经处理过或已失效。"
@@ -2655,6 +2694,8 @@ async def cancel_ask(ask_id: str) -> str:
     if pending.generation != await db.get_attachment_generation():
         return "上下文已清空，这个表单已失效。"
 
+    from xgent_app.conversations import restore_reply_route
+    restore_reply_route(pending.conversation_context)
     notice = "[用户已取消表单] 用户没有作答，请不要再等待表单结果，自行决定如何收尾或改用其它方式。"
     answer_message = await persist_ask_answer(notice, pending.chat_id, pending.generation)
     bot = build_trigger_delivery_bot(int(pending.chat_id))
@@ -2664,13 +2705,13 @@ async def cancel_ask(ask_id: str) -> str:
         'turn_history_snapshot': pending.turn_history_snapshot,
         'answer_message': answer_message,
     }
-    asyncio.create_task(process_conversation(
+    await process_conversation(
         update, context, notice,
         force_agent_mode=True,
         reset_agent_iterations=False,
         agent_origin=pending.origin or AgentTurnOrigin.ask(),
         resume_state=resume_state,
-    ))
+    )
     return "已取消。"
 
 
@@ -2709,7 +2750,7 @@ async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_T
         # 明文只进 SecretStore：写 os.environ + 登记脱敏名单；draft 只留「已录入」。
         db = await BotMemoryDB.get_instance()
         generation = await db.get_attachment_generation()
-        SECRET_STORE.set(generation, question.var, text)
+        SECRET_STORE.set(current_scope().conversation_id, question.var, text)
         pending.ensure_entry(qid)['filled'] = True
         # 录库占位符已在上游 masking 段记过；这里给用户一句可见回执（不含明文）。
         await update.message.reply_text(

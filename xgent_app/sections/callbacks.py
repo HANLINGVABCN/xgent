@@ -82,6 +82,10 @@ async def _dispatch_ask_callback(update: Any, context: Any, data: str) -> None:
             await query.answer("这个表单已失效，请让 AI 重新发起。")
         return
 
+    if pending.conversation_id != current_scope().conversation_id:
+        await query.answer('请先切回该表单所属会话。', show_alert=True)
+        return
+
     qid = parts[2] if len(parts) > 2 else ""
     question = pending.form.question(qid)
     if question is None:
@@ -128,26 +132,82 @@ async def _dispatch_ask_callback(update: Any, context: Any, data: str) -> None:
         )
 
 
+async def handle_conversation_action(update, context, data):
+    """Shared single-card navigation, also usable from an unselected Bot chooser."""
+    query = update.callback_query
+    manager = get_conversations()
+    if data in {'conv_create', 'cmd_new_chat'}:
+        await manager.manage('create')
+    elif data.startswith('conv_switch:'):
+        await manager.manage('switch', data.split(':', 1)[1])
+    elif data.startswith('conv_restore:'):
+        cid = data.split(':', 1)[1]
+        await manager.manage('restore', cid)
+        await manager.manage('switch', cid)
+    elif data == 'conv_archive':
+        await manager.manage('archive', current_scope().conversation_id)
+    elif data in {'conv_rename', 'cmd_rename_chat'}:
+        scope = current_scope()
+        UserDataManager.set('state', BotState.RENAME_CHAT)
+        UserDataManager.set('temp_conversation_rename', {'conversation_id': scope.conversation_id,
+                            'generation': scope.generation, 'message': query.message})
+        await edit_conversation_card(update, context,
+            f'🗂 {safe_text(scope.name)} · {scope.conversation_id[:6]}\n请输入新名称（1–80 字），或 cancel 取消。',
+            InlineKeyboardMarkup([[InlineKeyboardButton('🔙 返回', callback_data='conv_cancel_rename')]]))
+        from xgent_app.ui_history import saved_ui_binding
+        UserDataManager.get('temp_conversation_rename')['ui_binding'] = saved_ui_binding()
+        return
+    elif data == 'conv_cancel_rename':
+        UserDataManager.set('state', BotState.IDLE)
+        UserDataManager.set('temp_conversation_rename', None)
+    elif data.startswith(('conv_delete:', 'conv_reset:')):
+        action, cid = data.split(':', 1)
+        db = await BotMemoryDB.get_instance()
+        info = await db.conversation_delete_info(cid)
+        deleting = action == 'conv_delete'
+        text = (f"🗂 {safe_text(info['name'])} · {cid[:6]}\n" +
+                (f"永久删除该会话、历史和任务记录，并终止 {info['active_tasks']} 个未完成任务？此操作不可恢复。"
+                 if deleting else '重置该会话的模型上下文？历史、附件和定时任务仍保留。'))
+        await edit_conversation_card(update, context, text, InlineKeyboardMarkup([
+            [InlineKeyboardButton('🗑 确认永久删除' if deleting else '🧹 确认重置', callback_data=f"conv_confirm_{'delete' if deleting else 'reset'}:{cid}")],
+            [InlineKeyboardButton('🔙 返回', callback_data='conv_list')]]))
+        return
+    elif data.startswith('conv_confirm_delete:'):
+        await delete_conversation(data.split(':', 1)[1])
+    elif data.startswith('conv_confirm_reset:'):
+        await reset_conversation_context(data.split(':', 1)[1])
+    archived, page = data == 'conv_archived', 1
+    if data.startswith('conv_page:'):
+        _, archived_flag, page_number = data.split(':', 2)
+        archived, page = archived_flag == '1', int(page_number)
+    await show_conversation_menu(update, context, archived=archived, page=page)
+    return
+
+
+@conversation_entry()
 async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await check_authorized_user_middleware(update, context):
         return
 
     # 停止按钮必须绕过普通菜单/记忆流程，尽快唤醒正在等待的生成或工具任务。
-    data = CallbackDataStore.get(query.data or "")
-    if data == "act_stop_generation":
-        global _stop_generation_event
-        if _stop_generation_event and not _stop_generation_event.is_set():
-            _event_id = id(_stop_generation_event)
-            _stop_generation_event.set()
-            logger.info(f"[停止诊断] 点击停止: event id={_event_id}, 已 set")
-            logger.info("用户手动停止了AI回答")
-            await query.answer("已收到停止请求")
-        else:
-            _event_id = id(_stop_generation_event) if _stop_generation_event else None
-            _is_set = _stop_generation_event.is_set() if _stop_generation_event else None
-            logger.info(f"[停止诊断] 点击停止但无活跃事件: event={_stop_generation_event}, is_set={_is_set}, id={_event_id}")
-            await query.answer("当前没有正在生成的回答")
+    try:
+        data = CallbackDataStore.get(query.data or "")
+    except (ConversationError, UiHistoryError) as exc:
+        # Reject before acknowledging success, recording the click or mutating
+        # any setting. answerCallbackQuery ends Telegram's spinner and shows
+        # the reason without sending a new chat message or editing the old card.
+        await query.answer(str(exc), show_alert=True, cache_time=0)
+        return
+    if data == 'act_stop_generation' or data.startswith('act_stop_generation:'):
+        run_id = data.partition(':')[2]
+        accepted = await get_conversations().request_stop(run_id) if run_id else False
+        await query.answer('已收到停止请求' if accepted else '该回合已结束，停止按钮已失效。')
+        return
+
+    if data.startswith('conv_') or data in {'cmd_new_chat', 'cmd_list_chats', 'cmd_rename_chat'}:
+        await query.answer()
+        await handle_conversation_action(update, context, data)
         return
 
     if data == 'cmd_compress':
@@ -186,11 +246,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         # --- 主菜单 ---
         if data == "act_main_menu":
-            await query.message.edit_text(
-                build_start_menu_text(),
-                reply_markup=get_main_menu(),
-                parse_mode=constants.ParseMode.HTML
-            )
+            await show_start_card(query.message, edit=True)
 
         elif data in {"menu_price_table", "add_price_model", "menu_merge_map"} or data.startswith("edit_price_"):
             await handle_price_table_callbacks(update, context)
@@ -752,11 +808,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 {"agent_mode": new_mode}
             )
             
-            await query.message.edit_text(
-                build_start_menu_text(),
-                reply_markup=get_main_menu(),
-                parse_mode=constants.ParseMode.HTML
-            )
+            await show_start_card(query.message, edit=True)
         
         # --- 请求模式切换 ---
         elif data == "toggle_stream_mode":
@@ -770,11 +822,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 {"stream_mode": new_mode}
             )
 
-            await query.message.edit_text(
-                build_start_menu_text(),
-                reply_markup=get_main_menu(),
-                parse_mode=constants.ParseMode.HTML
-            )
+            await show_start_card(query.message, edit=True)
 
         # --- 流式风格切换（前台流式 / 后台流式）---
         elif data == "toggle_stream_style":
@@ -2144,16 +2192,16 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif data == "cmd_delete":
             db = await BotMemoryDB.get_instance()
             global_count = len(await db.get_global_messages(10000))
-            mirror_count = len(await db.get_chat_messages(SINGLE_MEMORY_SESSION_ID))
+            mirror_count = len(await db.get_chat_messages(current_scope().conversation_id))
             await query.message.edit_text(
-                "⚠️ <b>确认清空全局记忆吗？</b>\n\n"
-                f"这会删除当前所有对话记忆。\n"
-                f"🌐 全局记忆记录: <b>{global_count}</b> 条\n"
+                "⚠️ <b>确认重置当前会话的模型上下文吗？</b>\n\n"
+                f"历史消息和附件会保留，旧内容不再提供给模型；其他会话不受影响。\n"
+                f"📜 保留的会话历史: <b>{global_count}</b> 条\n"
                 f"🪞 内部镜像消息: <b>{mirror_count}</b> 条\n\n"
                 "不会删除 Provider 配置、.env、提示词文件，token 用量统计（/stats）也会保留。",
                 parse_mode=constants.ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🧹 确认清空", callback_data="confirm_clear_memory")],
+                    [InlineKeyboardButton("🧹 确认重置", callback_data="confirm_clear_memory")],
                     [InlineKeyboardButton("🔙 返回主菜单", callback_data="act_main_menu")]
                 ])
             )
@@ -2168,7 +2216,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif data == "confirm_clear_memory":
             await cmd_delete_chat(update, context)
         elif data in {"cmd_new_chat", "cmd_save", "cmd_list_chats", "cmd_rename_chat"} or data.startswith("load_chat_"):
-            await query.answer("现在只有一份全局记忆，不再支持分段管理。", show_alert=True)
+            await query.answer("请使用 /chats 管理会话。", show_alert=True)
         else:
             # 没有任何分支命中。最常见的原因是重启后旧按钮里的短 ID 已经从
             # 内存映射表里消失（CallbackDataStore 是纯内存的）。以前这里

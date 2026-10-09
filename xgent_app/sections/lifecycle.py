@@ -7,6 +7,8 @@
 # 是哪个客户端。
 TELEGRAM_COMMAND_DESCRIPTIONS = (
     ("start", "打开主菜单"),
+    ("chats", "管理与切换会话"),
+    ("new", "新建会话"),
     ("config", "打开设置面板"),
     ("update", "更新代码并重启"),
     ("providers", "管理提供商与模型列表"),
@@ -15,7 +17,7 @@ TELEGRAM_COMMAND_DESCRIPTIONS = (
     ("chat_model", "选择默认对话模型"),
     ("media_model", "选择默认媒体模型"),
     ("prompts", "管理提示词"),
-    ("clear_memory", "清空上下文"),
+    ("clear", "重置上下文，保留聊天历史"),
     ("compress", "压缩上下文并归档"),
     ("depth", "设置记忆深度"),
     ("params", "参数设置"),
@@ -43,8 +45,17 @@ EXTRA_COMMAND_DESCRIPTIONS = (
 )
 
 
+# 兼容命令仍可输入执行，但不重复占用菜单、补全和帮助列表。
+COMMAND_ALIASES = {"clear_memory": "clear"}
+
+
+def visible_command_names(names):
+    return [name for name in names if name not in COMMAND_ALIASES]
+
+
 def command_description(name: str) -> str:
     """命令的一句话说明；没有登记过就返回空串。"""
+    name = COMMAND_ALIASES.get(name, name)
     for command_name, description in TELEGRAM_COMMAND_DESCRIPTIONS + EXTRA_COMMAND_DESCRIPTIONS:
         if command_name == name:
             return description
@@ -52,6 +63,36 @@ def command_description(name: str) -> str:
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = getattr(update, 'effective_user', None)
+    if user is not None and user.id != BotConfig.AUTHORIZED_USER_ID:
+        return
+    error = context.error
+    if isinstance(error, (ConversationError, UiHistoryError)):
+        # Callback admission can also fail in an outer scope/menu wrapper. Always
+        # answer the original query rather than leaving its spinner running.
+        query = getattr(update, 'callback_query', None)
+        with contextlib.suppress(Exception):
+            if query is not None:
+                await query.answer(str(error), show_alert=True, cache_time=0)
+            else:
+                await context.bot.send_message(chat_id=BotConfig.AUTHORIZED_USER_ID, text=str(error))
+        return
+    from xgent_app.interaction import interaction
+    from xgent_app.telegram_presentation import telegram_label
+    from xgent_app.web_bridge import install_tg_to_web_mirror
+    restore = install_tg_to_web_mirror(context.bot, get_web_outbox() or globals().get('_web_external_outbox'))
+    try:
+        with interaction('telegram', 'chat'), replay_conversation(getattr(error, 'conversation_context', None)), telegram_label('auto'):
+            if current_scope(required=False) is None and not (await get_conversations().state()).get('telegram_conversation_id'):
+                await context.bot.send_message(chat_id=BotConfig.AUTHORIZED_USER_ID, text='操作未完成，请先用 /chats 选择对话。')
+                return
+            async with conversation_operation(selector='telegram'):
+                await _scoped_global_error_handler(update, context)
+    finally:
+        restore()
+
+
+async def _scoped_global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("全局错误处理捕获异常", exc_info=context.error)
 
     # Only the authorized user's failures enter shared memory, never attacker input.
@@ -76,14 +117,33 @@ async def boot_core() -> None:
     """
     await UserDataManager.init()
     await BotMemoryDB.get_instance()
+    get_conversations().start()
 
 
 async def telegram_ready(app) -> None:
+    from xgent_app.interaction import interaction
+    from xgent_app.web_bridge import install_tg_to_web_mirror
+    from xgent_app.telegram_presentation import telegram_label
+    with interaction('telegram', 'management'):
+        manager = get_conversations()
+        selected = (await manager.state()).get('telegram_conversation_id')
+        scope = await manager.resolve(selected, selector='telegram') if selected else None
+        with bind_conversation(scope), telegram_label('menu'):
+            restore = install_tg_to_web_mirror(app.bot, get_web_outbox() or globals().get('_web_external_outbox'))
+            try:
+                await _telegram_ready(app)
+            finally:
+                restore()
+
+
+async def _telegram_ready(app) -> None:
     """Telegram 通道真的就绪之后才做的事：同步 /命令 菜单 + 发启动主菜单。
 
     由 telegram_supervisor 在长轮询起来之后调用。两段各自 try 住：菜单同步失败
     不影响启动菜单，启动菜单失败也不影响任何别的组件。
     """
+    from xgent_app.telegram_presentation import render_telegram_text
+    from xgent_app.conversations import bind_callback_markup
     global _startup_commands_synced, _startup_menu_sent
 
     if not _startup_commands_synced:
@@ -164,6 +224,10 @@ async def telegram_ready(app) -> None:
                 await db.set_config('restart_expected_pid', None)
                 await db.set_config('restart_expected_ts', None)
 
+            if current_scope(required=False) is None:
+                _startup_menu_sent = True
+                return  # No automatic rebind or unsolicited selection menu.
+
             # 跨进程去重：检查上次发送时间戳
             last_sent_ts = await db.get_config('last_startup_menu_sent_ts', 0)
             elapsed = time.time() - float(last_sent_ts or 0)
@@ -174,12 +238,15 @@ async def telegram_ready(app) -> None:
             # 标记置位（不再回滚）：宁可启动菜单漏发，也绝不能重复发送。
             # 漏发时用户随时可手动 /start；重复发送才是真正困扰用户的问题。
             _startup_menu_sent = True
-            await app.bot.send_message(
-                chat_id=notify_chat_id or BotConfig.AUTHORIZED_USER_ID,
-                text=build_start_menu_text(),
-                reply_markup=get_main_menu(),
-                parse_mode=constants.ParseMode.HTML
-            )
+            from xgent_app.telegram_presentation import telegram_label
+            with telegram_label('footer'):
+                await app.bot.send_message(
+                    chat_id=notify_chat_id or BotConfig.AUTHORIZED_USER_ID,
+                    text=(build_start_menu_text() if getattr(app.bot.send_message, '_xgent_native_labelled', False)
+                          else await render_telegram_text(build_start_menu_text(), 'HTML')),
+                    reply_markup=bind_callback_markup(get_main_menu()),
+                    parse_mode=constants.ParseMode.HTML
+                )
             # 记录发送时间戳到数据库（跨进程有效）
             await db.set_config('last_startup_menu_sent_ts', time.time())
             await GlobalRecorder.record_system_op("启动后发送完整主菜单", {"chat_id": notify_chat_id, "restart_notice_sent": restart_notice_sent})
@@ -199,6 +266,7 @@ async def telegram_ready(app) -> None:
 
 
 async def on_shutdown(app: Optional[Any] = None):
+    await get_conversations().close()
     """应用关闭时清理资源。唯一的停机清理路径。
 
     ``app`` 只是为了兼容历史调用点，函数体本身不需要它——PTB 的拆卸由

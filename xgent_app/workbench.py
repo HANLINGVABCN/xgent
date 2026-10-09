@@ -1,5 +1,7 @@
 """Application-facing workbench service; HTTP delegates here, not a second agent engine."""
 from __future__ import annotations
+import contextlib
+from xgent_app.knowledge import KnowledgeDocuments, DocumentError, document_operation, compose_skill_text, bump_knowledge_revision, update_skill_references, read_knowledge_state
 import asyncio
 import base64
 from collections import defaultdict
@@ -37,6 +39,9 @@ def _unpack(value):
         return data
     except Exception: raise WorkbenchError('历史游标无效，请重新加载') from None
 
+from xgent_app.conversations import conversation_operation, current_scope, get_conversations, stamp_frame, ConversationError
+
+
 class Workbench:
     def __init__(self, namespace):
         self.ns = namespace
@@ -69,14 +74,28 @@ class Workbench:
         return task
 
     async def handle(self, method, resource, data):
+        navigation = resource == 'conversations' or resource.startswith('conversations/') or resource in {'tasks','tasks/cancel','skills','memories'} or resource.startswith(('skills/','memories/'))
+        cid = None if navigation else data.get('conversation_id')
+        if method != 'GET' and resource in {'memory/clear','tasks/create'} and not cid:
+            raise WorkbenchError('缺少目标会话，请刷新后重试。', 409)
+        from xgent_app.interaction import interaction
+        try:
+            with interaction('web', 'management'):
+                async with conversation_operation(cid, expected=method != 'GET' and not navigation, fresh=True, selector='shared'):
+                    return await self._handle_scoped(method, resource, data)
+        except ConversationError as exc:
+            raise WorkbenchError(str(exc), exc.status) from exc
+
+    async def _handle_scoped(self, method, resource, data):
         await self.db()
         if method == 'GET':
-            operations = {'bootstrap': self.bootstrap, 'history': self.history, 'search': self.search,
+            operations = {'conversations': self.conversations, 'conversations/delete_info': self.conversation_delete_info, 'conversations/search': self.search_conversations, 'bootstrap': self.bootstrap, 'history': self.history, 'search': self.search,
                           'tasks': self.tasks, 'artifacts': self.artifacts, 'providers': self.providers,
-                          'skills': self.skills, 'usage': self.usage, 'usage/records': self.usage_records,
+                          'skills': self.skills, 'memories': self.memories, 'usage': self.usage, 'usage/records': self.usage_records,
                           'artifacts/preview': self.artifact_preview, 'settings': self.read_settings}
         else:
-            operations = {'tasks/create': self.create_task, 'tasks/cancel': self.cancel_tasks,
+            operations = {**{f'{kind}/{action}': self.document_action for kind in ('skills','memories') for action in ('create','update','rename','delete')}, **{f'conversations/{action}': self.conversation_action for action in ('create','switch','rename','archive','restore','reset_context','delete')},
+                          'tasks/create': self.create_task, 'tasks/cancel': self.cancel_tasks,
                           'providers/save': self.save_provider, 'providers/delete': self.delete_provider,
                           'providers/fetch': self.fetch_models, 'providers/select': self.select_model,
                           'providers/import': self.import_providers, 'providers/export': self.export_providers,
@@ -85,6 +104,11 @@ class Workbench:
         operation = operations.get(resource)
         if operation is None: raise WorkbenchError('工作台接口不存在', 404)
         try:
+            if resource.startswith('conversations/'):
+                data = {**data, 'action': resource.split('/', 1)[1]}
+            if resource.startswith(('skills/','memories/')) and resource != 'skills/state':
+                kind, action = resource.split('/',1)
+                data = {**data, 'kind':kind, 'action':action}
             return await operation(data)
         except asyncio.CancelledError:
             raise
@@ -94,7 +118,7 @@ class Workbench:
                 if isinstance(data.get(key), str) and (key != 'repeat' or resource == 'password'):
                     self.ns['register_runtime_secret'](str(data.get(key) or ''))
             failure = await self.ns['GlobalRecorder'].record_error(exc, source='workbench')
-            status = exc.status if isinstance(exc, WorkbenchError) else (400 if isinstance(exc, (ValueError, TypeError)) else 500)
+            status = exc.status if isinstance(exc, (WorkbenchError, DocumentError)) else (400 if isinstance(exc, (ValueError, TypeError)) else 500)
             raise WorkbenchError(failure, status) from None
 
     async def bootstrap(self, data):
@@ -111,9 +135,11 @@ class Workbench:
             if value is not missing and value is not None:
                 self.ns['UserDataManager'].set(key, value)
         settings = await self.ns['_web_read_settings']()
+        visible_names = self.ns.get('visible_command_names', lambda names: names)(self.ns['_WEB_COMMAND_MAP'])
         commands = [{'cmd': '/' + name, 'desc': self.ns['command_description'](name)}
-                    for name in sorted(self.ns['_WEB_COMMAND_MAP'], key=lambda n: (n != 'start', n))]
+                    for name in sorted(visible_names, key=lambda n: (n != 'start', n))]
         return {'settings': settings, 'commands': commands,
+                'conversations': await self.conversations({}),
                 'capabilities': {'tasks': True, 'providers': True, 'skills': True, 'usage': True, 'artifacts': True, 'shared_memory': True},
                 'timezone': self.ns['SelfTriggerManager'].DEFAULT_TIMEZONE,
                 'version': self.ns.get('RUNTIME_CODE_VERSION', self.ns.get('CODE_VERSION', '')),
@@ -124,22 +150,22 @@ class Workbench:
     async def history(self, data):
         db = await self.db()
         conn = await db._get_conn()
-        generation = int(await db.get_config_fresh('attachment_generation', 0))
+        generation = await db.get_attachment_generation()
         limit = _integer(data.get('limit'))
         forward = bool(data.get('after'))
         token = data.get('after') or data.get('before')
         boundary = _unpack(token) if token else None
         reset = {'messages': [], 'ui_generation': generation, 'ui_tombstones': [],
-                 'reset': True, 'next_cursor': None, 'first_cursor': None, 'last_cursor': None}
+                 'conversation_id': current_scope().conversation_id, 'reset': True, 'next_cursor': None, 'first_cursor': None, 'last_cursor': None}
         if boundary and boundary[3] != generation:
             return reset
         query = str(data.get('q') or '').strip()[:200]
         anchor = str(data.get('anchor') or '')
         if anchor:
             kind, _, key = anchor.partition(':')
-            sql = ('SELECT timestamp FROM ui_messages WHERE ui_message_id=? AND generation=?'
-                   if kind == 'ui' else 'SELECT timestamp FROM global_messages WHERE id=?')
-            cur = await conn.execute(sql, (key, generation) if kind == 'ui' else (key,))
+            sql = ('SELECT timestamp FROM ui_messages WHERE ui_message_id=? AND conversation_id=?'
+                   if kind == 'ui' else 'SELECT timestamp FROM global_messages WHERE id=? AND session_id=?')
+            cur = await conn.execute(sql, (key, current_scope().conversation_id))
             row = await cur.fetchone()
             await cur.close()
             if row is None: raise WorkbenchError('消息已不存在', 404)
@@ -157,7 +183,7 @@ class Workbench:
                 table = 'ui_messages' if source else 'global_messages'
                 key_column = 'ui_message_id' if source else 'id'
                 text_column = 'payload' if source else 'content'
-                where, params = (['generation=?'], [generation]) if source else (["msg_type<>?"], [str(self.ns['MessageType'].AGENT_CMD)])
+                where, params = (['conversation_id=?'], [current_scope().conversation_id]) if source else (["session_id=?", "msg_type<>?"], [current_scope().conversation_id, str(self.ns['MessageType'].AGENT_CMD)])
                 if boundary:
                     ts, boundary_source, key, _ = boundary
                     if source == boundary_source:
@@ -189,7 +215,7 @@ class Workbench:
                 scanned += 1
                 boundary = [row['timestamp'], row['_source'], row['_key'], generation]
                 if row['_source']:
-                    message = ui_record(row)
+                    message = ui_record(row, active_generation=generation)
                     if message.pop('deleted', False):
                         tombstones.append({k: message[k] for k in ('ui_message_id','revision','ui_generation')})
                         continue
@@ -206,11 +232,13 @@ class Workbench:
         found = found[:limit]
         cursor = found[-1]['history_cursor'] if found and more else (_pack(boundary) if more else None)
         if not forward: found.reverse()
-        if int(await db.get_config_fresh('attachment_generation', 0)) != generation: return reset
+        if await db.get_attachment_generation() != generation: return reset
         return {'messages': found, 'next_cursor': cursor,
                 'first_cursor': found[0]['history_cursor'] if found else None,
                 'last_cursor': found[-1]['history_cursor'] if found else None,
-                'ui_generation': generation, 'ui_tombstones': tombstones, 'busy': self.ns['_web_is_busy']()}
+                'conversation_id': current_scope().conversation_id,
+                'ui_generation': generation, 'ui_tombstones': tombstones, 'busy': self.ns['_web_is_busy'](),
+                'running': (await get_conversations().state()).get('running')}
 
     async def search(self, data):
         if not str(data.get('q') or '').strip(): return {'messages': [], 'next_cursor': None}
@@ -221,6 +249,10 @@ class Workbench:
         if task_id:
             task = await db.get_trigger_task(task_id)
             if task is None: raise WorkbenchError('任务不存在', 404)
+            owner = await db.get_session(task['conversation_id'])
+            if owner is None or owner.get('deleting'): raise WorkbenchError('任务不存在', 404)
+            task['conversation_name'] = owner['name']
+            task['conversation_archived'] = bool(owner['archived'])
             before = data.get('before')
             boundary = json.loads(before) if before else [time.time()+1, '\uffff']
             if not isinstance(boundary,list) or len(boundary)!=2: raise WorkbenchError('运行记录游标无效')
@@ -234,9 +266,10 @@ class Workbench:
             offset = max(0, int(data.get('offset') or 0))
         except (ValueError, TypeError, OverflowError):
             raise WorkbenchError('任务分页位置无效') from None
-        clauses, params = [], []
-        if status:
-            clauses.append('status=?'); params.append(status)
+        source = str(data.get('source_conversation_id') or '')
+        clauses, params = ["conversation_id IN (SELECT id FROM chat_sessions WHERE deleting=0)"], []
+        if source and source != 'all':
+            clauses.append('conversation_id=?'); params.append(source)
         if kind == 'condition':
             clauses.append("COALESCE(condition_expr, '') != ''")
         elif kind in ('cron', 'once', 'immediate'):
@@ -248,6 +281,9 @@ class Workbench:
             pattern = '%' + search.replace('!', '!!').replace('%', '!%').replace('_', '!_') + '%'
             clauses.append("(summary LIKE ? ESCAPE '!' OR command LIKE ? ESCAPE '!' OR id LIKE ? ESCAPE '!')")
             params.extend([pattern] * 3)
+        count_clauses, count_params = list(clauses), list(params)
+        if status:
+            clauses.append('status=?'); params.append(status)
         condition = 'WHERE ' + ' AND '.join(clauses) if clauses else ''
         cur = await conn.execute(f'SELECT COUNT(*) FROM trigger_tasks {condition}', params)
         total = (await cur.fetchone())[0]; await cur.close()
@@ -255,9 +291,15 @@ class Workbench:
         offset = min(offset, max(0, (total - 1) // 50 * 50))
         cur = await conn.execute(f'SELECT * FROM trigger_tasks {condition} ORDER BY created_at DESC, id DESC LIMIT 51 OFFSET ?', (*params, offset))
         rows = [dict(r) for r in await cur.fetchall()]; await cur.close()
-        cur = await conn.execute('SELECT status, COUNT(*) AS count FROM trigger_tasks GROUP BY status')
+        cur = await conn.execute('SELECT status, COUNT(*) AS count FROM trigger_tasks WHERE ' + ' AND '.join(count_clauses) + ' GROUP BY status', count_params)
         counts = {r['status']: r['count'] for r in await cur.fetchall()}; await cur.close()
-        return {'items': rows[:50], 'offset': offset, 'total': total, 'counts': counts,
+        sources = await db.get_all_sessions()
+        owners = {item['id']: item for item in sources}
+        for task in rows:
+            owner = owners.get(task['conversation_id'], {})
+            task['conversation_name'] = owner.get('name', task['conversation_id'])
+            task['conversation_archived'] = bool(owner.get('archived'))
+        return {'sources': sources, 'source_conversation_id': source, 'items': rows[:50], 'offset': offset, 'total': total, 'counts': counts,
                 'next_offset': offset+50 if len(rows)>50 else None,
                 'timezone': self.ns['SelfTriggerManager'].DEFAULT_TIMEZONE}
 
@@ -268,7 +310,7 @@ class Workbench:
         if not isinstance(fields.get('command'), str) or not fields['command'].strip(): raise WorkbenchError('命令不能为空')
         if 'repeat' in fields and not isinstance(fields['repeat'],bool): raise WorkbenchError('重复监控必须是布尔值')
         if any(not isinstance(v,str) for k,v in fields.items() if k!='repeat'): raise WorkbenchError('任务参数必须是文本')
-        fingerprint = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest(); db = await self.db()
+        fingerprint = hashlib.sha256(json.dumps({'conversation_id': current_scope().conversation_id, **fields}, sort_keys=True).encode()).hexdigest(); db = await self.db()
         async with self._mutation_lock:
             async with db._transaction() as conn:
                 cur = await conn.execute('SELECT * FROM workbench_requests WHERE request_id=?', (request_id,))
@@ -281,7 +323,7 @@ class Workbench:
             async def perform():
                 try:
                     result = await self.ns['SelfTriggerManager'].register_from_fields(**fields,
-                        chat_id=self.ns['BotConfig'].AUTHORIZED_USER_ID, conversation_id=self.ns['SINGLE_MEMORY_SESSION_ID'])
+                        chat_id=self.ns['BotConfig'].AUTHORIZED_USER_ID, conversation_id=current_scope().conversation_id)
                     response = {'ok': True, 'message': result}
                 except Exception as exc:
                     failure = await self.ns['GlobalRecorder'].record_error(exc, source='task_create')
@@ -295,6 +337,14 @@ class Workbench:
         if data.get('confirm') is not True: raise WorkbenchError('取消任务需要确认')
         ids = data.get('ids')
         if not isinstance(ids, list) or not 1 <= len(ids) <= 100: raise WorkbenchError('请选择 1–100 个任务')
+        db = await self.db()
+        for task_id in ids:
+            task = await db.get_trigger_task(str(task_id))
+            if task is None:
+                raise WorkbenchError('任务不存在', 404)
+            owner = await db.get_session(task['conversation_id'])
+            if owner is None or owner.get('deleting'):
+                raise WorkbenchError('任务来源已不存在', 404)
         results = [await self.ns['SelfTriggerManager'].cancel(str(task_id)) for task_id in ids]
         return {'ok': True, 'messages': results}
 
@@ -410,18 +460,112 @@ class Workbench:
         await db.import_providers(result,replace=False); await self.refresh_providers(list(result))
         return {'ok':True,'count':len(result)}
 
-    async def skills(self,data):
-        files=self.ns['list_skill_files'](); selected=str(data.get('path') or '')
+    def _documents(self):
+        return KnowledgeDocuments(self.ns)
+
+    async def _refresh_skill_state(self):
+        db = await self.db()
+        snapshot = await read_knowledge_state(db)
+        for key in ('disabled_skills','hidden_skills'):
+            self.ns['UserDataManager'].set(key, snapshot[key])
+
+    def _skill_record(self, record):
+        return {**record, 'state': self.ns['get_skill_state'](record['path'])}
+
+    async def skills(self, data):
+        await self._refresh_skill_state()
+        selected = str(data.get('path') or '')
+        store = self._documents()
         if selected:
-            if selected not in files: raise WorkbenchError('技能不存在',404)
-            text=await asyncio.to_thread(self.ns['read_skill_text'],self.ns['resolve_skill_abs_path'](selected))
-            return {'path':selected,'state':self.ns['get_skill_state'](selected),'content':text}
-        return {'items':[{'path':p,'name':Path(p).stem,'state':self.ns['get_skill_state'](p), 'source':'private' if p.startswith('private/') else 'public'} for p in files]}
+            return self._skill_record(await asyncio.to_thread(store.read, 'skills', selected))
+        return {'items':[self._skill_record(item) for item in await asyncio.to_thread(store.list, 'skills')]}
+
+    async def memories(self, data):
+        store = self._documents()
+        selected = str(data.get('path') or '')
+        if selected:
+            return await asyncio.to_thread(store.read, 'memories', selected)
+        return {'items':await asyncio.to_thread(store.list, 'memories'), 'shared':True}
+
+    async def document_action(self, data):
+        db = await self.db()
+        kind, action = data['kind'], data['action']
+        store = self._documents()
+        logical, revision = data.get('path'), data.get('revision')
+        warning = None
+        async with document_operation(db.db_path):
+            if action == 'create':
+                item = await asyncio.to_thread(store.create, kind)
+                try:
+                    if kind == 'skills':
+                        await self.ns['save_skill_state'](item['path'], 'disabled')
+                except Exception:
+                    ticket = await asyncio.to_thread(store.stage_delete, kind, item['path'], item['revision'])
+                    await asyncio.to_thread(store.finish_delete, ticket)
+                    raise
+            elif action == 'update':
+                content = (compose_skill_text(data.get('summary'), data.get('body'))
+                           if kind == 'skills' and data.get('mode') == 'sections' else data.get('content'))
+                item = await asyncio.to_thread(store.write, kind, logical, revision, content)
+            elif action == 'rename':
+                _, old_file, _, new_logical = await asyncio.to_thread(store.rename_target, kind, logical, revision, data.get('name'))
+                if new_logical == logical:
+                    item = await asyncio.to_thread(store.read, kind, logical)
+                else:
+                    if kind == 'skills':
+                        # Prime the destination state before exposing its filename.
+                        await update_skill_references(db, logical, new_logical, keep_old=True)
+                        await self._refresh_skill_state()
+                    renamed = None
+                    try:
+                        renamed = await asyncio.to_thread(store.rename, kind, logical, revision, data.get('name'))
+                        if kind == 'skills':
+                            await update_skill_references(db, logical)
+                        item = renamed
+                    except Exception:
+                        rolled_back = renamed is None
+                        if renamed is not None:
+                            try:
+                                await asyncio.to_thread(store.rename, kind, renamed['path'], renamed['revision'], old_file.name)
+                                rolled_back = True
+                            except Exception:
+                                pass  # Never overwrite an externally-created file to roll back.
+                        if kind == 'skills' and rolled_back:
+                            with contextlib.suppress(Exception):
+                                await update_skill_references(db, new_logical)
+                        raise
+            elif action == 'delete':
+                if data.get('confirm') is not True:
+                    raise WorkbenchError('请确认删除这份文档。')
+                ticket = await asyncio.to_thread(store.stage_delete, kind, logical, revision)
+                try:
+                    if kind == 'skills':
+                        await update_skill_references(db, logical)
+                except Exception:
+                    await asyncio.to_thread(store.finish_delete, ticket, rollback=True)
+                    raise
+                try:
+                    await asyncio.to_thread(store.finish_delete, ticket)
+                except OSError:
+                    warning = '文档已从列表移除，但临时文件清理失败；请检查文件权限。'
+                item = None
+            else:
+                raise WorkbenchError('未知文档操作。')
+            async with db._transaction() as conn:
+                version = await bump_knowledge_revision(conn)
+            await self._refresh_skill_state()
+        notify = self.ns.get('_sync_knowledge_state')
+        if notify is not None:
+            await notify(db, force=True)
+        return {'ok':True, 'item':self._skill_record(item) if item is not None and kind=='skills' else item,
+                'knowledge_revision':version, 'warning':warning}
 
     async def skill_state(self,data):
-        path=str(data.get('path') or ''); state=data.get('state')
-        if path not in self.ns['list_skill_files']() or state not in ('enabled','disabled','hidden'): raise WorkbenchError('技能或状态无效')
-        await self.ns['save_skill_state'](path,state); return {'ok':True}
+        logical=str(data.get('path') or ''); state=data.get('state')
+        if logical not in self.ns['list_skill_files']() or state not in ('enabled','disabled','hidden'):
+            raise WorkbenchError('技能或状态无效')
+        await self.ns['save_skill_state'](logical,state)
+        return {'ok':True}
 
     async def usage(self, data):
         start, end = await self.usage_range(data)
@@ -621,12 +765,14 @@ class Workbench:
             await asyncio.sleep(.5); await self.ns['apply_web_config_change']()
         self.background(apply()); return {'ok':True,'requires_login':True}
 
-    async def clear_memory(self,data):
-        if data.get('confirm') != '清空共享记忆': raise WorkbenchError('请输入“清空共享记忆”确认三端共同清空')
-        if self.ns['_web_is_busy'](): raise WorkbenchError('请先停止当前生成再清空',409)
-        async with self.ns['_conversation_processing_lock']:
-            db=await self.db()
-            return {'ok':True,'result':await db.clear_all_conversation_memory()}
+    async def clear_memory(self, data):
+        if data.get('confirm') not in {'清空当前会话', '重置上下文'}:
+            raise WorkbenchError('请输入“重置上下文”确认；历史保留，其他会话不受影响。')
+        result = await self.ns['clear_current_conversation']()
+        outbox = self.ns['get_web_outbox']()
+        if outbox is not None:
+            outbox.put(stamp_frame({'type': 'context_reset'}))
+        return {'ok': True, 'result': result}
 
     async def artifacts(self,data):
         kind=data.get('kind','files'); q=str(data.get('q') or '').lower()[:200]
@@ -650,8 +796,8 @@ class Workbench:
             return await asyncio.to_thread(scan)
         db=await self.db(); conn=await db._get_conn(); before=int(data.get('before') or 2**63-1)
         search_sql = " AND (instr(lower(content),?)>0 OR instr(lower(COALESCE(metadata,'')),?)>0 OR instr(lower(COALESCE(metadata,'')),?)>0)" if q else ''
-        params = (before,q,q,json.dumps(q,ensure_ascii=True)[1:-1]) if q else (before,)
-        cur=await conn.execute("SELECT * FROM global_messages WHERE id<? AND (metadata LIKE '%attachments%' OR metadata LIKE '%display_media%' OR msg_type IN ('user_file','user_photo','media_reply'))" + search_sql + " ORDER BY id DESC LIMIT 51",params)
+        params = (current_scope().conversation_id,before,q,q,json.dumps(q,ensure_ascii=True)[1:-1]) if q else (current_scope().conversation_id,before,)
+        cur=await conn.execute("SELECT * FROM global_messages WHERE session_id=? AND id<? AND (metadata LIKE '%attachments%' OR metadata LIKE '%display_media%' OR msg_type IN ('user_file','user_photo','media_reply'))" + search_sql + " ORDER BY id DESC LIMIT 51",params)
         rows=[dict(r) for r in await cur.fetchall()]; await cur.close(); items=[]
         for row in rows[:50]:
             message=await asyncio.to_thread(build_history_message,row,self.ns['ArtifactManager'].ROOT_DIR,str(Path(self.ns['AgentExecutor'].WORK_DIR)/'workspace'))
@@ -661,3 +807,49 @@ class Workbench:
                 items.append({**item,'id':f"{row['id']}:{index}",'source_id':row['id'],'timestamp':row['timestamp']})
             if message.get('media_error'): items.append({'id':str(row['id']),'filename':'附件记录','error':message['media_error'],'source_id':row['id']})
         return {'items':items,'next_cursor':rows[49]['id'] if len(rows)>50 else None}
+
+
+    async def conversations(self, data):
+        db = await self.db()
+        return {**await get_conversations().state(), 'items': await db.get_all_sessions()}
+
+    async def conversation_action(self, data):
+        if data['action'] != 'create' and not data.get('id'):
+            raise WorkbenchError('缺少目标会话。', 409)
+        action = data['action']
+        result = {}
+        if action in {'reset_context','delete'}:
+            if data.get('confirm') is not True:
+                raise WorkbenchError('请确认目标会话后再操作。')
+            if action == 'delete':
+                result = await self.ns['delete_conversation'](str(data['id']))
+            else:
+                await self.ns['reset_conversation_context'](str(data['id']))
+        else:
+            await get_conversations().manage(action, data.get('id'), data.get('name'))
+        return {**await self.conversations({}), **result}
+
+    async def conversation_delete_info(self, data):
+        db = await self.db()
+        return await db.conversation_delete_info(str(data.get('id') or ''))
+
+    async def search_conversations(self, data):
+        query = str(data.get('q') or '').strip()[:200]
+        db = await self.db(); conn = await db._get_conn()
+        # Search is a management read, never a cross-conversation model context.
+        sql = """SELECT s.id,s.name,s.archived,s.last_active,
+            (SELECT substr(m.content, max(1,instr(lower(m.content),lower(?))-40),180)
+             FROM global_messages m WHERE m.session_id=s.id AND ?<>''
+             AND m.msg_type IN ('user_text','ai_reply','user_file','user_photo','media_reply')
+             AND instr(lower(m.content),lower(?))>0 ORDER BY m.timestamp DESC,m.id DESC LIMIT 1) snippet
+            FROM chat_sessions s WHERE s.deleting=0 AND (?='' OR instr(lower(s.name),lower(?))>0 OR EXISTS
+              (SELECT 1 FROM global_messages m WHERE m.session_id=s.id
+               AND m.msg_type IN ('user_text','ai_reply','user_file','user_photo','media_reply')
+               AND instr(lower(m.content),lower(?))>0))
+            ORDER BY s.last_active DESC,s.id LIMIT 30"""
+        cursor = await conn.execute(sql, (query,)*6)
+        items = [dict(row) for row in await cursor.fetchall()]
+        await cursor.close()
+        for item in items:
+            item['snippet'] = ' '.join((item['snippet'] or '').split())
+        return {'items':items}
