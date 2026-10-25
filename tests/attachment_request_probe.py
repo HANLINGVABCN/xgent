@@ -239,6 +239,49 @@ def upload_update(h, kind, message_id, data, group=None, caption=CAPTION, name=N
     return update, context
 
 
+async def mutate_upload_and_leave_new_version(bot, root):
+    import hashlib
+    import os
+    async with Harness(bot, root) as h:
+        original = await h.add_upload(b'VERSION-ORIGINAL', 'editable.txt', 'keep this caption')
+        before = (await h.db.get_attachment_records())[0]
+        await h.call()
+        assert 'VERSION-ORIGINAL' in '\n'.join(unpack_request(h.requests[-1])[0])
+        path = Path(bot.ArtifactManager.UPLOAD_DIR) / original['path']
+        stamp = path.stat()
+        current = b'VERSION-MODIFIED'
+        assert len(current) == original['size']
+        path.write_bytes(current)
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        await h.call()
+        text = '\n'.join(unpack_request(h.requests[-1])[0])
+        assert 'VERSION-MODIFIED' in text and 'VERSION-ORIGINAL' not in text
+        after = (await h.db.get_attachment_records())[0]
+        ref = json.loads(after['metadata'])['attachments'][0]
+        assert ref['sha256'] == hashlib.sha256(current).hexdigest()
+        assert ref['id'] == original['id'] and ref['caption'] == original['caption']
+        assert (after['id'], after['content']) == (before['id'], before['content'])
+        # No further request refreshes metadata before the next Python process.
+        path.write_bytes('重启后最新文件\r\n  保留空格\n'.encode('utf-16'))
+        return {'same_length_and_mtime_read': True, 'conditional_metadata_refresh': True}
+
+
+async def mutated_upload_after_restart(bot, root):
+    import hashlib
+    async with Harness(bot, root) as h:
+        before = (await h.db.get_attachment_records())[0]
+        previous = json.loads(before['metadata'])['attachments'][0]
+        await h.call()
+        text = '\n'.join(unpack_request(h.requests[-1])[0])
+        assert '重启后最新文件\r\n  保留空格\n' in text and 'VERSION-MODIFIED' not in text
+        current = json.loads((await h.db.get_attachment_records())[0]['metadata'])['attachments'][0]
+        assert current['encoding'] == 'utf-16'
+        assert current['id'] == previous['id'] and current['path'] == previous['path']
+        path = Path(bot.ArtifactManager.UPLOAD_DIR) / current['path']
+        assert current['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
+        return {'restart_reads_latest': True, 'encoding_reinspected': True}
+
+
 async def seed_and_check(bot, root):
     result = {"providers": {}}
     async with Harness(bot, root) as h:
@@ -396,15 +439,13 @@ async def check_failures(bot, root):
             else:
                 path.write_bytes(changed)
             before = len(h.requests)
-            try:
-                await h.call()
-            except AttachmentContextError as exc:
-                assert "long.txt" in str(exc)
-            else:
-                raise AssertionError("missing/changed original was silently omitted")
-            assert len(h.requests) == before
+            await h.call()
+            assert len(h.requests) == before + 1
+            texts, images, _ = unpack_request(h.requests[-1])
+            assert 'long.txt' in '\n'.join(texts)
+            assert ('temporarily unavailable' if changed is None else 'changed original') in '\n'.join(texts)
             path.write_bytes(original)
-        result["missing_and_changed_originals_block"] = True
+        result["missing_and_changed_uploads_do_not_block"] = True
 
         with patch.object(h.db, "record_global_message", AsyncMock(side_effect=OSError("disk full"))):
             try:
@@ -552,13 +593,12 @@ async def check_upload_entrypoints(bot, root):
 
 async def check_document_groups(bot, root):
     async with Harness(bot, root) as h:
-        png, jpeg = image_bytes("PNG"), image_bytes("JPEG")
-        contents = {201: png, 202: LONG_TEXT.encode(), 203: jpeg}
+        contents = {201: b'first document', 202: LONG_TEXT.encode(), 203: b'last document'}
         updates = [upload_update(h, "document", i, contents[i], "documents")
                    for i in (203, 201, 202)]
         delays = {"upload-201.bin": 0.04, "upload-202.bin": 0.02, "upload-203.bin": 0}
 
-        async def download(doc):
+        async def download(doc, destination=None):
             await asyncio.sleep(delays[doc.file_name])
             return doc.data
 
@@ -566,15 +606,16 @@ async def check_document_groups(bot, root):
             bot, "ALBUM_FLUSH_QUIET_SECONDS", 60,
         ):
             await asyncio.gather(*(bot.handle_document_message(*pair) for pair in updates))
-            assert len(await h.db.get_attachment_records()) == 3
+            assert not await h.db.get_attachment_records()
             assert not h.requests
             await bot.handle_document_message(*updates[0])
-            assert len(await h.db.get_attachment_records()) == 3
-            await bot.flush_album_conversation((1, "documents"))
+            pending = bot._pending_text_conversations[bot.get_text_conversation_buffer_key(updates[0][0])]
+            assert len(pending.attachments) == 3
+            await bot.finish_text_conversation(*updates[0])
         assert len(h.requests) == 1
         texts, images, mimes = unpack_request(h.requests[-1])
         joined = "\n".join(texts)
-        assert images == [png, jpeg] and mimes == ["image/png", "image/jpeg"]
+        assert images == [] and mimes == []
         assert LONG_TEXT in joined and CAPTION in joined
         assert joined.index("[Attachment: upload-201") < joined.index("[Attachment: upload-202")
         assert joined.index("[Attachment: upload-202") < joined.index("[Attachment: upload-203")
@@ -586,10 +627,12 @@ async def check_concurrent_upload_order(bot, root):
     async with Harness(bot, root) as h:
         first, second = image_bytes("PNG"), image_bytes("JPEG")
         for kind in ("photo", "document"):
+            first, second = ((b'first file complete', b'second file complete') if kind == 'document'
+                             else (image_bytes('PNG'), image_bytes('JPEG')))
             await h.db.clear_all_conversation_memory()
             started, release = asyncio.Event(), asyncio.Event()
 
-            async def download(item):
+            async def download(item, destination=None):
                 if item.data == first:
                     started.set()
                     await release.wait()
@@ -603,25 +646,35 @@ async def check_concurrent_upload_order(bot, root):
                 try:
                     await asyncio.wait_for(started.wait(), 10)
                     from xgent_app.conversations import ConversationBusy
-                    try:
-                        await handler(*upload_update(h, kind, 102, second))
-                    except ConversationBusy:
-                        pass
+                    if kind == 'photo':
+                        try:
+                            await handler(*upload_update(h, kind, 102, second))
+                        except ConversationBusy:
+                            pass
+                        else:
+                            raise AssertionError('busy photo request was admitted')
                     else:
-                        raise AssertionError('busy media request was admitted')
+                        await handler(*upload_update(h, kind, 102, second))
                 finally:
                     release.set()
                     await asyncio.wait_for(task, 10)
             with patch.object(bot, 'download_telegram_file', AsyncMock(return_value=second)), patch.object(bot, 'process_conversation', AsyncMock()):
                 await handler(*upload_update(h, kind, 102, second))
+                if kind == 'document':
+                    await bot.finish_text_conversation(h.update, h.context)
             rows = await h.db.get_attachment_records()
-            refs = [json.loads(row["metadata"])["attachments"][0] for row in rows]
+            refs = [ref for row in rows for ref in json.loads(row['metadata'])['attachments']]
             assert [ref["source_message_id"] for ref in refs] == [101, 102]
             await h.call()
-            assert unpack_request(h.requests[-1])[1] == [first, second]
+            if kind == 'photo':
+                assert unpack_request(h.requests[-1])[1] == [first, second]
+            else:
+                text = '\n'.join(unpack_request(h.requests[-1])[0])
+                assert first.decode() in text and second.decode() in text
             result[kind] = True
 
         await h.db.clear_all_conversation_memory()
+        first, second = image_bytes('PNG'), image_bytes('JPEG')
         started, release = asyncio.Event(), threading.Event()
         loop = asyncio.get_running_loop()
         build_photo = bot.build_photo_multimodal_payload
@@ -689,7 +742,7 @@ async def check_idle_requests(bot, root):
 
 async def seed_pending_albums(bot, root):
     async with Harness(bot, root) as h:
-        with patch.object(bot, "download_telegram_file", AsyncMock(side_effect=lambda item: item.data)), \
+        with patch.object(bot, "download_telegram_file", AsyncMock(side_effect=lambda item, *args: item.data)), \
                 patch.object(bot, "ALBUM_FLUSH_QUIET_SECONDS", 60):
             for i in (103, 101, 102):
                 await bot.handle_photo_message(*upload_update(
@@ -710,9 +763,15 @@ async def seed_pending_albums(bot, root):
                 await bot.handle_document_message(*upload_update(
                     h, "document", i, data, "pending-documents",
                 ))
+            with patch.object(bot, 'process_conversation', AsyncMock()):
+                running = (await manager.state())['running']
+                if running:
+                    await manager.request_stop(running['run_id'])
+                    await asyncio.wait_for(stopped(), 5)
+                await bot.finish_text_conversation(h.update, h.context)
         assert len(await h.db.get_attachment_records()) == 6
         assert not h.requests
-        assert len(bot._pending_album_conversations) == 1
+        assert not bot._pending_album_conversations
         return {"persisted_before_any_flush": True}
 
 
@@ -737,7 +796,7 @@ async def check_clear_races(bot, root):
             for group in (None, "clear-during-download"):
                 started, release = asyncio.Event(), asyncio.Event()
 
-                async def download(item):
+                async def download(item, destination=None):
                     started.set()
                     await release.wait()
                     return item.data
@@ -764,8 +823,8 @@ async def check_clear_races(bot, root):
         started, release = asyncio.Event(), threading.Event()
         loop = asyncio.get_running_loop()
 
-        def assemble(records, upload_root, generated_root=None):
-            assembled = prepare_attachment_context(records, upload_root, generated_root)
+        def assemble(records, upload_root, generated_root=None, **kwargs):
+            assembled = prepare_attachment_context(records, upload_root, generated_root, **kwargs)
             loop.call_soon_threadsafe(started.set)
             assert release.wait(10), "test did not release assembly"
             return assembled
@@ -805,15 +864,19 @@ async def check_malformed_ingress(bot, root):
             handler = bot.handle_photo_message if kind == "photo" else bot.handle_document_message
             h.drain_frames()
             with patch.object(bot, "download_telegram_file", AsyncMock(return_value=data)):
-                await handler(*upload_update(h, kind, 100, data, name=name))
+                pair = upload_update(h, kind, 100, data, name=name)
+                await handler(*pair)
+                if kind == 'document':
+                    assert not h.requests[before:]
+                    await bot.finish_text_conversation(*pair)
             rows = await h.db.get_attachment_records()
             assert len(rows) == 1
-            assert json.loads(rows[0]["metadata"])["attachments"][0]["kind"] == "invalid"
+            assert json.loads(rows[0]["metadata"])["attachments"][0]["kind"] == ('invalid' if kind == 'photo' else 'binary')
             # Invalid attachments degrade gracefully: the model call proceeds
             # with an informational text placeholder instead of being blocked.
             assert len(h.requests) == before + 1
             req_texts = unpack_request(h.requests[-1])[0]
-            assert any("Unsupported file format" in t for t in req_texts), \
+            assert any(("Unsupported file format" if kind == 'photo' else 'Server file') in t for t in req_texts), \
                 f"degraded placeholder missing for {name}"
             # A later turn also succeeds — no permanent block.
             await h.call()

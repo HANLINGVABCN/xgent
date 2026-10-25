@@ -17,6 +17,7 @@ from xgent_app.conversations import (
     DEFAULT_CONVERSATION_ID, DEFAULT_CONVERSATION_NAME, SCHEMA_VERSION,
     ConversationError, ExecutionFileLock, current_scope, require_conversation_id,
 )
+from xgent_app.queue_store import QueueStore, migrate_queue
 
 
 async def _config(conn, key, default=None):
@@ -32,7 +33,7 @@ async def _set_config(conn, key, value):
                        (key, json.dumps(value, ensure_ascii=False)))
 
 
-class ConversationStore:
+class ConversationStore(QueueStore):
     async def backup_legacy_conversations(self):
         conn = await self._get_conn()
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -172,6 +173,9 @@ class ConversationStore:
                 active = await _config(conn, 'current_chat_id')
                 await _set_config(conn, 'telegram_conversation_id', active)
                 await _set_config(conn, 'conversation_schema_version', 3)
+            if version < 4:
+                await migrate_queue(conn)
+                await _set_config(conn, 'conversation_schema_version', 4)
         self._config_cache.clear()
 
     async def _context_start(self, conn):
@@ -250,6 +254,9 @@ class ConversationStore:
             for table in ('global_messages','chat_messages','context_compressions','context_compression_jobs'):
                 await conn.execute(f'DELETE FROM {table} WHERE session_id=?', (cid,))
             await conn.execute('DELETE FROM ui_messages WHERE conversation_id=?', (cid,))
+            await conn.execute('DELETE FROM message_queue WHERE conversation_id=?', (cid,))
+            await conn.execute('DELETE FROM message_queue_controls WHERE conversation_id=?', (cid,))
+            await conn.execute('DELETE FROM message_queue_requests WHERE conversation_id=?', (cid,))
             for table, key in (('cli_relay_ops','conversation_context'),('channel_outbox','_conversation_context'),('channel_deadletter','_conversation_context')):
                 cursor = await conn.execute(f'SELECT id,payload FROM {table}')
                 ids = []
@@ -354,6 +361,29 @@ class ConversationStore:
         self._config_cache.pop('telegram_conversation_id', None)
         return {'ok': True, 'conversation_id': cid, **await self.get_conversation_state()}
 
+    async def set_bot_conversation(self, cid, generation, expected_bot):
+        """Explicit Web action: CAS only the Bot selector, never the Web/CLI view.
+
+        Returns the target session name when the selector actually changed,
+        or None for an idempotent repeat (so callers notify only once).
+        """
+        from .queue_store import one
+        from .conversations import ConversationChanged
+        changed = None
+        async with self._transaction() as conn:
+            session = await one(conn, 'SELECT generation,archived,deleting,name FROM chat_sessions WHERE id=?', (cid,))
+            if not session or session['deleting'] or session['archived'] or session['generation'] != generation:
+                raise ConversationChanged('目标会话已改变或已归档，请刷新后再设置 Bot。')
+            selected = await _config(conn, 'telegram_conversation_id')
+            if selected != expected_bot and selected != cid:
+                raise ConversationChanged('Bot 当前对话已被其他端切换，请刷新后确认。')
+            if selected != cid:
+                await _set_config(conn, 'telegram_conversation_id', cid)
+                await self._bump_conversation_revision(conn)
+                changed = str(session['name'] or cid)
+        self._config_cache.pop('telegram_conversation_id', None)
+        return changed
+
     async def request_conversation_stop(self, run_id, conversation_id=None):
         async with self._transaction() as conn:
             running = await _config(conn, 'conversation_running')
@@ -364,6 +394,7 @@ class ConversationStore:
             if running.get('stop_requested'):
                 return True
             running['stop_requested'] = True
+            await self._queue_pause_all(conn, 'stopped')
             await _set_config(conn, 'conversation_running', running)
             await _set_config(conn, 'conversation_revision', int(await _config(conn, 'conversation_revision', 0)) + 1)
             return True

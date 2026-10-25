@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import contextvars
 import copy
+import functools
 import json
 import logging
 import mimetypes
@@ -29,6 +31,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from xgent_app.web_media import current_media_presentation
+from xgent_app.web_display import present_web_frame
 from xgent_app.ui_history import UiHistoryError, capture_ui_frame, resolve_callback
 
 from xgent_app.fanout import (
@@ -103,6 +106,19 @@ def _allocate_web_message_id() -> int:
 # “got multiple values for argument 'chat_id'”。用引用计数保证：已打补丁时只
 # 增计数不重裹，最后一个 release 才真正还原类，从根上杜绝双层包裹。
 _ACTIVE_MIRRORS: Dict[int, List[Any]] = {}
+_outbound_telegram = contextvars.ContextVar('outbound_telegram', default=False)
+
+
+def _without_reverse_mirror(function):
+    """A Web/CLI delivery is not a new Telegram-origin message for Web to echo."""
+    @functools.wraps(function)
+    async def wrapped(*args, **kwargs):
+        token = _outbound_telegram.set(True)
+        try:
+            return await function(*args, **kwargs)
+        finally:
+            _outbound_telegram.reset(token)
+    return wrapped
 
 
 class MediaTokenRegistry:
@@ -522,7 +538,7 @@ def markup_from_frame(rows: Any) -> Optional[Any]:
 def _present_media_frame(frame: Dict[str, Any]) -> Dict[str, Any]:
     presentation = current_media_presentation()
     if not presentation or frame['type'] not in {'message', 'edit', 'photo', 'document'}:
-        return frame
+        return present_web_frame(frame)
     media = []
     for source in presentation['media']:
         item = dict(source)
@@ -532,10 +548,11 @@ def _present_media_frame(frame: Dict[str, Any]) -> Dict[str, Any]:
         else:
             item['error'] = '原件不存在或无法读取'
         media.append(item)
-    from xgent_app.web_history import _history_display_html
+    from xgent_app.web_history import _history_display_html, history_web_display
     display = _history_display_html(presentation['text'])
     return {**frame, 'type': 'message', 'text': display if display is not None else presentation['text'],
             'parse_mode': 'HTML' if display is not None else None, 'msg_type': 'ai_reply',
+            'web_display': history_web_display(presentation['text']),
             'media_group_id': presentation['media_group_id'], 'media': media,
             'replace_message_ids': presentation.get('replace_message_ids', [])}
 
@@ -544,6 +561,8 @@ async def emit_ui_frame(outbox: WebOutbox, chat_id: int, frame_type: str,
                         *, source: Optional[str] = None, **fields: Any) -> None:
     from xgent_app.interaction import identity
     from xgent_app.conversations import current_scope
+    if source == 'telegram' and _outbound_telegram.get():
+        return
     if source == 'telegram' and identity()[0] == 'telegram' and current_scope(required=False) is None:
         return
     frame = {'type': frame_type, 'ts': time.time(), **fields}
@@ -587,7 +606,7 @@ class WebBot:
     以为消息发出去了。
     """
 
-    # 标记位：process_conversation 据此识别"本轮来自网页"，跳过 TG->Web 镜像安装。
+    # Legacy name: describes the output API, not the interaction's input origin.
     _is_xgent_web_bot = True
 
     def __init__(self, outbox: WebOutbox, chat_id: int):
@@ -733,6 +752,7 @@ class WebContext:
         self.args: List[str] = []
 
 
+@_without_reverse_mirror
 async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
                             markup_builder: Optional[Any] = None) -> Any:
     """把一个 Op 真的打到某个 PTB bot 上；创建类操作返回原生 message_id。
@@ -778,6 +798,38 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
         return native_call
 
     try:
+        if payload.get('queue_receipt'):
+            from .conversations import get_conversations
+            from .message_queue import queue_card_text
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            db = await get_conversations().factory()
+            item = await db.queue_item(payload['queue_receipt'])
+            if item is None:
+                raise OpNotDeliverable('排队回执已随会话删除')
+            if item['receipt_id'] and item['receipt_revision'] == item['revision']:
+                return item['receipt_id']
+            rows = []
+            if item['status'] in {'pending', 'paused', 'invalid'}:
+                rows.append([InlineKeyboardButton('❌ 取消', callback_data=f"q:c:{item['id']}:{item['revision']}")])
+            if item['status'] == 'paused' and item.get('reason') != 'ask':
+                state = await db.queue_snapshot(item['conversation_id'])
+                if state['paused'] and state['generation'] == item['generation']:
+                    rows.insert(0, [InlineKeyboardButton('▶ 继续发送待发消息', callback_data=
+                        f"q:r:{state['conversation_id']}:{state['generation']}:{state['revision']}")])
+            buttons = InlineKeyboardMarkup(rows) if rows else None
+            mid = item['receipt_id']
+            if mid:
+                try:
+                    await method('edit_message_text')(chat_id=item['chat_id'], message_id=mid,
+                        text=queue_card_text(item), reply_markup=buttons)
+                except _TgBadRequest as exc:
+                    if 'message is not modified' not in str(exc).lower():
+                        raise
+            else:
+                sent = await method('send_message')(chat_id=item['chat_id'], text=queue_card_text(item), reply_markup=buttons)
+                mid = sent.message_id
+            await db.queue_bind_receipt(item['id'], mid, item['revision'])
+            return mid
         if kind == OP_SEND:
             result = await method("send_message")(
                 chat_id=op.chat_id, text=str(payload.get("text") or ""),
@@ -816,6 +868,15 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
                     # 补投时文件已经没了。跳过——为一个临时文件卡住整条待发队列不值得，
                     # 与 _replay_relay_op 对同一情况的处理一致。
                     raise OpNotDeliverable(f"待发文件已不存在: {path}")
+                if kind == OP_DOCUMENT and payload.get('local_api'):
+                    from xgent_app.agent_sendfile import send_local_api_document
+                    result = await send_local_api_document(
+                        str(path), **payload['local_api'],
+                        filename=payload.get('filename') or os.path.basename(str(path)),
+                        send_document=method('send_document'), logger=logger,
+                        chat_id=op.chat_id, caption=payload.get('caption'), **extra,
+                    )
+                    return getattr(result, 'message_id', None)
                 opened = open(str(path), "rb")
                 handle = opened
             try:
@@ -890,8 +951,10 @@ class MirrorBot:
     real_bot 为 None 时退化为纯网页输出，行为等价于 WebBot。
     """
 
-    # 标记位：process_conversation 据此识别"本轮来自网页"，跳过 TG->Web 镜像安装。
+    # Legacy name: means output is already isolated/mirrored, not input origin.
+    # Native Telegram conversations also use this adapter; origin stays in scope.
     _is_xgent_web_bot = True
+    _queues_telegram_output = True
 
     def __init__(self, outbox: WebOutbox, chat_id: int, real_bot: Any = None,
                  channel: Any = None, ui_source: Optional[str] = None):
@@ -903,6 +966,7 @@ class MirrorBot:
         self._id_lock = threading.Lock()
         self._channel = channel
         self._local_channel: Optional[ChannelWorker] = None
+        self._logical_ids = set()
 
     def _allocate_message_id(self) -> int:
         return _allocate_web_message_id()
@@ -917,11 +981,15 @@ class MirrorBot:
         网页自己的路径不传 override，行为完全不变。
         """
         if override is None:
-            return self._allocate_message_id()
+            mid = self._allocate_message_id()
+            self._logical_ids.add(mid)
+            return mid
         try:
-            return int(override)
+            mid = int(override)
         except (TypeError, ValueError):
-            return self._allocate_message_id()
+            mid = self._allocate_message_id()
+        self._logical_ids.add(mid)
+        return mid
 
     def _emit(self, frame_type: str, **fields: Any) -> None:
         frame: Dict[str, Any] = {"type": frame_type, "ts": time.time()}
@@ -961,18 +1029,32 @@ class MirrorBot:
                durable: bool = True) -> None:
         """把一次 Telegram 调用交给通道。同步、非阻塞、永不抛。"""
         from xgent_app.interaction import telegram_delivery_allowed
-        if self.real_bot is None or not telegram_delivery_allowed():
+        from xgent_app.reply_delivery import current_run_delivery
+        if self.real_bot is None:
+            return
+        delivery = current_run_delivery()
+        if delivery is None and not telegram_delivery_allowed():
+            return
+        op = Op(kind, logical_id=logical_id,
+                chat_id=int(chat_id) if chat_id is not None else self.chat_id,
+                payload=payload, transient=transient, durable=durable)
+        if delivery is not None:
+            delivery.offer(self, op)
+        else:
+            self._enqueue_telegram(op)
+
+    def _enqueue_telegram(self, op):
+        """Admission shared by live sends and a single current-reply subscription."""
+        # A CLI/Web mirroring preference must not disable replies to native
+        # Telegram inputs. The shared worker only checks transport readiness.
+        if os.environ.get('XGENT_CLI_NO_TG_MIRROR') and not getattr(self, '_is_xgent_telegram_bot', False):
             return
         try:
             channel = self._tg_channel()
             channel.ensure_started()
-            channel.offer(Op(
-                kind, logical_id=logical_id,
-                chat_id=int(chat_id) if chat_id is not None else self.chat_id,
-                payload=payload, transient=transient, durable=durable,
-            ))
+            channel.offer(op)
         except Exception:  # noqa: BLE001 —— 出站失败绝不能带走这一轮对话
-            logger.warning("MirrorBot 交付 Telegram 通道失败: %s", kind, exc_info=True)
+            logger.warning("MirrorBot 交付 Telegram 通道失败: %s", op.kind, exc_info=True)
 
     async def _deliver_local(self, op: Op, native: Optional[int]) -> Any:
         """无共享通道时的投递实现（单测路径）。生产走 sections 里注册的那个。"""
@@ -1015,6 +1097,8 @@ class MirrorBot:
         # 成功的 edit/delete 请求，卡死整条待发队列。
         if raw <= 0:
             return raw, None
+        if raw in self._logical_ids:
+            return raw, None  # Allocated here even if Bot had not subscribed yet.
         if self.real_bot is not None:
             try:
                 if not self._tg_channel().knows_logical(raw):
@@ -1128,6 +1212,7 @@ class MirrorBot:
     async def send_document(self, chat_id: Optional[int] = None, document: Any = None,
                             caption: Optional[str] = None, filename: Optional[str] = None,
                             relay_message_id: Any = None,
+                            _local_api: Optional[Dict[str, str]] = None,
                             **kwargs: Any) -> WebMessage:
         target = int(chat_id) if chat_id is not None else self.chat_id
         display_name = _media_filename(document, filename)
@@ -1149,8 +1234,9 @@ class MirrorBot:
                         "path": local_path,
                         "filename": filename,
                         "caption": caption,
+                        "local_api": dict(_local_api) if _local_api else None,
                         "kwargs": self._passthrough(kwargs),
-                    }, transient={"document": document})
+                    }, transient={} if local_path is not None else {"document": document})
         return WebMessage(self, message_id, target, str(caption or ""))
 
     async def send_photo(self, chat_id: Optional[int] = None, photo: Any = None,
@@ -1173,7 +1259,7 @@ class MirrorBot:
                         "path": local_path,
                         "caption": caption,
                         "kwargs": self._passthrough(kwargs),
-                    }, transient={"photo": photo})
+                    }, transient={} if local_path is not None else {"photo": photo})
         return WebMessage(self, message_id, target, str(caption or ""))
 
     async def get_file(self, *args: Any, **kwargs: Any) -> Any:
@@ -1231,6 +1317,9 @@ class MirrorMessage:
     def chat_id(self) -> Any:
         return getattr(self._real, "chat_id", None)
 
+    def get_bot(self) -> MirrorBot:
+        return self._bot
+
     async def reply_text(self, text: str, **kwargs: Any) -> WebMessage:
         return await self._bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
 
@@ -1257,6 +1346,45 @@ class MirrorMessage:
         return await self._bot.delete_message(
             chat_id=self.chat_id, message_id=self._real.message_id,
         )
+
+
+class _ConversationOutputProxy:
+    """Keep native input/context data; replace only conversation output handles."""
+
+    def __init__(self, real: Any, delivery_bot: MirrorBot, **overrides: Any):
+        self._real = real
+        self._bot = delivery_bot
+        self.__dict__.update(overrides)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def get_bot(self) -> MirrorBot:
+        return self._bot
+
+
+def build_telegram_conversation_objects(update: Any, context: Any, outbox: Any,
+                                        channel: Any = None):
+    """Native Telegram input, with the same isolated outbox as Web/CLI output.
+
+    Do not replace the input with a WebUpdate: origin, forwarding metadata,
+    captions, callback identity and context data must remain native. In
+    particular, never monkey-patch the real Bot into waiting on Telegram while
+    an Agent owns the execution slot. Only the delivery worker touches it.
+    """
+    bot = MirrorBot(outbox, update.effective_chat.id, context.bot, channel=channel)
+    bot._is_xgent_telegram_bot = True
+    message = getattr(update, 'message', None)
+    message = MirrorMessage(message, bot) if message is not None else None
+    query = getattr(update, 'callback_query', None)
+    if query is not None:
+        original = query.message
+        query = _ConversationOutputProxy(query, bot, message=MirrorMessage(original, bot))
+    wrapped = _ConversationOutputProxy(
+        update, bot, message=message, callback_query=query,
+        effective_message=message if message is not None else query.message if query else None,
+    )
+    return wrapped, _ConversationOutputProxy(context, bot, bot=bot), bot
 
 
 class WebCallbackQuery:
@@ -1375,6 +1503,8 @@ def install_tg_to_web_mirror(real_bot: Any, outbox: WebOutbox):
         setattr(cls, name, staticmethod(wrapper))
 
     def emit(frame_type: str, **fields: Any) -> None:
+        if _outbound_telegram.get():
+            return
         frame: Dict[str, Any] = {"type": frame_type, "ts": time.time()}
         frame.update(fields)
         if outbox is not None:
@@ -1587,6 +1717,7 @@ __all__ = [
     "install_tg_to_web_mirror",
     "build_web_conversation_objects",
     "build_web_mirror_objects",
+    "build_telegram_conversation_objects",
     "build_web_callback_objects",
     "build_web_command_objects",
 ]

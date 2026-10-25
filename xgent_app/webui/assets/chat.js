@@ -20,6 +20,9 @@
   var btnStop = document.getElementById("btn-stop");
   var btnAttach = document.getElementById("btn-attach");
   var fileInput = document.getElementById("file-input");
+  var serverUploadInput = document.getElementById('server-upload-input');
+  var fileModes = new WeakMap();
+  var fileBatchKeys = new WeakMap();
   var pendingFilesEl = document.getElementById("pending-files");
   var typing = document.getElementById("typing");
   var statusText = document.getElementById("status-text");
@@ -54,6 +57,12 @@
   var pendingFiles = [];
   var fileStatuses = new WeakMap();
   var uploadQueue = null;
+  var queueEnabled=false,queueState=null,queueController=null,queueVersion=0,queueExpanded=false,queueRefreshPending=false;
+  var queueActions=new Map(),recoveredEdits=new Set(),textSubmitting=false,textSubmission=null;
+  try{
+    JSON.parse(sessionStorage.getItem('xgent_queue_edits')||'[]').forEach(saved=>queueActions.set(saved.item.id,{...saved,busy:false,error:'取回结果待确认'}));
+    recoveredEdits=new Set(JSON.parse(sessionStorage.getItem('xgent_queue_recovered')||'[]'));
+  }catch(e){}
 
   function svgIcon(name, cls) {
     return '<svg class="icon' + (cls ? " " + cls : "") + '" viewBox="0 0 24 24"><use href="#i-' + name + '"/></svg>';
@@ -171,7 +180,7 @@
     notifyWorkbench();
     return fetch(requestPath, options).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (body) {
-        if (!r.ok) { throw new Error(body.error || ("HTTP " + r.status)); }
+        if (!r.ok) { var error=new Error(body.error || ("HTTP " + r.status));error.status=r.status;throw error; }
         return body;
       });
     }).finally(notifyWorkbench);
@@ -294,7 +303,9 @@
   }
 
   function sanitizeHtml(htmlStr) {
-    var tmp = document.createElement("div");
+    // Parse inertly: a detached DIV can still fetch IMG URLs and fire onerror
+    // before its forbidden attributes/nodes are removed. Template contents cannot.
+    var tmp = document.createElement("template");
     tmp.innerHTML = String(htmlStr);
     (function clean(node) {
       Array.prototype.slice.call(node.childNodes).forEach(function (c) {
@@ -333,7 +344,7 @@
         if (c.tagName === "A") { c.target = "_blank"; c.rel = "noopener noreferrer"; }
         clean(c);
       });
-    })(tmp);
+    })(tmp.content);
     return tmp.innerHTML;
   }
 
@@ -346,8 +357,11 @@
         if (c.nodeType === 1) { visit(c); return; }
         if (c.nodeType !== 3 || c.nodeValue.indexOf("\n") < 0) return;
         if (/^(TABLE|THEAD|TBODY|TR|UL|OL)$/.test(node.tagName)) return;
-        if (/^\s*$/.test(c.nodeValue) && c.previousSibling &&
-            /^(PRE|BLOCKQUOTE|DIV|TABLE|UL|OL|P)$/.test(c.previousSibling.tagName)) return;
+        // Formatting whitespace next to a block is not another visible blank
+        // paragraph. Leave the original text node intact instead of adding BRs.
+        if (/^\s*$/.test(c.nodeValue) && [c.previousSibling,c.nextSibling].some(function(s){
+          return s && /^(PRE|BLOCKQUOTE|DIV|TABLE|UL|OL|P|H[1-6]|HR)$/.test(s.tagName);
+        })) return;
         var frag = document.createDocumentFragment();
         c.nodeValue.split("\n").forEach(function (line, i) {
           if (i) frag.appendChild(document.createElement("br"));
@@ -390,7 +404,7 @@
   // *、`、#、| 之类被当 markdown 语法篡改显示（Telegram/CLI 两端都原样回显用户
   // 输入，Web 对齐）。其余角色照常走 renderText。初始渲染(makeBubble)与流式/编辑
   // 更新(putTextFrame)两处共用，避免规则失步。
-  function renderBubbleBody(role, text, parseMode) {
+  function renderBubbleBody(role, text, parseMode, webDisplay) {
     if (role === "user") {
       return escapeHtml(text == null ? "" : String(text)).replace(/\n/g, "<br>");
     }
@@ -399,7 +413,35 @@
     if(role==='sys'&&!parseMode&&/^⚠️(?:\s|$)/.test(String(text||''))){
       return '<pre>'+escapeHtml(String(text||''))+'</pre>';
     }
+    if(webDisplay?.version===1 && Array.isArray(webDisplay.segments) &&
+       webDisplay.segments.every(s=>s && ['markdown','html'].includes(s.kind) && typeof s.text==='string')){
+      // Every segment uses the same allowlist. Never trust even stored/tool HTML.
+      return webDisplay.segments.map(s=>renderText(s.text,s.kind==='html'?'HTML':null)).join('\n');
+    }
     return renderText(text, parseMode);
+  }
+
+  function repaintBubble(entry, html) {
+    var next=document.createElement('div');next.innerHTML=html;
+    var oldBlocks=Array.from(entry.body.querySelectorAll('blockquote[expandable]'));
+    next.querySelectorAll('blockquote[expandable]').forEach(function(block){
+      var key=block.getAttribute('data-raw'),path=block.getAttribute('data-output-path');
+      var text=block.querySelector('pre')?.textContent||'';
+      var index=oldBlocks.findIndex(old=>key ? old.getAttribute('data-raw')===key :
+        old.getAttribute('data-output-path')===path && old._pbText===text);
+      if(index>=0)block.replaceWith(oldBlocks.splice(index,1)[0]);
+    });
+    oldBlocks.forEach(block=>{clearTimeout(block._ft);block._outputRequest?.abort();});
+    var oldCode=Array.from(entry.body.querySelectorAll('.code-block-wrap'));
+    next.querySelectorAll('pre').forEach(function(pre){
+      if(pre.closest('blockquote[expandable],.code-block-wrap'))return;
+      var code=pre.querySelector('code'),text=(code||pre).textContent;
+      var lang=/language-([a-zA-Z0-9_+#.-]+)/.exec(code?.className||'')?.[1]||'CODE';
+      var index=oldCode.findIndex(wrap=>wrap._codeText===text && wrap._codeLang===lang);
+      if(index>=0)pre.replaceWith(oldCode.splice(index,1)[0]);
+    });
+    enhanceBubbleContent(next);
+    entry.body.replaceChildren(...next.childNodes);
   }
 
   function nowTime(timestamp) {
@@ -433,7 +475,8 @@
     }
     if(cardScrollIntent===intent)cardScrollIntent=null;
   }
-  function scrollDown() { log.scrollTop = log.scrollHeight; hideScrollBtn(); }
+  var renderingHistory=0;
+  function scrollDown() { if(renderingHistory)return;log.scrollTop = log.scrollHeight; hideScrollBtn(); }
   function isNearBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 90; }
   function hideScrollBtn() { scrollBtn.classList.remove("show"); }
   function showScrollBtn() { scrollBtn.classList.add("show"); }
@@ -571,6 +614,7 @@
           var lm = /language-([a-zA-Z0-9_+#.-]+)/.exec(codeTag.className);
           if (lm) lang = lm[1];
         }
+        wrap._codeText=rawCode;wrap._codeLang=lang;
 
         var header = document.createElement("div");
         header.className = "code-header";
@@ -719,7 +763,7 @@
   }
 
   var lastStreamEntry = null;
-  function makeBubble(role, text, messageId, parseMode, markup, messageType, timestamp) {
+  function makeBubble(role, text, messageId, parseMode, markup, messageType, timestamp, webDisplay) {
     var stick = isNearBottom();
     msgCount++;
     updateEmptyState();
@@ -758,7 +802,7 @@
 
     var body = document.createElement("div");
     body.className = "body";
-    body.innerHTML = renderBubbleBody(role, text, parseMode);
+    body.innerHTML = renderBubbleBody(role, text, parseMode, webDisplay);
     enhanceBubbleContent(body);
 
     var ts = document.createElement("span");
@@ -872,23 +916,93 @@
     if (e.target === lightbox || e.target.classList.contains("lightbox-img-wrap")) closeLightbox();
   });
 
+  function sizeImagePlaceholder(container, width, height) {
+    if (!(Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0)) return;
+    var scale=Math.min(1,440/width,420/height);
+    container.style.setProperty('--media-photo-width',(width*scale)+'px');
+    container.style.setProperty('--media-photo-ratio',width+' / '+height);
+  }
+
+  function updateMediaContent(container, item) {
+    container._mediaItem=item;
+    if(item.kind==='photo')sizeImagePlaceholder(container,item.width,item.height);
+    container.querySelectorAll('a.media-dl,a.fc-dl').forEach(function(link){
+      link.href=item.download_url;link.download=item.filename||'file';
+    });
+    var versions=container.querySelector('.media-versions');
+    if(item.versions_id&&!versions){
+      versions=document.createElement('button');versions.type='button';versions.className='media-versions';versions.textContent='版本';
+      versions.addEventListener('click',function(e){
+        e.stopPropagation();
+        if(window.XGentWorkbench?.attachmentVersions)window.XGentWorkbench.attachmentVersions(container._mediaItem);
+        else toast('附件详情模块未加载，请刷新后重试。',true);
+      });
+      container.appendChild(versions);
+    }else if(!item.versions_id&&versions)versions.remove();
+  }
+
+  function canReuseMediaContent(container, item) {
+    var previous=container._mediaItem;
+    if(!previous||previous.kind!==item.kind||previous.error!==item.error)return false;
+    if(previous.sha256&&item.sha256&&previous.sha256!==item.sha256)return false;
+    // Accepted uploads retain their decoded local preview. Only metadata and
+    // download links change; the same image element and blob URL stay visible.
+    if(previous.local_preview&&previous.filename===item.filename&&item.download_url)return true;
+    if(previous.path&&item.path)return previous.path===item.path;
+    return previous.download_url===item.download_url&&previous.filename===item.filename;
+  }
+
+  function imageSourceUrl(item) {
+    var url=item.download_url;
+    if(url&&!/^(blob:|data:)/.test(url)&&/^[0-9a-f]{64}$/.test(item.sha256||'')){
+      return url+(url.includes('?')?'&':'?')+'image_version='+item.sha256;
+    }
+    return url;
+  }
+
   function makeMediaContent(item) {
     var kind = item.kind, filename = item.filename, downloadUrl = item.download_url;
     var container = document.createElement("div");
     container.className = "media-item";
-    if (downloadUrl) {
+    if (downloadUrl || kind === 'photo') {
 
       var media = null;
       if (kind === "photo") {
+        container.classList.add('media-photo');
+        container.dataset.imageState='loading';
+        sizeImagePlaceholder(container,item.width,item.height);
+        var imageFrame=document.createElement('div');imageFrame.className='media-image-frame';
+        imageFrame.setAttribute('aria-busy','true');
+        var state=document.createElement('span');state.className='media-load-state';state.textContent='图片加载中…';
+        var retry=document.createElement('button');retry.type='button';retry.className='media-image-retry';retry.textContent='重新加载';retry.hidden=true;
         media = document.createElement("img");
-        media.src = downloadUrl;
         media.loading = "lazy";
+        media.decoding = 'async';
         media.className = "media-img";
         media.alt = filename || "图片";
-        media.addEventListener("click", function () { openLightbox(downloadUrl, filename); });
-        media.addEventListener("error", function () {
-          media.replaceWith(document.createTextNode("🖼️ " + (filename || "图片") + " (加载失败)"));
+        media.addEventListener("click", function () { openLightbox(media.src, container._mediaItem.filename); });
+        media.addEventListener('load',function(){
+          var source=media.src;
+          sizeImagePlaceholder(container,media.naturalWidth,media.naturalHeight);
+          var decoded=media.decode?media.decode().catch(function(){}):Promise.resolve();
+          decoded.then(function(){
+            if(media.src!==source||!media.naturalWidth)return;
+            container.dataset.imageState='ready';imageFrame.setAttribute('aria-busy','false');
+          });
         });
+        media.addEventListener("error", function () {
+          container.dataset.imageState='error';imageFrame.setAttribute('aria-busy','false');
+          state.textContent='图片加载失败';retry.hidden=!container._mediaItem.download_url;
+        });
+        retry.addEventListener('click',function(){
+          container.dataset.imageState='loading';imageFrame.setAttribute('aria-busy','true');
+          state.textContent='图片加载中…';retry.hidden=true;
+          var url=imageSourceUrl(container._mediaItem);
+          media.src=url+(url.startsWith('blob:')?'':(url.includes('?')?'&':'?')+'image_retry='+Date.now());
+        });
+        imageFrame.append(media,state,retry);container.appendChild(imageFrame);
+        if(downloadUrl)media.src=imageSourceUrl(item);
+        else{container.dataset.imageState='error';state.textContent=item.error||'图片暂不可下载';imageFrame.setAttribute('aria-busy','false');}
       } else if (kind === "video") {
         media = document.createElement("video");
         media.src = downloadUrl;
@@ -903,9 +1017,9 @@
         media.className = "media-audio";
       }
 
-      if (media) {
+      if (media && kind !== 'photo') {
         container.appendChild(media);
-      } else {
+      } else if (!media) {
         var card = document.createElement("div");
         card.className = "file-card";
         var fcIcon = document.createElement("div");
@@ -941,12 +1055,13 @@
       dlBtn.title = "下载文件";
       dlBtn.setAttribute("aria-label", "下载 " + (filename || "文件"));
       dlBtn.innerHTML = svgIcon("down");
-      if (media) container.appendChild(dlBtn);
+      if (media && downloadUrl) container.appendChild(dlBtn);
     } else {
       container.classList.add("media-error");
       container.textContent = (filename || (kind === "photo" ? "图片" : "文件")) +
         "\n" + (item.error || "文件暂不可下载");
     }
+    updateMediaContent(container,item);
     return container;
   }
 
@@ -964,29 +1079,43 @@
       entry.mediaContainer.className = "message-media";
       entry.bubble.insertBefore(entry.mediaContainer, entry.body);
     }
-    entry.mediaContainer.replaceChildren();
+    var previousItems=Array.from(entry.mediaContainer.children),retainedItems=new Set();
     var paths = [];
     var displayedText = String(entry.rawText || "").replace(/\\/g, "/");
-    items.forEach(function (item) {
-      entry.mediaContainer.appendChild(makeMediaContent(item));
+    items.forEach(function (item,index) {
+      var content=previousItems.find(node=>!retainedItems.has(node)&&canReuseMediaContent(node,item));
+      if(content)updateMediaContent(content,item);
+      else content=makeMediaContent(item);
+      retainedItems.add(content);
+      if(entry.mediaContainer.children[index]!==content)entry.mediaContainer.insertBefore(content,entry.mediaContainer.children[index]||null);
       if (item.path && displayedText.indexOf(item.path.replace(/\\/g, "/")) < 0) paths.push(item.path);
     });
+    previousItems.forEach(function(node){if(!retainedItems.has(node))node.remove();});
     entry.bubble.classList.toggle("has-media", items.length > 0);
     if (entry.mediaPaths) entry.mediaPaths.remove();
     entry.mediaPaths = null;
     if (paths.length) {
       entry.mediaPaths = document.createElement("div");
       entry.mediaPaths.className = "media-paths";
-      entry.mediaPaths.textContent = paths.join("\n");
+      if(entry.role==='user'){
+        entry.mediaPaths.classList.add('media-paths-compact');
+        paths.forEach(function(path){
+          var button=document.createElement('button');button.type='button';button.className='media-path-copy';
+          button.textContent='已保存 · '+path;button.title=path+'（点击复制）';
+          button.setAttribute('aria-label','复制服务器路径 '+path);
+          button.addEventListener('click',()=>copyText(path).then(()=>toast('已复制服务器路径')).catch(()=>toast('复制失败',true)));
+          entry.mediaPaths.appendChild(button);
+        });
+      }else entry.mediaPaths.textContent = paths.join("\n");
       entry.body.insertAdjacentElement("afterend", entry.mediaPaths);
     }
     if (stick) scrollDown();
   }
 
-  function makeMediaBubble(kind, filename, caption, downloadUrl, messageId, side, timestamp, error) {
+  function makeMediaBubble(kind, filename, caption, downloadUrl, messageId, side, timestamp, error, descriptor) {
     var entry = makeBubble(side || "ai", caption || "", messageId, null, null, null, timestamp);
     entry.bubble.classList.add("media-bubble");
-    setInlineMedia(entry, [{ kind: kind, filename: filename, download_url: downloadUrl, error: error }]);
+    setInlineMedia(entry, [{...descriptor, kind: kind, filename: filename, download_url: downloadUrl, error: error }]);
     return entry;
   }
 
@@ -1045,8 +1174,7 @@
   var conversationBusy = false;
   function setBusy(busy) {
     conversationBusy = !!busy;
-    btnSend.disabled = busy || !!uploadQueue || !historyReady || !!currentConnState;
-    btnSend.classList.toggle("hidden", busy);
+    updateSendAvailability();
     btnStop.classList.toggle("hidden", !busy);
     botAvatar.classList.toggle("pulsing", busy);
     setConnState(currentConnState);
@@ -1073,7 +1201,8 @@
 
   function putTextFrame(role, frame) {
     var id = frame.ui_message_id ? "ui:" + frame.ui_message_id :
-      (frame.media_group_id || (frame.record_id != null ? "history:" + frame.record_id : frame.message_id));
+      (frame.media_group_id || (frame.record_id != null ? "history:" + frame.record_id :
+        (frame.web_display?.reply_message_id ?? frame.message_id)));
     var entry = id != null ? byMessageId[id] : null;
     // An already saved reply must not regress to a delayed transport fragment.
     if(entry?.durable && frame.record_id==null && !frame.ui_message_id)return entry;
@@ -1082,18 +1211,19 @@
     });
     if (!entry && frame.type === "edit" && id == null) entry = lastStreamEntry;
     var newRole = classifyMessageText(role, frame.text, frame.msg_type);
+    var displayKey=JSON.stringify(frame.web_display?.segments||null);
     if (entry && entry.rawText !== undefined && entry.role === newRole) {
-      if(entry.rawText!==frame.text || entry.parseMode!==frame.parse_mode){
-        entry.rawText = frame.text;entry.parseMode=frame.parse_mode;
-        entry.body.innerHTML = renderBubbleBody(newRole, frame.text, frame.parse_mode);
-        enhanceBubbleContent(entry.body);
+      if(entry.displayKey!==displayKey || (!frame.web_display &&
+          (entry.rawText!==frame.text || entry.parseMode!==frame.parse_mode))){
+        repaintBubble(entry,renderBubbleBody(newRole, frame.text, frame.parse_mode, frame.web_display));
       }
     } else {
       var next = entry && entry.row.nextSibling;
       removeEntry(entry);
-      entry = makeBubble(role, frame.text, id, frame.parse_mode, null, frame.msg_type, frame.timestamp || frame.ts);
+      entry = makeBubble(role, frame.text, id, frame.parse_mode, null, frame.msg_type, frame.timestamp || frame.ts, frame.web_display);
       if (next && next.parentNode === log) log.insertBefore(entry.row, next);
     }
+    entry.rawText=frame.text;entry.parseMode=frame.parse_mode;entry.displayKey=displayKey;
     if(frame.timestamp!=null){
       var ts=entry.row.querySelector('.ts');
       if(ts){ts.textContent=nowTime(frame.timestamp);ts.title=new Date(Number(frame.timestamp)*1000).toLocaleString();}
@@ -1112,6 +1242,7 @@
     var id=message.ui_message_id?'ui:'+message.ui_message_id:
       (message.media_group_id||'history:'+(message.record_id??message.id));
     var aliases=message.replace_message_ids||[];
+    if(message.upload_request_key)aliases=aliases.concat('upload:'+message.upload_request_key);
     if(message.web_live&&message.web_live.epoch===epoch)aliases=aliases.concat(message.web_live.message_ids||[]);
     var existing=byMessageId[id];
     // Adopt the existing live bubble rather than throw away expanded blocks and
@@ -1123,6 +1254,7 @@
     var frame={...message,type:'message',text:message.content??message.text,
       record_id:message.record_id??message.id,replace_message_ids:aliases};
     var entry=putTextFrame(role,frame);
+    if(message.file_message&&entry.uploadProgress){entry.uploadProgress.remove();entry.uploadProgress=null;}
     entry.durable=!message.ui_message_id;
     aliases.forEach(function(mid){byMessageId[mid]=entry;});
     entry.row.dataset.historyCursor=message.history_cursor||entry.row.dataset.historyCursor||'';
@@ -1142,8 +1274,9 @@
     if (!Number.isSafeInteger(frame.ui_generation) || !Number.isSafeInteger(frame.revision)) return false;
     if (uiGeneration !== null && frame.ui_generation < uiGeneration) return false;
     if (uiGeneration !== null && frame.ui_generation > uiGeneration) {
-      pendingFrames.push(frame);
-      resync();
+      // UI frames are persisted before delivery. Fetch their new generation;
+      // never put an unsequenced raw frame into the transport replay queue.
+      resync(true).catch(function(){});
       return false;
     }
     uiGeneration = frame.ui_generation;
@@ -1172,6 +1305,28 @@
   }
 
   function handleFrame(frame) {
+    if(!['message','edit','edit_markup','delete','user_message','document','photo','notice','record_snapshot','attachment_changed'].includes(frame.type)){
+      handleFrameContent(frame);return;
+    }
+    var anchor=scrollAnchor(),follow=isNearBottom()&&!viewingPast;
+    renderingHistory++;
+    try{handleFrameContent(frame);}finally{
+      renderingHistory--;
+      if(follow)scrollDown();else restoreScrollAnchor(anchor);
+    }
+  }
+
+  function handleFrameContent(frame) {
+    if(frame.type==='attachment_changed'){
+      window.dispatchEvent(new CustomEvent('xgent-attachment-changed',{detail:frame}));
+      if(frame.conversation_id===selectedConversationId&&frame.generation===uiGeneration){
+        var existing=byMessageId['history:'+frame.record_id];
+        if(existing&&frame.message)putHistoryFrame(frame.message,streamEpoch);
+      }
+      return;
+    }
+    if(frame.type==='queue_state'){refreshQueue();return;}
+    if(frame.queue_id)refreshQueue();
     if(frame.type==='settings_state'){window.XGentAppearance?.accept(frame);return;}
     if(frame.type==='knowledge_state'){window.dispatchEvent(new CustomEvent('xgent-workbench-change',{detail:{pages:['models','settings']}}));return;}
     if(frame.type==='conversation_deleted'){window.dispatchEvent(new CustomEvent('xgent-conversation-deleted',{detail:frame}));window.XGentConversations?.refresh();return;}
@@ -1207,15 +1362,17 @@
       return;
     }
     if(frame.type==='turn_end'||frame.type==='turn_error')window.dispatchEvent(new Event('xgent-turn-finished'));
-    if(viewingPast && ['message','edit','user_message','document','photo','record_snapshot'].includes(frame.type) &&
-       (!frame.ui_generation || frame.ui_generation===uiGeneration)) {
-      newFrames++;newerAvailable=true;updateHistoryState();return;
+    if(viewingPast && ['message','edit','edit_markup','user_message','document','photo','notice','record_snapshot'].includes(frame.type) &&
+       (!frame.ui_generation || frame.ui_generation===uiGeneration) && !displayedFrameEntry(frame)) {
+      var newId=frame.web_display?.reply_message_id??frame.ui_message_id??frame.record_id??frame.message_id;
+      if(newId==null||!unseenHistoryFrames.has(newId)){newFrames++;unseenHistoryFrames.add(newId);}
+      newerAvailable=true;updateHistoryState();return;
     }
     if (isNearBottom()) requestAnimationFrame(function(){boundMessages(false);});
     if (!acceptUiFrame(frame)) return;
     if(frame.type==='record_snapshot'){
       if(Number.isSafeInteger(frame.ui_generation)&&uiGeneration!==null&&frame.ui_generation!==uiGeneration){
-        if(frame.ui_generation>uiGeneration)resync();
+        if(frame.ui_generation>uiGeneration)resync(true).catch(function(){});
         return;
       }
       var anchor=Array.from(log.children).find(row=>row.getBoundingClientRect().bottom>log.getBoundingClientRect().top);
@@ -1236,6 +1393,9 @@
         if (em) setButtons(em, frame.reply_markup, frame.message_id);
       }
     } else if (frame.type === "delete") {
+      if(frame.web_display?.reply_message_id!=null&&frame.message_id!==frame.web_display.reply_message_id){
+        delete byMessageId[frame.message_id];return;
+      }
       var deletedId = frame.ui_message_id ? "ui:" + frame.ui_message_id : frame.message_id;
       var d = byMessageId[deletedId];
       if(d?.durable&&!frame.ui_message_id)return;
@@ -1287,12 +1447,14 @@
       if (!frame.busy) {
         reconcileAfterTurn = false;
         // Restore failures and retry controls are durable after the archive switch.
-        if (frame.committed) resync();
+        if (frame.committed) resync(true).catch(function(){});
       }
     } else if (frame.type === "history_reset" || frame.type === "context_reset") {
       cancelUploads("记忆已清空");
       pendingFrames = [];
-      resync();
+      // An earlier baseline may be resolving and flushing this very event.
+      // Invalidation must replace it, not coalesce into that stale request.
+      resync(true).catch(function(){});
     }
   }
 
@@ -1314,7 +1476,9 @@
       try { receiveEvent(event.epoch,event.id,event.frame); }
       catch(e){console.error('消息渲染失败',e);}
     });
-    btnSend.disabled=conversationBusy||!!uploadQueue||!!currentConnState;
+    updateSendAvailability();
+    scheduleHistoryPrefetch();
+    refreshQueue();
   }
 
   function resync(force) {
@@ -1340,7 +1504,7 @@
     else if (conversationBusy) statusText.innerHTML = '<span class="conn-dot"></span> 思考与生成中…';
     else statusText.innerHTML = '<span class="' + cls + '"></span> 在线';
     statusText.classList.toggle("busy", conversationBusy && !state);
-    btnSend.disabled = conversationBusy || !!uploadQueue || !historyReady || !!state;
+    updateSendAvailability();
   }
 
   function stopLiveTransport() {
@@ -1493,6 +1657,9 @@
 
   var historyCursor = null;
   var historyLoading = false;
+  var historyPageRequest=null, historyLoadController=null, historyPageVersion=0;
+  var historyError=null, historyPrefetchScheduled=false;
+  var unseenHistoryFrames=new Set();
   var historyAnchor = null;
   var viewingPast = false;
   var newerAvailable = false;
@@ -1502,17 +1669,47 @@
   }
   function boundMessages(prepend) {
     var rows = Array.from(log.children);
+    var removedFront=false;
     while (rows.length > 200) {
       var row = prepend ? rows.pop() : rows.shift();
       var selection=window.getSelection();
-      if(row.contains(document.activeElement) || row.querySelector("blockquote.expanded") ||
+      var box=row.getBoundingClientRect(),viewport=log.getBoundingClientRect();
+      if((box.bottom>viewport.top&&box.top<viewport.bottom) || row.contains(document.activeElement) || row.querySelector("blockquote.expanded") ||
          Array.from(row.querySelectorAll("video,audio")).some(function(media){return !media.paused;}) ||
          (selection&&!selection.isCollapsed&&(row.contains(selection.anchorNode)||row.contains(selection.focusNode)))) continue;
       var entry=null;
       Object.keys(byMessageId).forEach(function(key){if(byMessageId[key].row===row){entry=byMessageId[key];delete byMessageId[key];}});
       if(entry)removeEntry(entry);else row.remove();
-      if(prepend)newerAvailable=true;
+      if(prepend){newerAvailable=true;viewingPast=true;}else removedFront=true;
     }
+    if(removedFront)historyCursor=edgeCursor(false)||historyCursor;
+  }
+  function displayedFrameEntry(frame){
+    var keys=[frame.ui_message_id?'ui:'+frame.ui_message_id:null,frame.media_group_id,
+      frame.record_id!=null?'history:'+frame.record_id:null,frame.web_display?.reply_message_id,frame.message_id,
+      ...(frame.replace_message_ids||[]),...(frame.web_live?.epoch===streamEpoch?frame.web_live.message_ids||[]:[])];
+    return keys.map(key=>key!=null?byMessageId[key]:null).find(Boolean);
+  }
+  function scrollAnchor(){
+    var row=Array.from(log.children).find(row=>row.getBoundingClientRect().bottom>log.getBoundingClientRect().top);
+    return row?{row:row,top:row.getBoundingClientRect().top}:null;
+  }
+  function restoreScrollAnchor(anchor){
+    if(anchor?.row.isConnected)log.scrollTop+=anchor.row.getBoundingClientRect().top-anchor.top;
+  }
+  function cancelHistoryPage(){
+    historyPageVersion++;
+    historyPageRequest?.controller.abort();historyPageRequest=null;
+    historyLoading=false;historyError=null;
+  }
+  function scheduleHistoryPrefetch(){
+    if(historyPrefetchScheduled)return;
+    historyPrefetchScheduled=true;
+    requestAnimationFrame(function(){
+      historyPrefetchScheduled=false;
+      if(historyReady&&!loggedOut&&!historyLoading&&!historyError&&historyCursor&&
+         log.clientHeight>0&&log.scrollTop<=Math.max(800,1.5*log.clientHeight))historyPage(false);
+    });
   }
   function edgeCursor(last) {
     var rows=Array.from(log.querySelectorAll('[data-history-cursor]'));
@@ -1521,56 +1718,84 @@
   function updateHistoryState() {
     document.getElementById('wb-chat').classList.toggle('history-past',viewingPast);
     document.getElementById('wb-chat').classList.toggle('history-top',log.scrollTop<8&&!!historyCursor);
+    document.getElementById('wb-chat').classList.toggle('history-error',!!historyError);
     document.getElementById('wb-earlier').disabled=historyLoading||!historyCursor;
     document.getElementById('wb-newer').disabled=historyLoading||!newerAvailable;
-    document.getElementById('wb-history-state').textContent=viewingPast?
+    document.getElementById('wb-earlier').textContent=historyError&&!historyError.forward?'重试加载历史':'加载更早消息';
+    document.getElementById('wb-newer').textContent=historyError?.forward?'重试较新消息':'加载较新消息';
+    document.getElementById('wb-history-state').textContent=historyError?'加载失败：'+historyError.message:
+      historyLoading?'正在加载…':viewingPast?
       ('浏览历史'+(newFrames?' · 有 '+newFrames+' 条新动态':'')+' · 可向前/后翻页'):'';
   }
   function historyControls(data) {
     historyCursor=data.next_cursor||null;
     newerAvailable=!!historyAnchor;
     viewingPast=!!historyAnchor;
+    newFrames=0;unseenHistoryFrames.clear();
     updateHistoryState();
   }
   async function historyPage(forward) {
-    var cursor=forward?edgeCursor(true):edgeCursor(false)||historyCursor;
+    var cursor=forward?edgeCursor(true):historyCursor;
     if(!cursor||historyLoading||(forward&&!newerAvailable))return;
-    historyLoading=true;updateHistoryState();
-    var generation=historyGen;
-    var visible=Array.from(log.children).find(function(row){return row.getBoundingClientRect().bottom>log.getBoundingClientRect().top;});
-    var visibleTop=visible?.getBoundingClientRect().top;
+    var request={controller:new AbortController(),version:++historyPageVersion,generation:historyGen,cid:selectedConversationId};
+    historyPageRequest=request;historyLoading=true;historyError=null;updateHistoryState();
+    var current=()=>historyPageRequest===request&&request.version===historyPageVersion&&
+      request.generation===historyGen&&request.cid===selectedConversationId;
     try{
-      var data=await api('/api/workbench/history?limit=50&'+(forward?'after=':'before=')+encodeURIComponent(cursor));
-      if(generation!==historyGen)return;
-      if(data.reset){historyAnchor=null;viewingPast=false;await loadHistory();return;}
-      var first=log.firstChild;
-      (data.messages||[]).forEach(function(m){
-        var id=m.history_key||(m.ui_message_id?'ui:'+m.ui_message_id:'history:'+m.id);
-        if(byMessageId[id])return;
-        var entry=putHistoryFrame(m,streamEpoch);
-        if(!forward){log.insertBefore(entry.row,first);(entry.mediaEntries||[]).forEach(function(media){log.insertBefore(media.row,first);});}
-      });
-      boundMessages(!forward);
-      if(visible?.isConnected)log.scrollTop+=visible.getBoundingClientRect().top-visibleTop;
-      if(forward){newerAvailable=!!data.next_cursor;historyCursor=edgeCursor(false);}
-      else {historyCursor=data.next_cursor;newerAvailable=true;}
-      viewingPast=true;
-    }catch(err){document.getElementById('wb-history-state').textContent=err.message;}
-    finally{historyLoading=false;updateHistoryState();}
+      var data=await api('/api/workbench/history?limit=50&'+(forward?'after=':'before=')+encodeURIComponent(cursor),{signal:request.controller.signal});
+      if(!current())return;
+      if(data.conversation_id&&request.cid&&data.conversation_id!==request.cid){
+        throw new Error('会话已变化，请重试加载历史');
+      }
+      if(data.reset||(Number.isSafeInteger(data.ui_generation)&&uiGeneration!==null&&data.ui_generation!==uiGeneration)){
+        historyAnchor=null;viewingPast=false;await resync(true);return;
+      }
+      // Capture NOW, not before the network request: the reader may have moved
+      // several screens while a slow page was in flight.
+      var anchor=scrollAnchor(),first=log.firstChild;
+      renderingHistory++;
+      try{
+        (data.messages||[]).forEach(function(m){
+          var id=m.history_key||(m.ui_message_id?'ui:'+m.ui_message_id:'history:'+m.id);
+          if(byMessageId[id])return;
+          if(m.ui_message_id&&(uiDeleted[m.ui_message_id]||m.revision<(uiRevisions[m.ui_message_id]||0)))return;
+          var entry=putHistoryFrame(m,streamEpoch);
+          if(m.ui_message_id)uiRevisions[m.ui_message_id]=m.revision;
+          if(!forward){log.insertBefore(entry.row,first);(entry.mediaEntries||[]).forEach(media=>log.insertBefore(media.row,first));}
+        });
+        // Restore before pruning so the visible rows are protected by the window.
+        restoreScrollAnchor(anchor);boundMessages(!forward);
+        if(forward){newerAvailable=!!data.next_cursor;historyCursor=edgeCursor(false)||historyCursor;}
+        else historyCursor=(data.messages?.length&&data.next_cursor!==cursor)?data.next_cursor||null:null;
+        updateHistoryState();restoreScrollAnchor(anchor);
+      }finally{renderingHistory--;}
+    }catch(err){if(current()&&err.name!=='AbortError')historyError={forward:forward,message:err.message};}
+    finally{
+      if(current()){historyPageRequest=null;historyLoading=false;updateHistoryState();scheduleHistoryPrefetch();}
+    }
   }
   document.getElementById('wb-earlier').onclick=function(){historyPage(false);};
   document.getElementById('wb-newer').onclick=function(){historyPage(true);};
-  document.getElementById('wb-latest').onclick=function(){if(location.hash.includes('?conversation=')){history.replaceState(null,'','#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync().catch(function(){});};
+  document.getElementById('wb-latest').onclick=function(){if(location.hash.includes('?conversation=')){history.replaceState(null,'','#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true).then(scrollDown).catch(function(){});};
   function loadHistory() {
+    cancelHistoryPage();historyLoadController?.abort();
+    var controller=historyLoadController=new AbortController();
     historyGen++;
     var gen=historyGen, requestedCid=selectedConversationId;
     var wasNearBottom=isNearBottom();
     var top=log.scrollTop;
-    return api(historyUrl()).then(function(data){
+    return api(historyUrl(),{signal:controller.signal}).then(function(data){
       if(gen!==historyGen || requestedCid!==selectedConversationId)return;
-      if(data.conversation_id && requestedCid && data.conversation_id!==requestedCid)return;
-      if(!selectedConversationId && data.conversation_id)selectedConversationId=data.conversation_id;
+      if(data.conversation_id && requestedCid && data.conversation_id!==requestedCid){
+        throw new Error('会话已变化，请重新加载');
+      }
+      if(!selectedConversationId && data.conversation_id){
+        selectedConversationId=data.conversation_id;
+        if(!input.value){try{input.value=sessionStorage.getItem(draftKey())||'';}catch(e){}}
+        syncSendState();
+      }
       historyControls(data);
+      if(typeof data.queue_enabled==='boolean')queueEnabled=data.queue_enabled;
       const sameGeneration=uiGeneration===null || data.ui_generation==null || uiGeneration===data.ui_generation;
       if(!sameGeneration){uiRevisions={};uiDeleted={};}
       uiGeneration=Number.isSafeInteger(data.ui_generation)?data.ui_generation:null;
@@ -1590,6 +1815,10 @@
           const entry=putTextFrame('ai',frame);retained.add(entry);log.appendChild(entry.row);
         });
       }
+      // A snapshot taken while HTTP is still receiving cannot contain this
+      // user message yet. Keep its one optimistic bubble until acceptance.
+      var uploading=uploadQueue?.conversation_id===requestedCid?uploadQueue.entry:null;
+      if(uploading&&!uploading.durable){retained.add(uploading);log.appendChild(uploading.row);}
       // Remove obsolete DOM only after incoming state is ready; no blank interstitial.
       Array.from(new Set(Object.values(byMessageId))).forEach(function(entry){
         if(!retained.has(entry)){
@@ -1604,23 +1833,28 @@
       if(wasNearBottom||historyAnchor)scrollDown();else log.scrollTop=top;
       updateHistoryState();
       if(historyAnchor){const entry=byMessageId[historyAnchor];if(entry){entry.row.classList.add('wb-focus');setTimeout(()=>entry.row.classList.remove('wb-focus'),2000);}}
-    });
+    }).finally(function(){if(historyLoadController===controller)historyLoadController=null;});
   }
 
   function appendHistoryMedia(entry, message, role) {
-    (entry.mediaEntries || []).forEach(removeEntry);
+    var previousMedia=entry.mediaEntries||[];
     entry.mediaEntries = [];
-    if (message.media_group_id || message.msg_type === "ai_reply" || message.msg_type === "media_reply") {
-      setInlineMedia(entry, message.media || []);
+    if (role === 'user' || message.media_group_id || message.msg_type === "ai_reply" || message.msg_type === "media_reply") {
+      previousMedia.forEach(removeEntry);
+      setInlineMedia(entry, (message.media || []).map(item=>({...item,conversation_id:message.conversation_id||selectedConversationId})));
     } else {
       var after = entry.row;
-      (message.media || []).forEach(function (item) {
-        var card = makeMediaBubble(item.kind, item.filename, item.path, item.download_url,
-          null, role === "user" ? "user" : "ai", message.timestamp, item.error);
+      (message.media || []).forEach(function (item,index) {
+        item={...item,conversation_id:message.conversation_id||selectedConversationId};
+        var card = previousMedia[index];
+        if(card)setInlineMedia(card,[item]);
+        else card=makeMediaBubble(item.kind, item.filename, item.path, item.download_url,
+          null, role === "user" ? "user" : "ai", message.timestamp, item.error,item);
         log.insertBefore(card.row, after.nextSibling);
         after = card.row;
         entry.mediaEntries.push(card);
       });
+      previousMedia.slice(entry.mediaEntries.length).forEach(removeEntry);
     }
     if (entry.mediaWarning) entry.mediaWarning.remove();
     entry.mediaWarning = null;
@@ -1635,9 +1869,112 @@
 
   function syncSendState() {
     btnSend.classList.toggle("ready", input.value.trim().length > 0 || pendingFiles.length > 0);
+    updateSendAvailability();
+  }
+
+  function updateSendAvailability(){
+    var queueable=queueEnabled&&!pendingFiles.length&&!input.value.trim().startsWith('/');
+    btnSend.disabled=!!textSubmitting||!!uploadQueue||!historyReady||!!currentConnState||(conversationBusy&&!queueable);
+    btnSend.classList.toggle('hidden',conversationBusy&&!queueEnabled);
+    btnSend.title=conversationBusy&&queueable?'加入待发队列 (Enter)':'发送消息 (Enter)';
+  }
+
+  function queueRequestId(){return globalThis.crypto?.randomUUID?.()||('q'+Date.now().toString(36)+Math.random().toString(36).slice(2));}
+  function queueReason(reason){return {waiting:'等待安全接入点',stopped:'已停止 · 手动继续',failed:'执行未完成 · 手动继续',restart:'来源进程已退出 · 手动继续',ask:'等待表单提交',ask_cancelled:'表单已取消 · 手动继续',generation:'上下文已改变 · 请取回重发',archived:'对话已归档'}[reason]||'排队中';}
+  function drawQueue(error){
+    var panel=document.getElementById('message-queue');if(!panel)return;
+    var items=queueState?.conversation_id===selectedConversationId?queueState.items:[];
+    var recovering=Array.from(queueActions.values()).filter(p=>p.action==='edit'&&p.item?.conversation_id===selectedConversationId&&!items?.some(i=>i.id===p.item.id));
+    var anchor=scrollAnchor();
+    panel.replaceChildren();panel.hidden=!items?.length&&!error&&!queueState?.paused&&!recovering.length;
+    if(panel.hidden)return;
+    var head=document.createElement('div');head.className='queue-head';
+    var title=document.createElement('strong');title.textContent='待发消息 · '+(items?.length||0)+' 条';head.appendChild(title);
+    function button(label,fn){var b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=fn;return b;}
+    if(queueState?.paused&&queueState.reason!=='ask')head.appendChild(button('继续发送',()=>changeQueue(null,'resume')));
+    if(items?.length>3)head.appendChild(button(queueExpanded?'收起':'展开全部',()=>{queueExpanded=!queueExpanded;drawQueue();}));
+    panel.appendChild(head);
+    var list=document.createElement('div');list.className='queue-list';
+    (queueExpanded?items:items?.slice(0,3)||[]).forEach(item=>{
+      var row=document.createElement('div');row.className='queue-item';row.dataset.queueId=item.id;
+      var preview=document.createElement('div');preview.className='queue-preview';
+      var p=document.createElement('p');p.textContent=item.text;p.title=item.text;
+      var reason=document.createElement('small');reason.textContent=queueReason(item.reason)+' · '+item.origin;
+      preview.append(p,reason);row.appendChild(preview);
+      var actions=document.createElement('div');actions.className='queue-actions';
+      ['cancel','edit'].forEach(action=>{var b=button(action==='cancel'?'❌ 取消':'编辑',()=>changeQueue(item,action));b.disabled=!!queueActions.get(item.id)?.busy;actions.appendChild(b);});
+      row.appendChild(actions);list.appendChild(row);
+    });panel.appendChild(list);
+    recovering.forEach(p=>{
+      var row=document.createElement('div');row.className='queue-actions';
+      var text=document.createElement('span');text.textContent=p.busy?'正在取回消息…':'取回结果待确认，原文仍安全保留。';row.appendChild(text);
+      var retry=button('重试取回',()=>changeQueue(p.item,'edit'));retry.disabled=p.busy;row.appendChild(retry);panel.appendChild(row);
+    });
+    if(error){var note=document.createElement('p');note.className='queue-error';note.textContent=error;panel.append(note,button('刷新队列',()=>refreshQueue(true)));}
+    restoreScrollAnchor(anchor);
+  }
+
+  async function refreshQueue(force){
+    if(loggedOut||!selectedConversationId||!historyReady)return;
+    if(queueController&&!force){queueRefreshPending=true;return;}
+    queueRefreshPending=false;
+    queueController?.abort();var controller=queueController=new AbortController(),version=++queueVersion,cid=selectedConversationId;
+    try{
+      var response=await fetch('/api/queue?conversation_id='+encodeURIComponent(cid),{credentials:'same-origin',signal:controller.signal});
+      if(response.status===404){queueEnabled=false;return;}
+      var data=await response.json();if(!response.ok)throw new Error(data.error||'读取队列失败');
+      if(version!==queueVersion||cid!==selectedConversationId||data.conversation_id!==cid)return;
+      queueEnabled=true;
+      if(!queueState||JSON.stringify(queueState)!==JSON.stringify(data)){queueState=data;drawQueue();}
+    }catch(e){if(e.name!=='AbortError'&&version===queueVersion)drawQueue(e.message);}
+    finally{if(queueController===controller){queueController=null;if(queueRefreshPending)refreshQueue();}updateSendAvailability();}
+  }
+
+  function restoreQueuedDraft(cid,text,key){
+    if(recoveredEdits.has(key))return;
+    recoveredEdits.add(key);
+    var draft=cid===selectedConversationId?input.value:conversationDrafts[cid]||'';
+    var merged=text+(draft?'\n\n'+draft:'');conversationDrafts[cid]=merged;
+    try{sessionStorage.setItem(draftKey(cid),merged);}catch(e){}
+    try{sessionStorage.setItem('xgent_queue_recovered',JSON.stringify(Array.from(recoveredEdits).slice(-200)));}catch(e){}
+    if(cid===selectedConversationId){input.value=merged;syncSendState();input.dispatchEvent(new Event('input'));input.focus();}
+  }
+
+  async function changeQueue(item,action){
+    var cid=item?.conversation_id||selectedConversationId,key=item?.id||('resume:'+cid),previous=queueActions.get(key);
+    if(previous?.busy)return;
+    var pending=previous?.action===action?previous:{action,request_id:queueRequestId(),item};pending.busy=true;queueActions.set(key,pending);persistQueueEdits();drawQueue();
+    try{
+      var data=await api('/api/queue/'+action,{method:'POST',body:JSON.stringify({conversation_id:cid,id:item?.id,
+        generation:item?.generation??queueState.generation,revision:item?.revision??queueState.revision,request_id:pending.request_id})});
+      if(action==='edit')restoreQueuedDraft(cid,data.text,pending.request_id);
+      queueActions.delete(key);persistQueueEdits();await refreshQueue(true);drawQueue();
+    }catch(e){pending.busy=false;pending.error=e.message;if(e.status===409&&action==='resume'){queueActions.delete(key);refreshQueue(true);}if(cid===selectedConversationId)drawQueue(e.message);else toast(e.message,true);}
+  }
+
+  function persistQueueEdits(){
+    try{sessionStorage.setItem('xgent_queue_edits',JSON.stringify(Array.from(queueActions.values()).filter(p=>p.action==='edit').map(p=>({action:p.action,request_id:p.request_id,item:{id:p.item.id,conversation_id:p.item.conversation_id,generation:p.item.generation,revision:p.item.revision}}))));}catch(e){}
+  }
+
+  async function sendQueuedText(text){
+    var cid=selectedConversationId,draft=input.value;
+    if(!textSubmission||textSubmission.cid!==cid||textSubmission.text!==text){textSubmission={cid,text,generation:uiGeneration,request_id:queueRequestId()};}
+    var submission=textSubmission;textSubmitting=true;updateSendAvailability();
+    try{
+      var result=await api('/api/chat',{method:'POST',body:JSON.stringify({text,conversation_id:cid,generation:submission.generation,request_id:submission.request_id})});
+      if(cid===selectedConversationId&&input.value===draft){input.value='';input.style.height='auto';conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
+      else if(cid!==selectedConversationId&&conversationDrafts[cid]===draft){conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
+      if(!result.queued&&!result.management&&cid===selectedConversationId)makeBubble('user',text);
+      textSubmission=null;await refreshQueue(true);triggerHaptic();
+    }catch(e){if(e.status>=400&&e.status<500)textSubmission=null;toast(e.message+'；内容已保留，可重试发送。',true);}
+    finally{textSubmitting=false;syncSendState();}
   }
 
   function send() {
+    if(queueEnabled&&!pendingFiles.length&&!input.value.trim().startsWith('/')){
+      var queuedText=input.value.trim();if(!queuedText||btnSend.disabled)return;
+      sendQueuedText(queuedText);return;
+    }
     if(viewingPast){historyAnchor=null;viewingPast=false;newFrames=0;newerAvailable=false;updateHistoryState();}
     var text = input.value.trim();
     var hasFiles = pendingFiles.length > 0;
@@ -1679,58 +2016,157 @@
     if (reason && uploadQueue.finish) uploadQueue.finish(reason);
   }
 
+  async function uploadFileChunks(batch, mode, modes, text, key, progress) {
+    var pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    async function control(path, payload){
+      var last;
+      for(var attempt=0;attempt<4;attempt++){
+        var controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
+        try{return await api(path,payload===undefined?{signal:controller.signal}:{method:'POST',body:JSON.stringify(payload),signal:controller.signal});}
+        catch(error){last=error;if(error.status===507||error.status&&error.status<500)throw error;}
+        finally{clearTimeout(timer);}
+        await pause(400*(attempt+1));
+      }
+      throw new Error('暂时无法确认传输状态，重试会从已接收位置继续：'+last.message);
+    }
+    var transfer=await control('/api/file-transfers/init',{
+      idempotency_key:key,conversation_id:batch.conversation_id,mode:mode,text:text,modes:modes,
+      files:batch.files.map(file=>({filename:file.name,size:file.size}))
+    });
+    if(transfer.state==='accepted')return {...transfer,duplicate:true};
+    var id=transfer.transfer_id,total=batch.files.reduce((sum,file)=>sum+file.size,0);
+    var offsets=transfer.offsets.slice();
+    function setProgress(extra){
+      var received=offsets.reduce((sum,size)=>sum+size,0)+extra;
+      progress.textContent=received>=total?'传输完成，正在保存…':'上传 '+Math.min(99,Math.floor(received/total*100))+'%';
+    }
+    for(var index=0;index<batch.files.length;index++){
+      var file=batch.files[index],failures=0;
+      while(offsets[index]<file.size){
+        if(batch.cancelled)throw new Error('传输已暂停；重试将从已接收位置继续');
+        var start=offsets[index],chunk=file.slice(start,start+transfer.chunk_bytes);
+        try{
+          var result=await new Promise(function(resolve,reject){
+            var request=new XMLHttpRequest();
+            request.open('POST','/api/file-transfers/chunk/'+id+'?index='+index+'&offset='+start);
+            request.withCredentials=true;request.timeout=90000;
+            request.setRequestHeader('Content-Type','application/octet-stream');
+            request.upload.onprogress=event=>setProgress(event.loaded);
+            request.onerror=()=>reject(new Error('分块网络中断'));
+            request.ontimeout=()=>reject(new Error('分块响应超时'));
+            request.onload=function(){
+              var body;try{body=JSON.parse(request.responseText);}catch(error){body={};}
+              if(request.status>=200&&request.status<300)resolve(body);
+              else{var failure=new Error(body.error||'HTTP '+request.status);failure.status=request.status;reject(failure);}
+            };
+            request.send(chunk);
+          });
+          offsets[index]=result.offset;failures=0;setProgress(0);
+        }catch(error){
+          if(error.status===507||error.status&&error.status<500&&error.status!==409)throw error;
+          progress.textContent='正在核对已接收分块…';
+          var state=await control('/api/file-transfers/status/'+id);
+          offsets=state.offsets;
+          if(state.state==='accepted')return state;
+          if(offsets[index]>start){failures=0;continue;}
+          if(++failures>=4)throw new Error('连接暂时中断，已接收部分保留，重试可继续上传');
+          await pause(500*failures);
+        }
+      }
+    }
+    progress.textContent='传输完成，正在保存…';
+    await control('/api/file-transfers/complete/'+id,{});
+    for(;;){
+      var status=await control('/api/file-transfers/status/'+id);
+      if(status.state==='accepted')return status;
+      if(status.state==='failed')throw new Error(status.error||'服务器保存失败；已传数据保留，可重试');
+      if(status.state==='receiving')throw new Error('服务已重启，已传数据保留，请重试确认');
+      progress.textContent='传输完成，正在保存校验…';
+      await pause(800);
+    }
+  }
+
   async function sendFiles(text, selected) {
     var batch = { conversation_id:selectedConversationId, files: selected || pendingFiles.slice(), next: 0, cancelled: false, finish: null, awaitingTurn: false };
     uploadQueue = batch;
     if (selected) { pendingFiles=pendingFiles.filter(function(f){return selected.indexOf(f)<0;});renderPendingFiles(); }
     else clearPendingFiles();
     try {
-      for (var i = 0; i < batch.files.length && !batch.cancelled; i++) {
-        var f = batch.files[i];
+      // Submit a whole selection once; per-file modes preserve attachment/upload intent.
+      if (!batch.cancelled) {
+        var f = batch.files[0];
+        var modes = batch.files.map(file=>fileModes.get(file)||'attachment');
+        var mode = modes.every(value=>value==='server_upload') ? 'server_upload' : 'attachment';
+        batch.files.forEach(file=>fileStatuses.set(file,'上传中'));
         fileStatuses.set(f,"上传中");
-        var caption = i === 0 ? text : "";
-        var entry = makeBubble("user", "📎 " + f.name + (caption ? "\n" + caption : ""));
-        if (mediaKindFromName(f.name) === "photo") {
-          var url = URL.createObjectURL(f);
-          entry.objectUrls = [url];
-          var thumb = document.createElement("img");
-          thumb.src = url;
-          thumb.className = "user-thumb";
-          thumb.addEventListener("click", (function (src, name) {
-            return function () { openLightbox(src, name); };
-          })(url, f.name));
-          entry.body.appendChild(thumb);
-        }
+        var caption = text;
+        var entry = makeBubble('user', text);
+        batch.entry=entry;
+        entry.objectUrls = [];
+        setInlineMedia(entry,batch.files.map(function(file){
+          var url=URL.createObjectURL(file);entry.objectUrls.push(url);
+          return {kind:file.type.startsWith('image/')?'photo':mediaKindFromName(file.name),filename:file.name,download_url:url,local_preview:true};
+        }));
         setBusy(true);
         // HTTP 只确认接收，turn_end 才允许下一份上传进入对话核心。
         batch.awaitingTurn = true;
         batch.rejected = false;
         var turnDone = new Promise(function (resolve) { batch.finish = resolve; });
         var fd = new FormData();
-        fd.append("file", f, f.name);
+        batch.files.forEach(file=>fd.append('file',file,file.name));
         fd.append("text", caption);
+        fd.append('modes',JSON.stringify(modes));
+        var signature = JSON.stringify([mode,text,modes,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
+        var previous = fileBatchKeys.get(f);
+        var requestKey = previous?.signature===signature ? previous.key : (crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());
+        byMessageId['upload:'+requestKey]=entry;
+        batch.files.forEach(file=>fileBatchKeys.set(file,{signature:signature,key:requestKey}));
+        fd.append('idempotency_key',requestKey);
         if(batch.conversation_id)fd.append("conversation_id",batch.conversation_id);
         try {
-          var response = await fetch("/api/upload", {
-            method: "POST", credentials: "same-origin", body: fd
+          var progress=document.createElement('small');progress.className='upload-progress';progress.textContent='正在上传…';
+          entry.uploadProgress=progress;entry.bubble.insertBefore(progress,entry.bubble.querySelector('.ts'));
+          var body;
+          if(batch.files.reduce((sum,file)=>sum+file.size,0)>8*1024*1024){
+            body=await uploadFileChunks(batch,mode,modes,caption,requestKey,progress);
+          }else{
+          var response = await new Promise(function(resolve,reject){
+            var request=new XMLHttpRequest();
+            request.open('POST',mode==='server_upload'?'/api/server-uploads':'/api/attachments');
+            request.withCredentials=true;
+            request.upload.onprogress=function(event){
+              progress.textContent=event.lengthComputable?(event.loaded>=event.total?'传输完成，正在保存…':'上传 '+Math.round(event.loaded/event.total*100)+'%'):'正在上传…';
+            };
+            request.upload.onload=function(){progress.textContent='传输完成，正在保存…';};
+            request.onerror=()=>reject(new Error('网络中断，文件仍保留，可重试本批文件'));
+            request.onload=()=>resolve({ok:request.status>=200&&request.status<300,status:request.status,
+              json:async()=>{try{return JSON.parse(request.responseText);}catch(e){return {};}}});
+            request.send(fd);
           });
-          var body = await response.json().catch(function () { return {}; });
-          if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
+          body = await response.json().catch(function () { return {}; });
+          if (!response.ok) throw new Error(body.error || (response.status===413?'反向代理拒绝了上传（HTTP 413），请调整代理请求体限制后重试。':response.status===524?'代理等待服务器响应超时（HTTP 524），请先核对历史；不要重复提交已确认文件。':"HTTP " + response.status));
+          }
+          progress.textContent='已接收，正在处理';
+          if(body.message&&batch.conversation_id===selectedConversationId)putHistoryFrame(body.message,streamEpoch);
+          if(body.duplicate){batch.next=batch.files.length;batch.awaitingTurn=false;reconcileAfterTurn=true;return;}
         } catch (err) {
+          if(entry.durable){batch.next=batch.files.length;await turnDone;return;}
           batch.awaitingTurn = false;
           removeEntry(entry);
-          fileStatuses.set(f,"上传失败：" + err.message);
+          batch.files.forEach(file=>fileStatuses.set(file,'上传失败：'+err.message));
           batch.error = f.name + " 上传失败：" + err.message;
-          break;
+          return;
         }
-        if(batch.rejected){fileStatuses.set(f,'未提交：'+batch.error);break;}
+        if(batch.rejected){fileStatuses.set(f,'未提交：'+batch.error);return;}
         fileStatuses.set(f,"已接收，处理中");
-        batch.next = i + 1;
+        batch.next = batch.files.length;
         var turnError=await turnDone;
-        if(batch.rejected){batch.next=i;fileStatuses.set(f,'未提交：'+batch.error);break;}
-        if (turnError) break;
+        if(batch.rejected){batch.next=0;fileStatuses.set(f,'未提交：'+batch.error);return;}
+        if (turnError) return;
         batch.finish = null;
       }
+    } catch(err) {
+      batch.awaitingTurn=false;batch.error=err.message;
     } finally {
       var remaining = batch.files.slice(batch.next);
       if(batch.conversation_id!==selectedConversationId){
@@ -2381,6 +2817,11 @@
     event.returnValue = "";
   });
   btnAttach.addEventListener("click", function () { fileInput.click(); });
+  document.getElementById('btn-server-upload').addEventListener('click',()=>serverUploadInput.click());
+  serverUploadInput.addEventListener('change',function(){
+    Array.from(serverUploadInput.files).forEach(file=>{fileModes.set(file,'server_upload');pendingFiles.push(file);});
+    serverUploadInput.value='';renderPendingFiles();
+  });
 
   fileInput.addEventListener("change", function () {
     for (var i = 0; i < fileInput.files.length; i++) pendingFiles.push(fileInput.files[i]);
@@ -2394,7 +2835,7 @@
       var chip = document.createElement("div");
       chip.className = "pending-file";
       var name = document.createElement("span");
-      name.textContent = "📎 " + f.name;
+      name.textContent = (fileModes.get(f)==='server_upload'?'↑ 上传：':'📎 附件：') + f.name;
       var del = document.createElement("button");
       del.className = "pf-del";
       del.type = "button";
@@ -2408,8 +2849,8 @@
       var fileState=fileStatuses.get(f);
       if(fileState){var note=document.createElement('span');note.textContent=fileState;note.className='wb-upload-status';chip.appendChild(note);}
       if(fileState && fileState.indexOf('上传失败')===0){
-        var retry=document.createElement('button');retry.type='button';retry.className='wb-btn';retry.textContent='重试此文件';
-        retry.onclick=function(){if(!uploadQueue&&!btnSend.disabled)sendFiles('',[f]);};chip.appendChild(retry);
+        var retry=document.createElement('button');retry.type='button';retry.className='wb-btn';retry.textContent='重试本批文件';
+        retry.onclick=function(){if(!uploadQueue&&!btnSend.disabled)sendFiles(input.value);};chip.appendChild(retry);
       }
       pendingFilesEl.appendChild(chip);
     });
@@ -2435,7 +2876,9 @@
   log.addEventListener("scroll", function () {
     document.getElementById('wb-chat').classList.toggle('history-top',log.scrollTop<8&&!!historyCursor);
     if (isNearBottom()) hideScrollBtn(); else showScrollBtn();
+    scheduleHistoryPrefetch();
   });
+  new ResizeObserver(scheduleHistoryPrefetch).observe(log);
   scrollBtn.addEventListener("click", function () { scrollDown(); triggerHaptic(); });
 
   // These essentials belong to the standalone chat entry, not to the optional
@@ -2617,6 +3060,7 @@
     }
     if(uploadQueue)uploadQueue.cancelled=true;
     selectedConversationId=next;
+    queueController?.abort();queueController=null;queueVersion++;queueState=null;queueExpanded=false;drawQueue();
     input.value=conversationDrafts[next]||'';
     try{input.value=input.value||sessionStorage.getItem(draftKey(next))||'';}catch(e){}
     pendingFiles=(conversationFiles[next]||[]).slice();renderPendingFiles();
@@ -2651,6 +3095,7 @@
   window.addEventListener('xgent-auth-expired',()=>closeWorkspaceMenu(false));
   window.XGentWorkspaceMenu={close:restore=>closeWorkspaceMenu(!!restore)};
   window.XGentChat = {
+    attachmentChanged: frame=>handleFrame({...frame,type:'attachment_changed'}),
     openCommands:openCommands,logout:logoutAction,
     commandError: function(){
       if(conversationBusy||uploadQueue)return '当前正在生成或上传，请先停止或等待完成后再执行命令。';
@@ -2663,14 +3108,14 @@
       input.value=command;syncSendState();send();return true;
     },
     reload: function(){historyAnchor=null;viewingPast=false;newFrames=0;return resync();},
-    locate: async function(key){if(document.body.dataset.page!=='chat')location.hash='/chat';if(historyRequest)await historyRequest;historyAnchor=key;await loadHistory();const entry=key&&byMessageId[key];if(entry){entry.row.classList.add('source-target');entry.row.scrollIntoView({block:'center'});setTimeout(()=>entry.row.classList.remove('source-target'),3500);}},
+    locate: async function(key){if(document.body.dataset.page!=='chat')location.hash='/chat';historyAnchor=key;const cid=selectedConversationId;await resync(true);const entry=cid===selectedConversationId&&key&&byMessageId[key];if(entry){entry.row.classList.add('source-target');entry.row.scrollIntoView({block:'center'});setTimeout(()=>entry.row.classList.remove('source-target'),3500);}},
     settings: function(){return loadSettings();},
     commands: function(commands){
       if (!commands.length) return;
       COMMAND_GROUPS=[{group:"全部命令",items:commands}]; FLAT_COMMANDS=commands.slice();
     },
     terminal: function(){document.getElementById("btn-terminal").click();},
-    render: function(text,mode){return renderText(text,mode);},
+    render: function(text,mode,webDisplay){return renderBubbleBody('ai',text,mode,webDisplay);},
     enhance: enhanceBubbleContent
   };
   try { input.value=sessionStorage.getItem(draftKey())||""; syncSendState(); } catch(e) {}
@@ -2679,7 +3124,9 @@
     closeCommands(false);
     if(actionRequest){actionRequest.abort();actionRequest=null;}
     if(actionDialog.open)closeAction();
-    loggedOut=true;stopLiveTransport();historyGen++;historyReady=false;pendingFrames=[];
+    loggedOut=true;stopLiveTransport();cancelHistoryPage();historyLoadController?.abort();historyGen++;historyReady=false;pendingFrames=[];
+    queueController?.abort();queueController=null;queueVersion++;queueState=null;queueEnabled=false;queueActions.clear();recoveredEdits.clear();textSubmission=null;drawQueue();
+    try{sessionStorage.removeItem('xgent_queue_edits');sessionStorage.removeItem('xgent_queue_recovered');}catch(e){}
     cancelUploads('已退出登录');clearPendingFiles();input.value='';try { sessionStorage.removeItem(draftKey()); } catch(e) {}
     Array.from(new Set(Object.values(byMessageId))).forEach(removeEntry);
     log.replaceChildren();byMessageId={};uiRevisions={};uiDeleted={};uiGeneration=null;streamEpoch=null;streamCursor=null;

@@ -1,6 +1,8 @@
 # This file is executed by xgent_server.py in the shared application namespace.
 # Keep cross-section names available through the loader until the next decoupling phase.
 
+from xgent_app.web_bridge import _without_reverse_mirror
+
 async def check_and_send_idle_message(context: ContextTypes.DEFAULT_TYPE):
     if get_conversations().lock.busy():
         return
@@ -161,6 +163,176 @@ _web_application: Optional[Any] = None
 # 拿一个 [Errno 98] Address already in use，被 logger.error 吞掉。用户那边表现为
 # "密码怎么改都不生效"，日志里一行提示都不给他。
 _web_managed_here: bool = False
+
+
+def get_text_queue():
+    from xgent_app.message_queue import MessageQueue
+    manager = get_conversations()
+    if manager.text_queue is None:
+        manager.text_queue = MessageQueue(manager, globals().get('_cli_queue_dispatch', _dispatch_queued_batch),
+                                           _queue_notify_changed, _queue_sync_receipts)
+    return manager.text_queue
+
+
+async def _queue_notify_changed(revision):
+    outbox = get_web_outbox() or globals().get('_web_external_outbox')
+    if outbox is not None:
+        outbox.put({'type': 'queue_state', 'revision': revision})
+    notifier = globals().get('_cli_queue_notifier')
+    if notifier is not None:
+        await notifier()
+
+
+async def publish_queued_users(context, batch):
+    """Durable user snapshots replace pending UI, never masquerade as tool results."""
+    db = await BotMemoryDB.get_instance()
+    outbox = getattr(context.bot, 'outbox', None) or get_web_outbox() or _web_external_outbox
+    cli = bool(getattr(context.bot, '_is_xgent_cli_bot', False))
+    for item in batch:
+        row = await db.get_display_message(item['record_id'])
+        if row is None:
+            continue
+        message = build_history_message(row, ArtifactManager.ROOT_DIR, AgentExecutor.WORK_DIR)
+        frame = {**message, 'type': 'record_snapshot', 'record_id': row['id'], 'text': message['content'],
+                 'queue_id': item['id'], 'ui_generation': current_scope().generation}
+        frame.pop('content', None)
+        if outbox is not None:
+            outbox.put(frame)
+        if cli:
+            from xgent_app.cli_bridge import relay_conversation_event, relay_user_message
+            relay_conversation_event(frame)
+            relay_user_message(item['text'], queue_origin=item['origin'], queue_id=item['id'])
+        elif item['origin'] != 'telegram':
+            mirror_user_line_to_telegram(('🖥 [CLI]' if item['origin'] == 'cli' else '💬 [网页]') + '\n' + item['text'])
+
+
+async def _dispatch_queued_batch(batch):
+    outbox = get_web_outbox() or globals().get('_web_external_outbox')
+    if current_scope().origin == 'telegram' and _web_real_bot is not None:
+        update, context = _SelfTriggerUpdate(_web_real_bot, BotConfig.AUTHORIZED_USER_ID), _SelfTriggerContext(_web_real_bot)
+    else:
+        update, context, _ = build_web_mirror_objects(BotConfig.AUTHORIZED_USER_ID, outbox,
+                                                     _web_real_bot, channel=telegram_channel())
+    try:
+        await publish_queued_users(context, batch)
+        await process_conversation(update, context, batch[-1]['text'], queued_messages=batch)
+        outbox.put({'type': 'turn_end'})
+    except Exception as exc:
+        from xgent_app.message_queue import mark_outcome
+        mark_outcome('failed')
+        failure = await GlobalRecorder.record_error(exc, BotConfig.AUTHORIZED_USER_ID, source='queue')
+        outbox.put({'type': 'turn_error', 'text': failure})
+        raise
+
+
+_queue_receipt_offered = {}
+
+
+async def _queue_sync_receipts(db):
+    if _web_real_bot is None:
+        return
+    from xgent_app.conversations import ConversationScope
+    from xgent_app.interaction import interaction
+    for item in await db.queue_receipts():
+        if _queue_receipt_offered.get(item['id']) == item['revision']:
+            continue
+        # The outbox re-reads authoritative text/revision on delivery. Native ID
+        # is stored with the queue item so restart edits, rather than re-sends.
+        with interaction('telegram', 'management'), bind_conversation(ConversationScope(
+                item['conversation_id'], item['generation'], origin='telegram', purpose='management', telegram_delivery=True)):
+            channel = telegram_channel()
+            channel.ensure_started()
+            channel.offer(Op(OP_SEND, logical_id=-(10**12 + item['seq']), chat_id=item['chat_id'],
+                             payload={'queue_receipt': item['id']}))
+        _queue_receipt_offered[item['id']] = item['revision']
+
+
+async def submit_ordinary_text(text, *, chat_id, request_key=None):
+    queue = get_text_queue()
+    item = await queue.submit(text, chat_id=chat_id, request_key=request_key)
+    get_conversations().start()
+    # Schedule only after persistence. The HTTP response is not held for a model.
+    try:
+        await queue.poll()
+    except Exception:
+        logger.exception('待发消息已保存，唤醒暂失败；后台轮询将重试')
+    return item
+
+
+async def _web_accept_text(text, *, conversation_id=None, request_id=None, generation=None):
+    from xgent_app.interaction import interaction
+    from xgent_app.message_queue import public_item
+    with interaction('web', 'management'):
+        async with conversation_operation(conversation_id, fresh=True, expected=conversation_id is not None, selector='shared'):
+            await UserDataManager.init()
+            db = await BotMemoryDB.get_instance()
+            request_key = 'web:' + request_id if request_id else None
+            previous = await db.queue_request(request_key) if request_key else None
+            if previous:
+                if previous['conversation_id'] != current_scope().conversation_id:
+                    raise ConversationChanged('请求标识已属于另一会话。')
+                if previous['kind'] == 'chat':
+                    if previous['item']['text'] != text:
+                        raise ConversationChanged('请求标识已用于另一条消息。')
+                    return {'ok': True, 'queued': True, **public_item(previous['item'])}
+                return {'ok': True, 'management': True}
+            if UserDataManager.bind_ui_state():
+                raise ConversationChanged('之前的录入已取消；请重新提交。')
+            if generation is not None and generation != current_scope().generation:
+                raise ConversationChanged('上下文已改变，输入已保留，请确认后重新发送。')
+            if UserDataManager.get('state') != BotState.IDLE:
+                # State/secret input is deliberately not persisted in the queue.
+                expected_state = UserDataManager.get('state')
+                if request_key:
+                    receipt = await db.queue_accept_management(current_scope(), request_key)
+                    if not receipt['new']:
+                        return ({'ok': True, 'queued': True, **public_item(receipt['item'])} if receipt['kind'] == 'chat'
+                                else {'ok': True, 'management': True})
+                task = asyncio.create_task(_web_scoped_call(_web_run_conversation(text, get_web_outbox() or _web_external_outbox,
+                    expected_state=expected_state),
+                    conversation_id, get_web_outbox() or _web_external_outbox, purpose='management'))
+                get_conversations().track_background(task)
+                return {'ok': True, 'management': True}
+            with interaction('web', 'chat'):
+                scope = await get_conversations().resolve(conversation_id, selector='shared')
+                with bind_conversation(scope):
+                    item = await submit_ordinary_text(text, chat_id=BotConfig.AUTHORIZED_USER_ID,
+                        request_key=request_key)
+                    return {'ok': True, 'queued': True, **public_item(item)}
+
+
+async def queue_api(action, conversation_id, data=None):
+    from xgent_app.interaction import interaction
+    from xgent_app.message_queue import public_item
+    data = data or {}
+    queue = get_text_queue()
+    with interaction('web', 'management'):
+        scope = await get_conversations().resolve(conversation_id, allow_archived=action != 'resume')
+        with bind_conversation(scope):
+            if action == 'list':
+                return await queue.snapshot(scope.conversation_id)
+            db = await BotMemoryDB.get_instance()
+            if action == 'resume':
+                if data.get('generation') != scope.generation or type(data.get('revision')) is not int or not data.get('request_id'):
+                    raise ConversationChanged('上下文已改变，请刷新队列。')
+                await queue.start()
+                await db.queue_resume(scope, queue.instance, revision=data['revision'], request_key='resume:' + data['request_id'])
+                result = {'ok': True}
+            elif action in {'cancel', 'edit'}:
+                if type(data.get('generation')) is not int or type(data.get('revision')) is not int:
+                    raise ConversationError('队列版本参数无效。')
+                if action == 'edit' and not data.get('request_id'):
+                    raise ConversationError('取回编辑需要请求标识。')
+                item = await db.queue_change(scope.conversation_id, data['generation'], data.get('id'),
+                                             data['revision'], action, data.get('request_id'))
+                result = {'ok': True, **public_item(item)}
+            else:
+                raise ConversationError('未知队列操作。')
+            try:
+                await queue.poll()
+            except Exception:
+                logger.exception('队列操作已保存，状态通知暂失败')
+            return result
 # 配置对账任务。见 _web_config_reconciler。
 _web_config_watch_task: Optional[asyncio.Task] = None
 
@@ -308,7 +480,9 @@ def telegram_channel() -> Any:
 
     worker = ChannelWorker(
         _TELEGRAM_CHANNEL_NAME, _deliver,
-        is_configured=_web_external_tg_mirror_enabled,
+        # Native Telegram replies also use this worker. CLI mirroring is an
+        # admission preference, not a switch for the actual Bot transport.
+        is_configured=lambda: bool(BotConfig.TOKEN) and _web_real_bot is not None,
         timeout=15.0, maxsize=4000,
         store=_ChannelOutboxStore(),
         on_recovered=_telegram_channel_recovered,
@@ -333,7 +507,7 @@ def mirror_user_line_to_telegram(text: str) -> None:
     只发 Telegram，不推网页帧：用户自己那条气泡网页早就画出来了。
     """
     from xgent_app.interaction import telegram_delivery_allowed
-    if _web_real_bot is None or not telegram_delivery_allowed():
+    if not _web_external_tg_mirror_enabled() or not telegram_delivery_allowed():
         return
     channel = telegram_channel()
     channel.ensure_started()
@@ -397,9 +571,10 @@ async def _replay_relay_op(mirror: Any, op: str, payload: Dict[str, Any]) -> Non
                    'generation': session['generation'], 'run_id': None, 'name': session['name']}}
     from xgent_app.conversations import conversation_still_exists
     from xgent_app.telegram_presentation import replay_presentation
+    from xgent_app.web_display import web_display_scope
     if not await conversation_still_exists(payload.get('conversation_context')):
         return
-    with replay_presentation(payload.get('telegram_presentation')), replay_conversation(payload.get('conversation_context')), media_presentation_scope(payload.get('media_presentation')), replay_ui_context(payload.get('ui_context')):
+    with replay_presentation(payload.get('telegram_presentation')), replay_conversation(payload.get('conversation_context')), media_presentation_scope(payload.get('media_presentation')), replay_ui_context(payload.get('ui_context')), web_display_scope(payload.get('web_display')):
         await _replay_relay_op_with_presentation(mirror, op, payload)
 
 
@@ -420,10 +595,11 @@ async def _replay_relay_op_with_presentation(mirror: Any, op: str, payload: Dict
             return
         # 唯一加来源标识的地方。走出站通道（非阻塞 + 断连可补投），而不是直接
         # await 真实 bot——那样 TG 不通时每条都要等满一个超时，把整条回放流拖住。
-        if mirror.real_bot is not None:
-            mirror_user_line_to_telegram(f"🖥 [CLI]\n{text}")
+        if mirror.real_bot is not None and payload.get('queue_origin') != 'telegram':
+            prefix = '💬 [网页]' if payload.get('queue_origin') == 'web' else '🖥 [CLI]'
+            mirror_user_line_to_telegram(f"{prefix}\n{text}")
         outbox = _web_external_outbox
-        if outbox is not None:
+        if outbox is not None and not payload.get('queue_id'):
             # user_message 帧让网页渲染成用户气泡（右侧），而不是 AI 气泡。
             outbox.put({"type": "user_message", "text": text,
                         "ts": time.time(), "external": True})
@@ -881,7 +1057,7 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
     return await _web_read_settings()
 
 
-async def _web_run_conversation(text: str, outbox: Any) -> None:
+async def _web_run_conversation(text: str, outbox: Any, *, expected_state=None) -> None:
     """跑一轮完整对话，结束后给网页发一帧收尾信号。
 
     用 MirrorBot 而不是纯 WebBot：网页发的对话会同时投递到 Telegram，让两端
@@ -895,6 +1071,11 @@ async def _web_run_conversation(text: str, outbox: Any) -> None:
     # 配置状态（设置密码/端口/地址/提示词/Key 等）：走 Telegram 同款状态机，
     # 不要当 AI 对话。否则网页输入 cancel 或配置值会被发给 AI（既有 bug）。
     state = UserDataManager.get('state')
+    if expected_state is not None:
+        if state != expected_state:
+            outbox.put({'type': 'turn_error', 'text': '录入状态已变化，本次内容未发给 AI，请重新操作。'})
+            return
+        update.xgent_expected_state = expected_state
     if state != BotState.IDLE:
         try:
             update.message.text = text
@@ -1012,6 +1193,7 @@ def _ensure_web_command_map() -> None:
     pairs = [
         ("start", "cmd_start"),
         ("chats", "cmd_chats"),
+        ("queue", "cmd_queue"),
         ("new", "cmd_new_chat"),
         ("config", "cmd_settings_menu"),
         ("update", "cmd_update_system"),
@@ -1058,14 +1240,13 @@ def _web_submit_message(text: str, outbox: Any, *, conversation_id=None) -> None
 
 
 async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) -> None:
-    """把网页上传的文件同步发到 Telegram。三段分流对齐 agent_sendfile.py:79-174：
+    await sync_web_attachment_to_telegram(abs_path, filename, caption)
 
-      ≤ MAX_FILE_SIZE              → 原生 send_document 上传
-      > MAX_FILE_SIZE + 本地 server → 硬链到 .local-api-data/，用 file:// 容器路径直发
-      > MAX_FILE_SIZE 无 server     → 只在网页告警，不发（对话照常进行）
 
-    本函数刻意不抛异常：TG 同步失败用 outbox 推一条 sys 提示，网页对话不被拖崩。
-    """
+@_without_reverse_mirror
+async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_id=None, transport_capabilities=None,
+                                          ingress_mode='attachment'):
+    """Mirror Web files in either mode without changing their AI input policy."""
     from xgent_app.interaction import telegram_delivery_allowed
     if _web_real_bot is None or not telegram_delivery_allowed():
         return  # Filter before touching Telegram or creating a deferred upload.
@@ -1084,29 +1265,49 @@ async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) ->
             })
         return
 
-    chat_id = BotConfig.AUTHORIZED_USER_ID
-    # 发到 TG 的 caption 带 [网页] 标记，与网页文本消息的镜像标记一致，
-    # 让 TG 端知道这文件来自网页。仅用于 TG 发送，不影响喂给模型的附言。
+    chat_id = chat_id or BotConfig.AUTHORIZED_USER_ID
+    # Telegram-only status; never append these transport notes to the AI input.
+    source = '网页上传' if ingress_mode == 'server_upload' else '网页附件'
+    ai_notice = ('仅向 AI 提供路径，未发送文件内容。' if ingress_mode == 'server_upload'
+                 else '按类型向 AI 提供内容或路径。')
+    summary = f'[{source}] {ai_notice}'
+    sync_caption = caption + '\n\n' + summary if caption else summary
     from xgent_app.telegram_presentation import render_telegram_caption, render_telegram_text
-    tg_caption, overflow_caption = await render_telegram_caption(caption or None)
+    tg_caption, overflow_caption = await render_telegram_caption(sync_caption)
+    if overflow_caption is None and len(str(tg_caption or '').encode('utf-16-le')) // 2 > 1024:
+        overflow_caption = sync_caption
+    if overflow_caption is not None:
+        tg_caption, _ = await render_telegram_caption(summary)
+    async def send_text(text):
+        # Leave room for a conversation label, including astral Unicode text.
+        for offset in range(0, len(text), 1900):
+            await _web_real_bot.send_message(chat_id=chat_id,
+                text=await render_telegram_text(text[offset:offset + 1900]))
     try:
-        if overflow_caption is not None:
-            await _web_real_bot.send_message(chat_id=chat_id, text=await render_telegram_text(overflow_caption))
         file_size = os.path.getsize(abs_path)
         # AgentExecutor.MAX_FILE_SIZE 与发送侧同源（50MB），通过共享命名空间可见。
-        max_file_size = AgentExecutor.MAX_FILE_SIZE
-        api_base_url = BotConfig.API_BASE_URL
+        from xgent_app.file_ingress import FileTransportCapabilities
+        capabilities = transport_capabilities or FileTransportCapabilities.configured(BotConfig.API_BASE_URL)
+        max_file_size = 50 * 1024 * 1024
+        api_base_url = capabilities.mode == 'local_bot_api'
+        if file_size > capabilities.document_upload_limit:
+            if caption:
+                await send_text(caption)
+            limit_mb = capabilities.document_upload_limit // 1024 // 1024
+            notice = (f'[{source}] {filename}（{file_size / 1024 / 1024:.2f} MB）已存服务器，'
+                      f'超过 Bot 的 {limit_mb} MB 上限，未同步文件。\n{ai_notice}\n路径：{abs_path}')
+            await _web_real_bot.send_message(chat_id=chat_id, text=await render_telegram_text(notice))
+            return
+
+        if overflow_caption is not None:
+            await send_text(overflow_caption)
 
         if file_size > max_file_size and api_base_url:
             # 大文件 + 本地 server：硬链到宿主机数据目录，用容器内 file:// 路径直发。
             # _LOCAL_API_HOST_DATA_DIR / _LOCAL_API_CONTAINER_DATA_DIR 来自 core.py。
             import uuid as _uuid
-            name_parts = filename.rsplit('.', 1)
-            unique_name = (
-                f"{name_parts[0]}_web_{_uuid.uuid4().hex[:8]}.{name_parts[1]}"
-                if len(name_parts) == 2
-                else f"{filename}_web_{_uuid.uuid4().hex[:8]}"
-            )
+            suffix = os.path.splitext(ArtifactManager._safe_name(filename, 'upload'))[1]
+            unique_name = f"web_{_uuid.uuid4().hex}{suffix}"
             temp_host_path = os.path.join(_LOCAL_API_HOST_DATA_DIR, unique_name)
 
             def _prepare() -> None:
@@ -1141,22 +1342,6 @@ async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) ->
                     logger.warning("清理 web 上传临时文件失败: %s", temp_host_path)
             return
 
-        if file_size > max_file_size:
-            # 大文件但没配本地 server：发不了。用 message 帧推一条 AI 侧提示——
-            # 不能用 turn_error（会让前端 setBusy(false) 中断本轮）；message 帧只
-            # hideTyping + 显示气泡，不动 busy，正好。显示在 AI 侧而非用户侧。
-            server_obj = _web_chat_server
-            if server_obj is not None:
-                server_obj.outbox.put({
-                    "type": "message",
-                    "text": (
-                        f"⚠️ 文件 {filename} 超过 50MB({file_size} bytes)，未启用本地 API，"
-                        "无法同步到 Telegram（仅网页处理）。如需同步大文件，请在 install.sh 菜单"
-                        "选项 8 启用本地 API 容器。"
-                    ),
-                    "ts": time.time(),
-                })
-            return
 
         # 小文件：原生上传。
         with open(abs_path, "rb") as f:
@@ -1264,21 +1449,188 @@ _WEB_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
 async def _web_run_upload(filename, content, caption, outbox):
     # Choose only after the Web workflow has been bound, not in the HTTP thread.
+    state = UserDataManager.get('state')
+    if is_prompt_edit_state(state) or state in {
+        BotState.IMPORT_PROVIDER_CONFIG, BotState.SET_COMMAND_BLACKLIST, BotState.SET_MEMORY,
+    }:
+        from xgent_app.attachment_versions import confirm_upload_received
+        confirm_upload_received()  # Only the actual configuration-import routes bypass ordinary backup.
     ext = os.path.splitext(filename.lower())[1]
     handler = (_web_run_photo_conversation if ext in _WEB_IMAGE_EXTENSIONS and
                UserDataManager.get('state') == BotState.IDLE else _web_run_file_conversation)
     await handler(filename, content, caption, outbox)
 
 
-def _web_submit_upload(filename: str, content: bytes, caption: str, outbox: Any, *, conversation_id=None) -> None:
+def _web_submit_upload(filename: str, content: bytes, caption: str, outbox: Any, *, conversation_id=None):
+    from concurrent.futures import Future
+    from xgent_app.attachment_versions import upload_receipt_scope
+    receipt = Future()
     loop = _web_chat_server.config.loop if _web_chat_server else None
     if loop is None:
         outbox.put({"type": "turn_error", "text": "服务未就绪"})
-        return
-    asyncio.run_coroutine_threadsafe(
-        _web_scoped_call(_web_run_upload(filename, content, caption, outbox), conversation_id, outbox,
-                         execution=lambda: UserDataManager.get('state') == BotState.IDLE), loop,
-    )
+        receipt.set_result({'ok': False, 'error': '服务未就绪，附件尚未确认接收。'})
+        return receipt
+    async def receive():
+        with upload_receipt_scope(receipt):
+            try:
+                await _web_scoped_call(_web_run_upload(filename, content, caption, outbox), conversation_id, outbox,
+                                      execution=lambda: UserDataManager.get('state') == BotState.IDLE)
+            finally:
+                if not receipt.done():
+                    receipt.set_result({'ok': False, 'error': '附件原件备份或关联保存未完成，请查看错误后重试；文件仍保留在输入区。'})
+    task = asyncio.run_coroutine_threadsafe(receive(), loop)
+    # Keep the scheduling future alive; input confirmation need not wait for AI.
+    task.add_done_callback(lambda finished: finished.exception() if not finished.cancelled() else None)
+    return receipt
+
+
+_web_file_receipts = {}
+_web_file_receipts_lock = threading.RLock()
+
+
+async def _web_run_file_batch(data, mode, outbox, receipt):
+    from xgent_app.file_ingress import describe_file, cleanup_payloads
+    from xgent_app.attachment_versions import upload_receipt_scope
+    payloads, committed = [], False
+    try:
+        db = await BotMemoryDB.get_instance()
+        generation = await db.get_attachment_generation()
+        key = data.get('idempotency_key')
+        signature = hashlib.sha256(json.dumps([mode, data.get('modes', ''), data.get('text', ''), data.get('captions', ''),
+            [(f['filename'], f['size'], f['sha256']) for f in data['files']]], ensure_ascii=False).encode()).hexdigest()
+        if key:
+            conn = await db._get_conn()
+            cursor = await conn.execute("SELECT id,metadata FROM global_messages WHERE session_id=? AND json_extract(metadata,'$.upload_request_key')=? LIMIT 1",
+                                       (current_scope().conversation_id, key))
+            previous = await cursor.fetchone()
+            await cursor.close()
+            if previous:
+                metadata = json.loads(previous['metadata'])
+                if metadata.get('upload_signature') != signature:
+                    raise ValueError('相同上传标识对应不同文件，请重新提交')
+                receipt.set_result({'ok': True, 'duplicate': True, 'record_id': previous['id']})
+                outbox.put({'type': 'turn_end'})
+                return
+        state = UserDataManager.get('state')
+        configuration = is_prompt_edit_state(state) or state in {
+            BotState.IMPORT_PROVIDER_CONFIG, BotState.SET_COMMAND_BLACKLIST, BotState.SET_MEMORY}
+        if configuration:
+            if mode != 'attachment' or len(data['files']) != 1:
+                raise ValueError('配置录入请一次只提交一个附件；服务器上传请先退出配置录入')
+            item = data['files'][0]
+            # Configuration parsing has its own format/size limits, not transport limits.
+            if item['size'] > PROVIDER_CONFIG_MAX_BYTES:
+                raise ValueError('配置文件过大，请使用普通附件或服务器上传')
+            with open(item['path'], 'rb') as handle:
+                content = handle.read()
+            with upload_receipt_scope(receipt):
+                await _web_run_upload(item['filename'], content, data['text'], outbox)
+            return
+        captions = json.loads(data.get('captions') or '[]')
+        modes = json.loads(data.get('modes') or '[]')
+        if modes and (len(modes) != len(data['files']) or any(m not in {'attachment', 'server_upload'} for m in modes)):
+            raise ValueError('文件模式格式错误')
+        if not isinstance(captions, list) or any(not isinstance(c, str) for c in captions):
+            raise ValueError('文件说明格式错误')
+        for i, item in enumerate(data['files']):
+            item_mode = modes[i] if modes else mode
+            payloads.append(await asyncio.to_thread(ArtifactManager.adopt_upload,
+                item['filename'], item['path'], captions[i] if i < len(captions) else '',
+                order=i, backup=item_mode == 'attachment', path_only=item_mode == 'server_upload'))
+            payloads[-1]['mode'] = item_mode
+        refs = [p['attachment'] for p in payloads]
+        content = '\n\n'.join(filter(None, [data.get('text', ''), *[
+            describe_file(ref, ArtifactManager.UPLOAD_DIR) if p['mode'] == 'server_upload' else p['index_text']
+            for ref, p in zip(refs, payloads)]]))
+        metadata = {'upload_request_key': key, 'upload_signature': signature, 'file_ingress_mode': mode,
+                    'web_file_message': {'version': 1, 'text': data.get('text', '')}}
+        attachment_refs = [p['attachment'] for p in payloads if p['mode'] == 'attachment']
+        upload_refs = [p['attachment'] for p in payloads if p['mode'] == 'server_upload']
+        if upload_refs:
+            metadata['server_uploads'] = upload_refs
+        if attachment_refs:
+            row_id = await GlobalRecorder.record_attachment_message(content, MessageType.USER_FILE,
+                BotConfig.AUTHORIZED_USER_ID, attachment_refs, generation, metadata=metadata)
+        else:
+            row_id = await GlobalRecorder.record_user_message(content, MessageType.USER_TEXT,
+                BotConfig.AUTHORIZED_USER_ID, metadata={**metadata, 'server_uploads': refs,
+                                                      'attachment_generation': generation})
+            if row_id is None:
+                raise ValueError('上传记录未保存')
+        committed = True
+        row = await db.get_display_message(row_id)
+        message = build_history_message(row, ArtifactManager.ROOT_DIR, AgentExecutor.WORK_DIR)
+        message['conversation_id'] = current_scope().conversation_id
+        frame = {**message, 'type': 'record_snapshot', 'record_id': row_id,
+                 'text': message['content'], 'ui_generation': generation}
+        frame.pop('content', None)
+        outbox.put(frame)
+        receipt.set_result({'ok': True, 'record_id': row_id, 'message': message})
+        update, context, _ = build_web_mirror_objects(BotConfig.AUTHORIZED_USER_ID, outbox, _web_real_bot,
+                                                     channel=telegram_channel())
+        for index, p in enumerate(payloads):
+            caption = p['attachment'].get('caption', '')
+            if index == 0 and data.get('text'):
+                caption = data['text'] + ('\n\n' + caption if caption and caption != data['text'] else '')
+            # Complete the user message's Telegram delivery before AI can reply.
+            await sync_web_attachment_to_telegram(p['saved_file']['abs_path'],
+                p['attachment']['name'], caption, ingress_mode=p['mode'])
+        await process_conversation(update, context, content)
+        outbox.put({'type': 'turn_end'})
+    except Exception as exc:
+        if not receipt.done():
+            receipt.set_result({'ok': False, 'error': str(exc)})
+        outbox.put({'type': 'turn_error', 'text': str(exc)})
+    finally:
+        if not committed and payloads:
+            await asyncio.to_thread(cleanup_payloads, payloads, ArtifactManager.UPLOAD_DIR)
+        data['_temporary'].cleanup()
+
+
+def _web_submit_file_batch(data, mode, outbox, *, conversation_id=None):
+    from concurrent.futures import Future
+    key = data.get('idempotency_key') or data.get('batch_id') or uuid.uuid4().hex
+    data['idempotency_key'] = key
+    signature = hashlib.sha256(json.dumps([mode, data.get('modes', ''), data.get('text', ''), data.get('captions', ''),
+        [(f['filename'], f['size'], f['sha256']) for f in data['files']]], ensure_ascii=False).encode()).hexdigest()
+    cache_key = (conversation_id, key)
+    with _web_file_receipts_lock:
+        existing = _web_file_receipts.get(cache_key)
+        if existing:
+            data['_temporary'].cleanup()
+            if existing[0] != signature:
+                failed = Future()
+                failed.set_result({'ok': False, 'error': '上传标识已用于其他文件'})
+                return failed
+            if existing[1].done():
+                duplicate = Future()
+                duplicate.set_result({**existing[1].result(), 'duplicate': True})
+                return duplicate
+            return existing[1]
+        receipt = Future()
+        _web_file_receipts[cache_key] = (signature, receipt)
+    loop = _web_chat_server.config.loop if _web_chat_server else None
+    if loop is None:
+        data['_temporary'].cleanup()
+        receipt.set_result({'ok': False, 'error': '服务未就绪'})
+        _web_file_receipts.pop(cache_key, None)
+        return receipt
+    async def receive():
+        try:
+            await _web_scoped_call(_web_run_file_batch(data, mode, outbox, receipt), conversation_id,
+                outbox, execution=True)
+        except Exception as exc:
+            logger.exception('Web 文件批次接纳失败')
+            if not receipt.done():
+                receipt.set_result({'ok': False, 'error': str(exc)})
+        finally:
+            data['_temporary'].cleanup()
+            if not receipt.done():
+                receipt.set_result({'ok': False, 'error': '当前会话未接收文件，请稍后重试'})
+            if not receipt.result().get('ok'):
+                _web_file_receipts.pop(cache_key, None)
+    asyncio.run_coroutine_threadsafe(receive(), loop)
+    return receipt
 
 
 def _web_submit_callback(callback_data: str, message_id: int, outbox: Any, *, conversation_id=None, request_id=None) -> None:
@@ -1351,6 +1703,8 @@ def telegram_entry(handler):
                 query = getattr(update, 'callback_query', None)
                 text = str(getattr(getattr(update, 'message', None), 'text', '') or '')
                 action = str(getattr(query, 'data', '') or '')
+                if action.startswith('q:'):
+                    return await handle_queue_callback(update, context, action)
                 for _ in range(8):
                     resolved = CallbackDataStore._store.get(action, action)
                     if resolved == action:
@@ -1489,17 +1843,14 @@ async def start_web_chat_if_enabled(app: Optional[Any] = None, *,
         authorized_user_id=BotConfig.AUTHORIZED_USER_ID,
         loop=asyncio.get_running_loop(),
         submit_message=_web_submit_message,
+        accept_text=_web_accept_text,
+        queue_api=queue_api,
         submit_callback=_web_submit_callback,
         submit_ui_callback=_web_submit_ui_callback,
         submit_command=_web_submit_command,
         submit_upload=_web_submit_upload,
-        # 上传上限按 API_BASE_URL 选档，与 agent_sendfile.py 发送侧阈值同源：
-        # 官方 API 50MB、本地 Bot API server 2GB。保证「web 放进来 → bot 发出去」
-        # 两端阈值一致，不会出现 web 放行却在 send_document 被 TG 拒。
-        upload_body_limit=(
-            2 * 1024 * 1024 * 1024 if BotConfig.API_BASE_URL
-            else 50 * 1024 * 1024
-        ),
+        submit_file_batch=_web_submit_file_batch,
+        file_transfer_directory=os.path.join(ArtifactManager.ROOT_DIR, 'file_transfers'),
         read_history=_web_read_history,
         read_conversations=get_conversations().state,
         read_history_message=_web_read_history_message,
@@ -1733,7 +2084,7 @@ async def _web_scoped_call(coro, conversation_id, outbox, *, execution=False, re
                 await UserDataManager.init()
                 expired = UserDataManager.bind_ui_state()
                 name = getattr(getattr(coro, 'cr_code', None), 'co_name', '')
-                user_input = name in {'_web_run_conversation', '_web_run_upload',
+                user_input = name in {'_web_run_conversation', '_web_run_upload', '_web_run_file_batch',
                                      '_web_run_photo_conversation', '_web_run_file_conversation'}
                 if expired and user_input:
                     raise ConversationChanged('之前的录入已因上下文变化取消；本次内容未提交，请重新操作。')

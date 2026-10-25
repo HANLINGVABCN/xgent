@@ -190,6 +190,9 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not await check_authorized_user_middleware(update, context):
         return
 
+    if str(query.data or '').startswith('q:'):
+        return await handle_queue_callback(update, context, query.data)
+
     # 停止按钮必须绕过普通菜单/记忆流程，尽快唤醒正在等待的生成或工具任务。
     try:
         data = CallbackDataStore.get(query.data or "")
@@ -317,7 +320,11 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             if mode == TEXT_STITCH_MODE_OFF:
                 key = get_text_conversation_buffer_key(update)
                 with _pending_text_conversations_lock:
-                    pending = _pending_text_conversations.pop(key, None)
+                    pending = _pending_text_conversations.get(key)
+                    if pending and pending.attachments:
+                        pending = None  # File-triggered stitching remains explicit Done/Clear.
+                    else:
+                        _pending_text_conversations.pop(key, None)
                 if pending and pending.prompt_message is not None:
                     with contextlib.suppress(Exception):
                         await pending.prompt_message.edit_text("🧹 已关闭文字拼接，并清空本次拼接内容。")
@@ -335,6 +342,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         elif data == "select_update_source_normal":
+            await validate_update_card(query.message, phase='source', claim='selecting')
             set_update_source(BotConfig.NORMAL_UPDATE_ZIP_URL)
             UserDataManager.set('pending_update_zip_url', "")
             await GlobalRecorder.record_system_op(
@@ -346,6 +354,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         elif data == "select_update_source_test":
+            await validate_update_card(query.message, phase='source', claim='selecting')
             set_update_source(BotConfig.TEST_UPDATE_ZIP_URL)
             await GlobalRecorder.record_system_op(
                 "选择 test 私有目录更新源",
@@ -2228,6 +2237,8 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 show_alert=True,
             )
 
+    except UiHistoryError as e:
+        await query.answer(str(e), show_alert=True)
     except Exception as e:
         logger.error(f"Callback Error: {e}\n{traceback.format_exc()}")
         await query.message.reply_text("操作失败，请稍后重试。")
