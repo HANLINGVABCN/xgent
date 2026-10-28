@@ -20,6 +20,19 @@ from .workbench_sources import owners as resource_owners, source_info, reference
 from .data_bundles import BundleError
 from .data_operations import DataOperations
 
+
+def _web_asset_version():
+    root = Path(__file__).resolve().parent / "webui" / "assets"
+    digest = hashlib.sha256()
+    for path in sorted(root.glob("*")):
+        if path.is_file() and path.suffix in {".js", ".css"}:
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
+WEB_ASSET_VERSION = _web_asset_version()
+
 class WorkbenchError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
@@ -114,20 +127,33 @@ class Workbench:
             operations = self._data_operations
             try:
                 if resource == 'data/estimate' and method == 'GET':
-                    include = data.get('include_command_outputs') in (True, 'true', '1')
-                    return await asyncio.to_thread(operations.bundles.estimate, include)
+                    return await asyncio.to_thread(operations.estimate, data)
                 if resource == 'data/export' and method == 'POST':
                     return await operations.export(data)
+                if resource == 'data/backup-settings' and method == 'GET':
+                    return operations.backup_settings()
+                if resource == 'data/backup-settings' and method == 'POST':
+                    return await asyncio.to_thread(operations.save_backup_settings, data)
+                if resource == 'data/backups' and method == 'GET':
+                    return await asyncio.to_thread(operations.list_backups)
+                if resource == 'data/backups/delete' and method == 'POST':
+                    return await asyncio.to_thread(operations.delete_backups, data)
+                if resource == 'data/import-stored' and method == 'POST':
+                    return await operations.import_stored(data)
                 if resource == 'data/import' and method == 'POST' and data.get('_bundle_path'):
                     return await operations.upload_import(data)
+                if resource == 'data/import/cancel' and method == 'POST':
+                    return await operations.cancel_import(data)
                 if resource == 'data/activate' and method == 'POST':
-                    return operations.activate(data)
+                    return await asyncio.to_thread(operations.activate, data)
                 if resource == 'data/status' and method == 'GET':
                     return operations.status(data.get('id'))
                 if resource == 'data/download' and method == 'GET':
                     return operations.download(data.get('id'))
+                if resource == 'data/backup-download' and method == 'GET':
+                    return operations.download_backup(data.get('name'))
                 raise WorkbenchError('数据维护接口不存在',404)
-            except BundleError as exc:
+            except (BundleError, TypeError, ValueError) as exc:
                 raise WorkbenchError(str(exc),409) from exc
         if resource == 'conversation-groups' and method == 'GET':
             return await self.conversations({})
@@ -173,6 +199,59 @@ class Workbench:
                 return await api.restore(data) if action == 'restore_version' else await api.read(action, data)
             except (VersionError, AttachmentContextError, OSError) as exc:
                 # Expected version conflicts are UI feedback, not new chat/error rows.
+                raise WorkbenchError(str(exc), getattr(exc, 'status', 409)) from exc
+        branch_resources = {
+            'conversations/branch/preview', 'conversations/branch', 'conversations/lineage',
+            'conversations/branch/apply-preview', 'conversations/branch/apply',
+            'conversations/withdraw/preview', 'conversations/withdraw',
+        }
+        if resource in branch_resources:
+            from .conversation_branching import ConversationBranchService, BranchingError
+            service = ConversationBranchService(
+                await self.db(), code_root=self.ns['AgentExecutor'].WORK_DIR,
+                storage_root=self.ns['ArtifactManager'].ROOT_DIR,
+            )
+            cid = str(data.get('conversation_id') or data.get('id') or '')
+            if not cid:
+                raise WorkbenchError('缺少目标对话', 400)
+            try:
+                if resource == 'conversations/lineage' and method == 'GET':
+                    return await service.lineage(cid)
+                if method != 'POST':
+                    raise WorkbenchError('此操作需要 POST', 405)
+                record_id = data.get('record_id')
+                if resource in {'conversations/branch/preview', 'conversations/branch',
+                                'conversations/withdraw/preview', 'conversations/withdraw'}:
+                    if type(record_id) is not int or record_id <= 0:
+                        raise WorkbenchError('缺少有效消息', 400)
+                if resource == 'conversations/branch/preview':
+                    return await service.branch_preview(cid, record_id, str(data.get('mode') or ''))
+                if resource == 'conversations/branch':
+                    async with self._mutation_lock:
+                        result = await service.create_branch(cid, record_id, str(data.get('mode') or ''),
+                                                             request_id=data.get('request_id'))
+                    await get_conversations().poll_once()
+                    return result
+                if resource == 'conversations/branch/apply-preview':
+                    return await service.apply_preview(cid)
+                if resource == 'conversations/branch/apply':
+                    async with self._mutation_lock:
+                        async with get_conversations().file_maintenance_slot():
+                            return await service.apply(cid, data)
+                if resource == 'conversations/withdraw/preview':
+                    return await service.withdraw_preview(cid, record_id)
+                if resource == 'conversations/withdraw':
+                    async with self._mutation_lock:
+                        async with get_conversations().file_maintenance_slot():
+                            result = await service.withdraw(cid, record_id, data)
+                    deleter = self.ns.get('_delete_withdrawn_telegram')
+                    if callable(deleter):
+                        self.background(deleter(result.get('telegram_native_message_ids', []),
+                                                result.get('telegram_logical_message_ids', [])))
+                    await get_conversations().poll_once()
+                    return result
+                raise WorkbenchError('对话分支接口不存在', 404)
+            except BranchingError as exc:
                 raise WorkbenchError(str(exc), getattr(exc, 'status', 409)) from exc
         if method == 'GET':
             if resource == 'global-search':
@@ -235,6 +314,7 @@ class Workbench:
                 'capabilities': {'tasks': True, 'providers': True, 'skills': True, 'usage': True, 'artifacts': True, 'shared_memory': True},
                 'timezone': self.ns['SelfTriggerManager'].DEFAULT_TIMEZONE,
                 'version': self.ns.get('RUNTIME_CODE_VERSION', self.ns.get('CODE_VERSION', '')),
+                'asset_version': WEB_ASSET_VERSION,
                 'web': await self.read_settings({}),
                 'media_model': {'provider': self.ns['get_model_target_provider_name']('media'),
                                 'model': self.ns['UserDataManager'].get('default_media_model', '')}}
@@ -270,8 +350,8 @@ class Workbench:
         anchor = str(data.get('anchor') or '')
         if anchor:
             kind, _, key = anchor.partition(':')
-            sql = ('SELECT timestamp FROM ui_messages WHERE ui_message_id=? AND conversation_id=?'
-                   if kind == 'ui' else 'SELECT timestamp FROM global_messages WHERE id=? AND session_id=?')
+            sql = ('SELECT timestamp FROM ui_messages WHERE ui_message_id=? AND conversation_id=? AND withdrawn=0'
+                   if kind == 'ui' else 'SELECT timestamp FROM global_messages WHERE id=? AND session_id=? AND withdrawn=0')
             cur = await conn.execute(sql, (key, current_scope().conversation_id))
             row = await cur.fetchone()
             await cur.close()
@@ -290,7 +370,9 @@ class Workbench:
                 table = 'ui_messages' if source else 'global_messages'
                 key_column = 'ui_message_id' if source else 'id'
                 text_column = 'payload' if source else 'content'
-                where, params = (['conversation_id=?'], [current_scope().conversation_id]) if source else (["session_id=?", "msg_type<>?"], [current_scope().conversation_id, str(self.ns['MessageType'].AGENT_CMD)])
+                where, params = ((['conversation_id=?', 'withdrawn=0'], [current_scope().conversation_id])
+                                 if source else (["session_id=?", "withdrawn=0", "msg_type<>?"],
+                                                 [current_scope().conversation_id, str(self.ns['MessageType'].AGENT_CMD)]))
                 if boundary:
                     ts, boundary_source, key, _ = boundary
                     if source == boundary_source:
@@ -339,6 +421,29 @@ class Workbench:
         found = found[:limit]
         cursor = found[-1]['history_cursor'] if found and more else (_pack(boundary) if more else None)
         if not forward: found.reverse()
+        turn_ids = sorted({message.get('turn_id') for message in found if message.get('turn_id')})
+        turn_info = {}
+        if turn_ids:
+            placeholders = ','.join('?' for _ in turn_ids)
+            cur = await conn.execute(f'SELECT * FROM conversation_turns WHERE id IN ({placeholders})', turn_ids)
+            turn_info = {row['id']: dict(row) for row in await cur.fetchall()}
+            await cur.close()
+        for message in found:
+            message.pop('conversation_actions', None)
+            turn = turn_info.get(message.get('turn_id'))
+            if not turn:
+                if message.get('role') == 'user' and message.get('msg_type') in {'user_text','user_file','user_photo','command'}:
+                    message['conversation_actions'] = {'branch_mode': 'user', 'withdraw': True}
+                elif message.get('msg_type') == 'ai_reply':
+                    message['conversation_actions'] = {'branch_mode': 'assistant'}
+                continue
+            if turn.get('status') in {'running', 'withdrawn'}:
+                continue
+            if (message.get('role') == 'user' and message.get('msg_type') in {'user_text','user_file','user_photo','command'}
+                    and turn.get('user_record_id') == message.get('id')):
+                message['conversation_actions'] = {'branch_mode': 'user', 'withdraw': True}
+            elif message.get('msg_type') == 'ai_reply' and turn.get('final_record_id') == message.get('id'):
+                message['conversation_actions'] = {'branch_mode': 'assistant'}
         if await db.get_attachment_generation() != generation: return reset
         return {'messages': found, 'next_cursor': cursor,
                 'first_cursor': found[0]['history_cursor'] if found else None,
@@ -967,7 +1072,7 @@ class Workbench:
         else:
             try:before=int(data.get('before') or 2**63-1)
             except (TypeError,ValueError,OverflowError):raise WorkbenchError('文件分页位置无效') from None
-            clauses=["m.id<?","s.deleting=0","(m.metadata LIKE '%attachments%' OR m.metadata LIKE '%server_uploads%' OR m.metadata LIKE '%display_media%' OR m.msg_type IN ('user_file','user_photo','media_reply'))"]
+            clauses=["m.id<?","m.withdrawn=0","s.deleting=0","(m.metadata LIKE '%attachments%' OR m.metadata LIKE '%server_uploads%' OR m.metadata LIKE '%display_media%' OR m.msg_type IN ('user_file','user_photo','media_reply'))"]
             params=[before]
             if source!='all':clauses.append('m.session_id=?');params.append(source)
             if start is not None:clauses.append('m.timestamp>=?');params.append(start)
@@ -1035,11 +1140,11 @@ class Workbench:
         # Search is a management read, never a cross-conversation model context.
         sql = """SELECT s.id,s.name,s.archived,s.last_active,
             (SELECT substr(m.content, max(1,instr(lower(m.content),lower(?))-40),180)
-             FROM global_messages m WHERE m.session_id=s.id AND ?<>''
+             FROM global_messages m WHERE m.session_id=s.id AND m.withdrawn=0 AND ?<>''
              AND m.msg_type IN ('user_text','ai_reply','user_file','user_photo','media_reply')
              AND instr(lower(m.content),lower(?))>0 ORDER BY m.timestamp DESC,m.id DESC LIMIT 1) snippet
             FROM chat_sessions s WHERE s.deleting=0 AND (?='' OR instr(lower(s.name),lower(?))>0 OR EXISTS
-              (SELECT 1 FROM global_messages m WHERE m.session_id=s.id
+              (SELECT 1 FROM global_messages m WHERE m.session_id=s.id AND m.withdrawn=0
                AND m.msg_type IN ('user_text','ai_reply','user_file','user_photo','media_reply')
                AND instr(lower(m.content),lower(?))>0))
             ORDER BY s.last_active DESC,s.id LIMIT 30"""

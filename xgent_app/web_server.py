@@ -52,6 +52,29 @@ MAX_UPLOAD_BODY_LOCAL_API = 2 * 1024 * 1024 * 1024
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
 VENDOR_DIR = os.path.join(STATIC_DIR, "vendor")
+_ASSET_REFERENCE_RE = re.compile(
+    r"(?P<quote>['\"])(?P<path>(?:/assets/|\./)[A-Za-z0-9._-]+\.(?:js|css))(?P=quote)"
+)
+
+
+def _asset_version(name: str) -> str:
+    path = os.path.join(STATIC_DIR, "assets", os.path.basename(name))
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()[:16]
+    except OSError:
+        return "missing"
+
+
+def _version_asset_references(body: bytes) -> bytes:
+    text = body.decode("utf-8")
+
+    def replace(match: re.Match) -> str:
+        path = match.group("path")
+        name = path.rsplit("/", 1)[-1]
+        return match.group("quote") + path + "?v=" + _asset_version(name) + match.group("quote")
+
+    return _ASSET_REFERENCE_RE.sub(replace, text).encode("utf-8")
 # 允许直接访问的静态资源白名单：路径 -> (磁盘文件名, Content-Type)。
 # 只列出这几个固定文件，不做通用目录遍历——避免 /vendor/../xxx 这类路径
 # 逃逸到 webui 之外读取任意文件。这几个文件本地自带，纯 Web 模式下不再需要
@@ -392,7 +415,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # --- 处理器 ---
 
     def _serve_workbench_asset(self, path: str) -> None:
-        allowed = {"knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed = {"knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
@@ -403,6 +426,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self._send_json({"error": "asset missing"}, status=404)
             return
+        if name.endswith(".js"):
+            body = _version_asset_references(body)
         etag = '"' + hashlib.sha256(body).hexdigest() + '"'
         self.send_response(304 if self.headers.get('If-None-Match') == etag else 200)
         self.send_header('ETag', etag)
@@ -534,7 +559,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self._send_html(b"<h1>webui/index.html missing</h1>", status=500)
             return
-        self._send_html(body)
+        self._send_html(_version_asset_references(body))
 
     def _handle_login(self) -> None:
         ip = self._client_ip()
@@ -823,11 +848,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         handed_off = False
         try:
-            if len(batch['files']) != 1 or batch.get('text') != 'confirm-instance-restore':
-                raise WorkbenchError('请选择一个实例备份并确认含密钥数据。')
+            if len(batch['files']) != 1 or batch.get('text') not in {'confirm-instance-restore', 'scan-instance-backup'}:
+                raise WorkbenchError('请选择一个实例压缩包进行扫描。')
             item = batch['files'][0]
             result = self._run_coro(self.config.workbench('POST','data/import',{
                 '_bundle_path':item['path'],'confirm_secrets':True,
+                '_source_name':item.get('name') or item.get('filename'),
                 'request_id':batch.get('request_id') or batch.get('idempotency_key'),
                 '_temporary':batch['_temporary'],
             }),timeout=45)
@@ -1048,8 +1074,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if data is None:
             return
         # 不沿用 workspace 的宽白名单；只认配置中 xgent_storage 下的 command_outputs。
-        roots = [os.path.join(root, "command_outputs") for root in self.config.media_allowed_roots
-                 if os.path.basename(os.path.normpath(root)) == "xgent_storage"]
+        roots = [os.path.join(root, child) for root in self.config.media_allowed_roots
+                 if os.path.basename(os.path.normpath(root)) == "xgent_storage"
+                 for child in ("command_outputs", "conversation_objects")]
         try:
             page = read_output_page(str(data.get("path") or ""), data.get("offset", 0), roots=roots)
         except OutputArchiveError as exc:
