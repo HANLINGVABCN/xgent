@@ -351,7 +351,7 @@ class ConversationManager:
             if acquired and self.code_root is not None and self.object_root is not None:
                 from .conversation_branching import begin_turn, bind_turn
                 db = await self.factory()
-                turn_id = await begin_turn(db, scope, self.code_root, self.object_root)
+                turn_id = await begin_turn(db, scope)
                 turn_guard = bind_turn(turn_id)
             with bind_conversation(scope), turn_guard:
                 try:
@@ -364,6 +364,16 @@ class ConversationManager:
                     raise
                 finally:
                     final_scope = current_scope(required=False)
+        except BaseException as exc:
+            # Failures before ``yield`` (for example admission/snapshot setup)
+            # used to leave the durable message pending, so every poll retried
+            # forever and the UI remained on “排队中”.  Give them the same
+            # terminal queue semantics as failures during model execution.
+            if acquired:
+                self._run_outcome = 'stopped' if isinstance(exc, asyncio.CancelledError) else 'failed'
+            if not hasattr(exc, 'conversation_context'):
+                exc.conversation_context = dataclasses.asdict(scope)
+            raise
         finally:
             if inherited and not inherited.run_id and final_scope and inherited.conversation_id == final_scope.conversation_id and inherited.generation != final_scope.generation:
                 _scope.set(dataclasses.replace(inherited, generation=final_scope.generation))
@@ -376,7 +386,7 @@ class ConversationManager:
                     outcome = 'stopped' if self._stop_event and self._stop_event.is_set() else self._run_outcome
                     if turn_id is not None:
                         from .conversation_branching import finish_turn
-                        await finish_turn(db, scope, turn_id, self.code_root, self.object_root, outcome)
+                        await finish_turn(db, scope, turn_id, status=outcome)
                     await db.queue_finish_run(scope.run_id, outcome)
                     await db.finish_conversation_run(scope.run_id)
                 finally:
