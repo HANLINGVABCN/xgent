@@ -23,7 +23,7 @@ async def main():
         async with Harness(bot,folder) as h:
             for hide in (True,False):
                 for stream,style in ((False,'foreground'),(True,'foreground'),(True,'background')):
-                    bot.UserDataManager.set('hide_protocol_blocks',hide)
+                    await bot.UserDataManager.save_config('hide_protocol_blocks',hide)
                     bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('stream_style',style)
                     raw='# 标题\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- [x] 检查完成\n\n'
                     raw+='```python\nprint("<safe> & 中文")\n```\n\n'
@@ -49,7 +49,7 @@ asyncio.run(main())
 ''')
 
 
-def test_saved_reply_freezes_display_and_tracks_all_final_fragments(reply_cases):
+def test_retired_mode_preserves_history_raw_reply_and_fragment_identity(reply_cases):
     assert len(reply_cases)==6
     for case in reply_cases:
         assert case['raw_unchanged'] and case['frozen'],case['name']

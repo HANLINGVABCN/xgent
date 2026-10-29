@@ -313,8 +313,72 @@ def history_web_display(content: str, display=None):
     return build_web_display(content, fold=folded)
 
 
+def apply_history_presentation(message, record, metadata, *, namespace=None, mode_override=None):
+    """Use the live semantic renderers for dynamic history; snapshots are legacy fallback."""
+    from .presentation import normalize_mode, ai_html, operation_html, footer_html, successful_status, metadata_dict, current_turn, legacy_operation
+    from .agent_status import compact_agent_round_status
+    from .web_display import build_web_display, build_operation_display
+    ns = namespace if namespace is not None else _section_ns()
+    presentation = metadata_dict(metadata.get('presentation'))
+    kind, raw = record.get('msg_type'), str(record.get('content') or '')
+    caption = compact_agent_round_status(raw) if kind == 'agent_status' else None
+    if caption:
+        message.update(content=caption, parse_mode=None, presentation_mode='folded')
+        message['web_display'] = build_web_display(caption, mode='folded', presentation=presentation)
+        return
+    if ns is None and not presentation:
+        return
+    mode = (normalize_mode(ns['UserDataManager'].get('presentation_mode', 'folded'))
+            if ns and 'UserDataManager' in ns else normalize_mode(presentation.get('mode')))
+    if mode_override is not None:
+        mode = normalize_mode(mode_override)
+    turn = current_turn()
+    if turn is not None:
+        mode = turn.mode
+    if kind == 'agent_result' and not presentation.get('operation'):
+        recovered = legacy_operation(raw, metadata)
+        if recovered is not None:
+            presentation['operation'] = recovered
+    message['presentation_mode'] = mode
+    if kind == 'token_usage' or mode == 'folded' and (successful_status(raw)
+            or raw.startswith('系统提示：⚠️ 协议块 nonce')
+            or kind == 'agent_status' and presentation.get('technical')
+            and not any(word in raw for word in ('停止', '失败', '超过', '超限', '等待填写'))):
+        message['hidden'] = True
+        return
+    renderer = ns.get('markdown_to_telegram_html') if ns else None
+    if kind in {'ai_reply', 'media_reply'} and renderer:
+        content = ai_html(raw, mode, renderer)
+        footer = footer_html(presentation)
+        message.update(content=content + ('\n\n' + footer if footer else ''), parse_mode='HTML')
+        message['web_display'] = build_web_display(raw, fold=True, mode=mode,
+            presentation={**presentation, 'default_protocol_state': 'pending' if presentation.get('execution_schema') else 'unknown'})
+    elif kind == 'agent_result' and isinstance(presentation.get('operation'), dict):
+        operation = presentation['operation']
+        content = operation_html(operation, detailed=mode == 'detailed')
+        footer = footer_html(presentation) if mode == 'folded' else ''
+        message.update(content=content + ('\n\n' + footer if footer else ''), parse_mode='HTML')
+        details = '\n'.join(f'{label}：{operation[key]}' for key, label in (
+            ('return_code', '返回码'), ('elapsed_seconds', '耗时（秒）'),
+            ('session_id', '终端会话'), ('output_path', '输出存档'), ('notice', '执行说明'))
+            if operation.get(key) is not None)
+        message['web_display'] = build_operation_display(operation, mode, presentation)
+        if operation.get('output_path') and record.get('id'):
+            message['reply_markup'] = [[{'text': '完整输出', 'callback_data': f'present_output:{record["id"]}'}]]
+    elif (kind == 'presentation_note' or kind == 'agent_status' and presentation.get('summary')) and renderer:
+        message.update(content=renderer(raw), parse_mode='HTML')
+        footer = footer_html(presentation)
+        if footer:
+            message['content'] += '\n\n' + footer
+        message['web_display'] = build_web_display(raw, fold=True, mode=mode, presentation=presentation)
+    if mode == 'folded' and presentation.get('usage') and record.get('id'):
+        message.setdefault('reply_markup', []).append([{
+            'text': '用量详情', 'callback_data': f'present_usage:{record["id"]}:1'}])
+
+
 def build_history_message(
     record: dict[str, Any], storage_root: str | Path, workspace_root: str | Path,
+    *, presentation_namespace=None, presentation_mode=None,
 ) -> dict[str, Any]:
     """No Base64 or short-lived download tokens enter the history response."""
     kind = record.get("msg_type")
@@ -350,6 +414,8 @@ def build_history_message(
         metadata = {}
         message["media_error"] = "\u5386\u53f2\u9644\u4ef6\u5143\u6570\u636e\u635f\u574f"
     live = metadata.get('web_live')
+    if metadata.get('run_id') or metadata.get('queue_run_id'):
+        message['run_id']=metadata.get('run_id') or metadata['queue_run_id']
     if isinstance(metadata.get('queue_id'), str):
         message['queue_id'] = metadata['queue_id']
     if (isinstance(live, dict) and isinstance(live.get('epoch'), str)
@@ -387,6 +453,8 @@ def build_history_message(
         message['reply_markup'] = [[{
             'text': '\u91cd\u8bd5\u6062\u590d', 'callback_data': 'retry_compress:' + task['id'],
         }]]
+    apply_history_presentation(message, record, metadata,
+        namespace=presentation_namespace, mode_override=presentation_mode)
     if kind not in _FILE_TYPES and not metadata.get('server_uploads'):
         return message
     if (metadata.get("attachment_purpose") == "configuration"

@@ -84,28 +84,32 @@ def test_file_filters_precise_source_location_and_return(browser_context,workspa
     assert target['y']<log['y']+log['height'] and target['y']+target['height']>log['y']
     page.get_by_role('link',name='返回文件与输出',exact=True).click()
     page.get_by_role('heading',name='文件与输出',exact=True).wait_for()
+    expect=pytest.importorskip('playwright.sync_api').expect
+    expect(page.get_by_role('searchbox',name='按文件名搜索',exact=True)).to_have_value('来源验证')
     assert page.get_by_label('文件来源对话',exact=True).input_value()==source
     assert page.get_by_role('searchbox',name='按文件名搜索',exact=True).input_value()=='来源验证'
     page.close()
 
 
 def test_task_source_tokens_rounds_and_dark_code_unchanged(browser_context,workspace_url):
+    retired=browser_context.request.post(workspace_url['url']+'/api/workbench/settings',data={'key':'presentation_mode','value':'detailed'})
+    assert retired.ok and retired.json()['values']['presentation_mode']=='folded'
     page=browser_context.new_page();ready(page,workspace_url['url'],'tasks')
     target=page.locator('.wb-task-table tr').filter(has=page.get_by_role('button',name='每日服务健康检查',exact=True))
     target.locator('.wb-source-link').click()
     page.locator('.msg-row[data-record-id="'+str(workspace_url['demo']['task_message'])+'"]').wait_for()
     page.evaluate('window.XGentChat.reload()')
-    token=page.locator('.msg-row[data-record-id="'+str(workspace_url['demo']['token_message'])+'"]');token.wait_for()
-    before=token.inner_text()
-    assert '2400' in before and '800' in before and 'cached' in before
-    assert page.locator('.msg-row[data-record-id="'+str(workspace_url['demo']['round_message'])+'"]').get_by_text('Agent 第 2 轮',exact=False).count()>0
+    token=page.locator('.token-hud').filter(has_text='↑ 2,400');token.first.wait_for()
+    before=token.first.inner_text()
+    assert '2,400' in before and '800' in before and 'cache' in before
+    assert page.locator('.msg-row[data-record-id="'+str(workspace_url['demo']['round_message'])+'"]').get_by_text('Agent 第 2 轮 · 3 个操作',exact=True).count()==1
     assert page.locator('.bubble-header').count()>0
     for dark in [False,True]:
         page.evaluate('(dark)=>document.body.classList.toggle("dark",dark)',dark)
-        color=page.locator('.bubble pre').first.evaluate('(e)=>getComputedStyle(e).backgroundColor')
+        color=page.locator('.execution-code').first.evaluate('(e)=>getComputedStyle(e).backgroundColor')
         assert color in ('rgb(24, 35, 52)','rgb(30, 41, 59)')
-    page.reload();ready(page,workspace_url['url']);token.wait_for()
-    assert token.inner_text()==before
+    page.reload();ready(page,workspace_url['url']);token.first.wait_for()
+    assert token.first.inner_text()==before
     page.close()
 
 
@@ -135,7 +139,8 @@ def test_complete_output_can_close_during_loading(full_output_server):
         page=context.new_page();page.goto(base)
         block=page.locator('blockquote.pb[data-output-path]').first;block.wait_for()
         pending=[];page.route('**/api/output/page',lambda r:pending.append(r))
-        button=block.locator('.btn-output');button.click();assert button.inner_text()=='收起完整输出'
+        block.locator('.execution-row').click();page.wait_for_timeout(300)
+        button=block.locator('.btn-output');button.click();assert button.get_attribute('aria-expanded')=='true'
         button.click();assert block.locator('.output-pages').count()==0
         for request in pending:
             try:request.fulfill(json={'text':'late result','offset':0,'next_offset':11,'size':11,'filename':'test.txt','eof':True})

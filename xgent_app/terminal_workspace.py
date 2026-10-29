@@ -160,8 +160,15 @@ class TerminalWorkspace:
             conn = await db._get_conn()
             cursor = await conn.execute("SELECT (SELECT MAX(id) FROM global_messages WHERE session_id=?), "
                 "(SELECT MAX(timestamp) FROM global_messages WHERE session_id=?), "
-                "(SELECT SUM(revision) FROM ui_messages WHERE conversation_id=?)", (cid, cid, cid))
-            stamp = (tuple(await cursor.fetchone()), session['generation'], limit)
+                "(SELECT SUM(revision) FROM ui_messages WHERE conversation_id=?), "
+                "(SELECT SUM(CASE WHEN json_valid(metadata) THEN COALESCE(json_extract(metadata,'$.presentation.revision'),0) ELSE 0 END) FROM global_messages WHERE session_id=?)", (cid, cid, cid, cid))
+            from .web_history import _section_ns
+            ns = _section_ns()
+            from .presentation import normalize_mode
+            mode = normalize_mode(await db.get_config_fresh('presentation_mode', 'folded'))
+            if ns:
+                ns['UserDataManager'].set('presentation_mode', mode)
+            stamp = (tuple(await cursor.fetchone()), session['generation'], limit, mode)
             await cursor.close()
             if not force and self._history_stamp.get(cid) == stamp:
                 return
@@ -171,6 +178,7 @@ class TerminalWorkspace:
                     rows = await db.get_display_history(limit)
                     rendered = []
                     for row in rows:
+                        row['presentation_mode'] = mode
                         if row.get('msg_type') == 'ui_message':
                             continue  # Other clients' menu navigation is not a new chat message.
                         key = ('h:' + str(row['id']) if row.get('id') is not None

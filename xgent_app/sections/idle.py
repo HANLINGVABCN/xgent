@@ -344,10 +344,10 @@ from xgent_app.web_appearance import FONT_SETTINGS, read_appearance, write_appea
 
 WEB_EDITABLE_SETTINGS = {
     *FONT_SETTINGS,
-    'thinking_level', 'stream_mode', 'agent_mode', 'text_stitch_mode',
+    'thinking_level', 'stream_mode', 'response_mode', 'agent_mode', 'text_stitch_mode',
     'global_depth', 'agent_max_iterations', 'stream_timeout', 'chat_model',
     'disabled_skills', 'hidden_skills', 'skill_state', 'agent_command_timeout', 'idle_message_interval',
-    'smart_match_threshold', 'hide_protocol_blocks',
+    'smart_match_threshold',
     # token 统计相关：价格表 / 手动合并表 / 报表默认选项
     'model_price_table', 'model_merge_map', 'stats_auto_merge', 'stats_metric',
 }
@@ -579,9 +579,10 @@ async def _replay_relay_op(mirror: Any, op: str, payload: Dict[str, Any]) -> Non
     from xgent_app.conversations import conversation_still_exists
     from xgent_app.telegram_presentation import replay_presentation
     from xgent_app.web_display import web_display_scope
+    from xgent_app.presentation import message_presentation
     if not await conversation_still_exists(payload.get('conversation_context')):
         return
-    with replay_presentation(payload.get('telegram_presentation')), replay_conversation(payload.get('conversation_context')), media_presentation_scope(payload.get('media_presentation')), replay_ui_context(payload.get('ui_context')), web_display_scope(payload.get('web_display')):
+    with replay_presentation(payload.get('telegram_presentation')), replay_conversation(payload.get('conversation_context')), media_presentation_scope(payload.get('media_presentation')), replay_ui_context(payload.get('ui_context')), web_display_scope(payload.get('web_display')), message_presentation(payload.get('message_presentation')):
         await _replay_relay_op_with_presentation(mirror, op, payload)
 
 
@@ -897,7 +898,11 @@ async def _web_read_settings() -> Dict[str, Any]:
             **appearance['values'],
             'thinking_level': normalize_thinking_level(UserDataManager.get('thinking_level')),
             'stream_mode': normalize_bool(UserDataManager.get('stream_mode', True), True),
-            'hide_protocol_blocks': normalize_bool(UserDataManager.get('hide_protocol_blocks', True), True),
+            'stream_style': normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE)),
+            'response_mode': (normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
+                              if normalize_bool(UserDataManager.get('stream_mode', True), True) else 'nonstream'),
+            'presentation_mode': normalize_mode(UserDataManager.get('presentation_mode', 'folded')),
+            'hide_protocol_blocks': True,
             'agent_mode': bool(UserDataManager.get('agent_mode', False)),
             'text_stitch_mode': normalize_text_stitch_mode(UserDataManager.get('text_stitch_mode')),
             'global_depth': int(UserDataManager.get('global_depth', 30) or 30),
@@ -921,6 +926,9 @@ async def _web_read_settings() -> Dict[str, Any]:
             'stats_metric': stats_metric,
         },
         'options': {
+            'response_mode': [{'value': 'foreground', 'label': '前台流式'},
+                              {'value': 'background', 'label': '后台流式'},
+                              {'value': 'nonstream', 'label': '非流式'}],
             'thinking_level': [
                 {'value': level, 'label': THINKING_LEVEL_LABELS[level]}
                 for level in THINKING_LEVEL_ORDER
@@ -949,6 +957,11 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
         UserDataManager.set(key, appearance['values'][key])
         await _sync_web_appearance(db, force=True)
         return await _web_read_settings()
+    if key in {'presentation_mode', 'hide_protocol_blocks'}:
+        # Older clients may still submit these settings. Keep their request
+        # compatible while persisting the sole supported presentation.
+        await UserDataManager.save_config('presentation_mode', 'folded')
+        return await _web_read_settings()
     if key not in WEB_EDITABLE_SETTINGS:
         raise ValueError(f"不可修改的配置项: {key}")
 
@@ -967,7 +980,11 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
         UserDataManager.set(key, level)
         await UserDataManager.save_config(key, level)
         ModelClient._thinking_unsupported.clear()
-    elif key in {'stream_mode', 'agent_mode', 'hide_protocol_blocks'}:
+    elif key == 'response_mode':
+        values = await (await BotMemoryDB.get_instance()).set_response_mode(value)
+        for setting, selected in values.items():
+            UserDataManager.set(setting, selected)
+    elif key in {'stream_mode', 'agent_mode'}:
         flag = normalize_bool(value, False)
         UserDataManager.set(key, flag)
         await UserDataManager.save_config(key, flag)
@@ -2077,6 +2094,14 @@ async def _web_config_reconciler() -> None:
         await asyncio.sleep(_WEB_CONFIG_POLL_SECONDS)
         try:
             await reconcile_web_config_once()
+            db = await BotMemoryDB.get_instance()
+            mode = normalize_mode(await db.get_config_fresh('presentation_mode', 'folded'))
+            if mode != UserDataManager.get('presentation_mode', 'folded'):
+                UserDataManager.set('presentation_mode', mode)
+                server = globals().get('_web_chat_server')
+                outbox = getattr(server, 'outbox', None) or globals().get('_web_external_outbox')
+                if outbox is not None:
+                    outbox.put({'type': 'presentation_changed', 'presentation_mode': mode})
         except Exception:
             # 单轮失败不能带走这个任务：下一轮照旧。取舍同
             # _web_external_record_watcher 的轮询。
