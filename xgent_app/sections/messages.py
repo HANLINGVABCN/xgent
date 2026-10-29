@@ -2323,6 +2323,8 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                                     markdown_to_telegram_html(round_state.over_text), parse_mode=constants.ParseMode.HTML)
                         continue
 
+                    if block_type == 'run':
+                        await context.bot.start_command_display(update.effective_chat.id, build_stop_keyboard())
                     standard_operation = await dispatch_standard_protocol(
                         block,
                         executor=AgentExecutor,
@@ -2515,19 +2517,19 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             agent_iteration=agent_iteration,
                             chat_id=update.effective_chat.id,
                             origin=AgentTurnOrigin.ask(),
+                            form_bot=context.bot.original,
                         )
                         form_header = (
                             "📝 需要你的输入：请在下面选择/填写后点「✅ 提交」。\n"
                             "（提交前可以反复改；密钥项的内容只进环境变量，绝不会发给 AI。）"
                         )
-                        form_msg = await context.bot.send_message(
-                            chat_id=update.effective_chat.id,
-                            text=form_header,
-                            reply_markup=ask_form.build_keyboard(ask_id, pending.draft),
-                        )
+                        PENDING_ASKS.put(pending)
+                        with message_presentation({'kind': 'agent_result', 'mode': current_turn().mode, 'ask_id': ask_id}):
+                            form_msg = await context.bot.send_message(
+                                chat_id=update.effective_chat.id, text=form_header,
+                                reply_markup=ask_form.build_keyboard(ask_id, pending.draft))
                         with contextlib.suppress(Exception):
                             pending.form_message_id = form_msg.message_id
-                        PENDING_ASKS.put(pending)
                         queue = get_text_queue()
                         await queue.start()
                         await db.queue_wait_ask(current_scope(), queue.instance)
@@ -2539,7 +2541,12 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             conversation_id=cid,
                             chat_id=update.effective_chat.id,
                             notice=f"[ask] 已向用户弹出表单（{len(ask_form.questions)} 个问题），等待提交。",
+                            display_metadata={'ask_form': pending.web_snapshot(), **({'web_live': {
+                                'epoch': context.bot.outbox.snapshot()['epoch'], 'message_ids': [form_msg.message_id]}}
+                                if getattr(context.bot, 'outbox', None) is not None else {})},
                         )
+                        pending.form_record_id = current_turn().last_record_id
+                        await publish_saved_reply(context, pending.form_record_id)
                         form_shown = True
                         if current_turn() is not None:
                             current_turn().reason = '📝 等待填写表单。'
@@ -2930,7 +2937,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
 
 async def persist_ask_answer(text, chat_id, generation):
     answer = build_ask_context_message(text)
-    metadata = {'attachment_generation': generation}
+    metadata = {'attachment_generation': generation, 'ask_answer': True}
     if normalize_bool(UserDataManager.get('readx_persist_context', False), False):
         from xgent_app.tool_context import freeze_tool_message
         metadata['model_context'] = freeze_tool_message(answer, ArtifactManager.save_binary_upload)
@@ -2948,6 +2955,8 @@ async def resume_from_ask(ask_id: str) -> str:
     pending = PENDING_ASKS.get(ask_id)
     if pending is not None and pending.conversation_id != current_scope().conversation_id:
         return '请先切回该表单所属会话。'
+    if pending is not None and pending.form.unanswered(pending.draft):
+        return '请填写全部问题后再提交。'
     pending = PENDING_ASKS.pop(ask_id)
     if pending is None:
         return "这个表单已经处理过或已失效。"
@@ -2957,12 +2966,14 @@ async def resume_from_ask(ask_id: str) -> str:
     if pending.generation != current_gen:
         # 期间被 /清空上下文：快照历史已作废，别拿旧上下文继续。
         return "上下文已清空，这个表单已失效——如需继续，请让 AI 重新发起提问。"
+    from xgent_app.web_ask import sync_ask
+    await sync_ask(globals(), pending, status='submitted')
 
     from xgent_app.conversations import restore_reply_route
     restore_reply_route(pending.conversation_context)
     answer_text = pending.form.assemble_answer(pending.draft)
 
-    # 记录一条用户消息（表单回答，不含明文密钥）到全局记忆，供三端展示与后续历史。
+    # Preserve the model's form context without another visible answer dump.
     answer_message = await persist_ask_answer(answer_text, pending.chat_id, pending.generation)
     queue = get_text_queue()
     await queue.start()
@@ -3002,6 +3013,8 @@ async def cancel_ask(ask_id: str) -> str:
     db = await BotMemoryDB.get_instance()
     if pending.generation != await db.get_attachment_generation():
         return "上下文已清空，这个表单已失效。"
+    from xgent_app.web_ask import sync_ask
+    await sync_ask(globals(), pending, status='cancelled')
 
     from xgent_app.conversations import restore_reply_route
     restore_reply_route(pending.conversation_context)
@@ -3033,10 +3046,11 @@ async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_T
 
     - 密钥（ASK_SECRET_INPUT）：明文只写 SecretStore（os.environ + 脱敏名单），
       draft 只标记「已录入」，落库是占位符——明文绝不进 draft/模型/库。
-    - 自定义（ASK_FIELD_INPUT）：普通文本，进 draft 也可入模型，落原文。
-    录完清状态、原地重画表单键盘（拿不到表单消息 id 时退化为新发一条）。
+    - 自定义（ASK_FIELD_INPUT）：仅更新 draft，提交时再进入模型上下文。
+    录完清状态，只更新原表单键盘，不重发另一张表单。
     """
     target = UserDataManager.get('ask_input_target') or {}
+    from xgent_app.ask_presentation import send_ask_input_notice
     ask_id = target.get('ask_id', '')
     qid = target.get('qid', '')
     pending = PENDING_ASKS.get(ask_id)
@@ -3047,7 +3061,13 @@ async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_T
     if pending is None:
         UserDataManager.set('state', BotState.IDLE)
         UserDataManager.set('ask_input_target', None)
-        await update.message.reply_text("这个表单已失效，请让 AI 重新发起提问。")
+        await send_ask_input_notice(update.message, "这个表单已失效，请让 AI 重新发起提问。")
+        return
+
+    if pending.conversation_id!=current_scope().conversation_id or pending.status!='pending':
+        UserDataManager.set('state', BotState.IDLE)
+        UserDataManager.set('ask_input_target', None)
+        await send_ask_input_notice(update.message, '表单已提交或不属于当前会话，请回到表单所属会话。')
         return
 
     question = pending.form.question(qid)
@@ -3055,7 +3075,7 @@ async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_T
         UserDataManager.set('state', BotState.IDLE)
         UserDataManager.set('ask_input_target', None)
         if is_cancel:
-            await update.message.reply_text("已取消这一项的录入，其它选项不受影响。")
+            await send_ask_input_notice(update.message, "已取消这一项的录入，其它选项不受影响。")
         return
 
     if state == BotState.ASK_SECRET_INPUT:
@@ -3065,7 +3085,7 @@ async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_T
         SECRET_STORE.set(current_scope().conversation_id, question.var, text)
         pending.ensure_entry(qid)['filled'] = True
         # 录库占位符已在上游 masking 段记过；这里给用户一句可见回执（不含明文）。
-        await update.message.reply_text(
+        await send_ask_input_notice(update.message,
             f"🔒 已录入变量 ${question.var}，内容只进了环境变量，没有发给 AI。回到表单继续。"
         )
     else:
@@ -3074,30 +3094,14 @@ async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_T
         # 选择题填了自定义 → 视为改选自定义，清掉预设勾选，避免二义。
         if question.qtype in ('single', 'multi'):
             entry['selected'] = []
-        await GlobalRecorder.record_user_message(text, MessageType.USER_TEXT, update.effective_chat.id)
-        await update.message.reply_text("✅ 已填入，回到表单继续。")
+        await send_ask_input_notice(update.message, "✅ 已填入，回到表单继续。")
 
     UserDataManager.set('state', BotState.IDLE)
     UserDataManager.set('ask_input_target', None)
 
     # 原地重画表单键盘反映「已填/已录入」。
-    new_markup = pending.form.build_keyboard(ask_id, pending.draft)
-    redrawn = False
-    if pending.form_message_id is not None:
-        with contextlib.suppress(Exception):
-            await context.bot.edit_message_reply_markup(
-                chat_id=pending.chat_id,
-                message_id=pending.form_message_id,
-                reply_markup=new_markup,
-            )
-            redrawn = True
-    if not redrawn:
-        with contextlib.suppress(Exception):
-            sent = await context.bot.send_message(
-                chat_id=pending.chat_id,
-                text="📝 表单已更新，请继续选择/填写后点「✅ 提交」。",
-                reply_markup=new_markup,
-            )
-            pending.form_message_id = sent.message_id
+    pending.revision += 1
+    from xgent_app.web_ask import sync_ask
+    await sync_ask(globals(), pending)
 
 # --- ☆ 命令函数 ☆ ---

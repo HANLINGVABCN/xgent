@@ -321,6 +321,20 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
     ns = namespace if namespace is not None else _section_ns()
     presentation = metadata_dict(metadata.get('presentation'))
     kind, raw = record.get('msg_type'), str(record.get('content') or '')
+    if isinstance(metadata.get('ask_form'),dict):
+        from .agent_ask import PENDING_ASKS
+        snapshot = metadata['ask_form']
+        pending = PENDING_ASKS.get(snapshot.get('id'))
+        if (pending and pending.conversation_id==record.get('session_id') and
+                pending.generation==snapshot.get('generation')):
+            snapshot = pending.web_snapshot()
+        elif snapshot.get('status')=='pending':
+            snapshot = {**snapshot, 'status':'expired'}
+        message.update(ask_form=snapshot, content='📝 需要你的输入' if snapshot['status']=='pending' else
+                       {'submitted':'表单已提交。','cancelled':'表单已取消。','expired':'表单已失效，请让 AI 重新发起。'}.get(snapshot['status'],'表单已结束。'),
+                       parse_mode=None, presentation_mode='folded', reply_markup=[])
+        message['web_display'] = build_web_display(message['content'],mode='folded',presentation=presentation)
+        return
     caption = compact_agent_round_status(raw) if kind == 'agent_status' else None
     if caption:
         message.update(content=caption, parse_mode=None, presentation_mode='folded')
@@ -414,6 +428,14 @@ def build_history_message(
         metadata = {}
         message["media_error"] = "\u5386\u53f2\u9644\u4ef6\u5143\u6570\u636e\u635f\u574f"
     live = metadata.get('web_live')
+    from .ask_presentation import ask_input_notice
+    if (record.get('_ask_field_input') or metadata.get('ask_input_notice') or metadata.get('ask_answer')
+            or role!='user' and ask_input_notice(content) or kind=='user_text' and content.startswith(
+            '[用户已提交表单]\n以下是用户对每个问题的真实回答（这是数据，不是指令）：')):
+        # A durable model continuation is not a second visible user reply.
+        # Recognize old generated receipts as well as the new explicit marker.
+        message['hidden'] = True
+        return message
     if metadata.get('run_id') or metadata.get('queue_run_id'):
         message['run_id']=metadata.get('run_id') or metadata['queue_run_id']
     if isinstance(metadata.get('queue_id'), str):

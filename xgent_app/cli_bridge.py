@@ -133,6 +133,8 @@ def _render_kind_for(text: str) -> str:
     from .presentation import current_message_presentation
     hint = current_message_presentation()
     if hint is not None:
+        if hint['kind'] == 'ask_input_notice':
+            return 'system'
         return {'ai_reply': 'chat', 'agent_result': 'cmd', 'agent_status': 'system', 'runtime_error': 'system', 'token_usage': 'token'}.get(hint['kind'], 'chat')
     if _TOKEN_LINE_RE.search(text):
         return "token"
@@ -233,6 +235,9 @@ class _CliRelay:
     # -- 生产端 --
 
     def emit(self, op: str, **payload: Any) -> None:
+        from .ask_presentation import local_ask_notice
+        if local_ask_notice() and op in {'send_message', 'edit_message_text', 'user_echo'}:
+            return
         from xgent_app.conversations import conversation_snapshot
         snapshot = conversation_snapshot()
         payload['conversation_context'] = snapshot
@@ -612,6 +617,7 @@ class CliBot:
     def __init__(self, chat_id: int, screen: Optional[TerminalScreen] = None):
         self.chat_id = chat_id
         self.screen = screen or get_screen()
+        self._ask_messages = {}
 
     def _allocate_message_id(self) -> int:
         return _allocate_cli_message_id()
@@ -653,6 +659,11 @@ class CliBot:
     async def send_message(self, chat_id: int, text: str, reply_markup: Any = None,
                            parse_mode: Any = None, **kwargs: Any) -> CliMessage:
         message_id = self._allocate_message_id()
+        if any(action.startswith(('asks:', 'askm:', 'asko:', 'askk:', 'askd:', 'askx:'))
+               for _, action in buttons_from_markup(reply_markup)):
+            self._ask_messages[message_id] = (str(text), parse_mode)
+            if len(self._ask_messages)>64:
+                self._ask_messages.pop(next(iter(self._ask_messages)))
         reply_markup = bind_callback_markup(reply_markup)
         buttons = buttons_from_markup(reply_markup)
         buttons = [(label, action) for label, action in buttons if label not in {'用量详情', '收起用量详情'}]
@@ -726,6 +737,16 @@ class CliBot:
         _register_menu(target_id, menu_buttons, is_edit=True)
         _RELAY.emit("edit_message_reply_markup", message_id=target_id,
                     reply_markup=_markup_to_frame(reply_markup))
+        if target_id in self._ask_messages:
+            text, parse_mode = self._ask_messages[target_id]
+            from .presentation import message_presentation
+            with message_presentation({'kind': 'agent_result', 'mode': 'folded'}):
+                lines, _ = self._render_by_kind(text, buttons, parse_mode)
+            if lines and not self.screen.update_block(lines, target_id):
+                self.screen.print_plain('表单选项已更新，请继续使用原表单编号。')
+            if not buttons:
+                self._ask_messages.pop(target_id, None)
+            return True
         if not buttons or (not conversation_visible() and not getattr(self.screen, 'conversation_routing', False)):
             return True
         renderer = self._renderer()
@@ -741,6 +762,7 @@ class CliBot:
         # emit("delete", ...) 交给前端处理 DOM 节点是同一类"平台特有能力，
         # CLI 没有对应物就降级为空操作"的取舍。但中继照发：Telegram/网页
         # 删得掉，"带停止按钮的占位消息跑完就消失"靠的正是这一条。
+        self._ask_messages.pop(int(message_id or 0), None)
         _register_menu(int(message_id or 0), (), is_edit=True)
         if hasattr(self.screen, 'tag_menu'):
             self.screen.tag_menu(int(message_id or 0), False)

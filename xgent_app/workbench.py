@@ -121,6 +121,9 @@ class Workbench:
 
     async def _handle_scoped(self, method, resource, data):
         await self.db()
+        if resource == 'ask':
+            from .web_ask import handle_ask
+            return await handle_ask(self.ns,method,data,self.background)
         if resource.startswith('data/'):
             if self._data_operations is None:
                 self._data_operations = DataOperations(self.ns)
@@ -343,6 +346,8 @@ class Workbench:
                 [current_scope().conversation_id, *ids, *ids, *ids, min(ids), max(ids)])
             rows = [dict(row) for row in await cursor.fetchall()]
             await cursor.close()
+            from .ask_presentation import mark_legacy_ask_inputs_from_database
+            await mark_legacy_ask_inputs_from_database(conn, rows)
             from .presentation import link_usage_records
             link_usage_records(rows)
             messages = [build_history_message(row, self.ns['ArtifactManager'].ROOT_DIR,
@@ -429,6 +434,9 @@ class Workbench:
                 await cur.close()
             batch.sort(key=lambda r: (r['timestamp'], r['_source'], r['_key']), reverse=not forward)
             batch = batch[:128]  # Do not advance past unread rows from either individually bounded source.
+            from .ask_presentation import mark_legacy_ask_inputs, mark_legacy_ask_inputs_from_database
+            mark_legacy_ask_inputs(batch)
+            await mark_legacy_ask_inputs_from_database(conn,batch)
             from .presentation import link_usage_records
             link_usage_records(sorted((row for row in batch if not row['_source']), key=lambda row: (row['timestamp'], row['id'])))
             if not batch: break
