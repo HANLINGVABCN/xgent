@@ -559,8 +559,9 @@ def _present_media_frame(frame: Dict[str, Any]) -> Dict[str, Any]:
 
 async def emit_ui_frame(outbox: WebOutbox, chat_id: int, frame_type: str,
                         *, source: Optional[str] = None, **fields: Any) -> None:
-    from xgent_app.ask_presentation import local_ask_notice
-    if local_ask_notice() and frame_type in {'message', 'edit'}:
+    from xgent_app.message_policy import current_policy
+    policy = current_policy()
+    if policy is not None and not policy.allows('web') and frame_type in {'message', 'edit', 'edit_markup', 'delete'}:
         return
     from xgent_app.interaction import identity
     from xgent_app.conversations import current_scope
@@ -769,6 +770,9 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
     _markup_to_frame 的逆运算）——"带停止按钮的占位消息"补发过去还带不带按钮，
     全看这一步。
     """
+    from .message_policy import read_policy
+    if '_message_policy' in op.payload and not read_policy(op.payload['_message_policy']).allows('telegram'):
+        return None
     if bot is None:
         raise OpNotDeliverable("通道没有可用的 bot")
     payload = op.payload or {}
@@ -908,6 +912,9 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
     except OpTransientError:
         raise
     except Exception as exc:
+        if (kind in {OP_EDIT, OP_EDIT_MARKUP} and isinstance(exc, _TgBadRequest)
+                and 'message is not modified' in str(exc).lower()):
+            return None  # Replaying an already applied edit is successful.
         raise classify_telegram_error(exc) from exc
 
 
@@ -1041,9 +1048,15 @@ class MirrorBot:
         delivery = current_run_delivery()
         if delivery is None and not telegram_delivery_allowed():
             return
+        from .telegram_presentation import chat_payload
+        native_payload = chat_payload(payload)
+        if native_payload is None:
+            return
+        if native_payload.get('reply_markup') != (payload or {}).get('reply_markup'):
+            transient = {**(transient or {}), 'reply_markup': markup_from_frame(native_payload.get('reply_markup'))}
         op = Op(kind, logical_id=logical_id,
                 chat_id=int(chat_id) if chat_id is not None else self.chat_id,
-                payload=payload, transient=transient, durable=durable)
+                payload=native_payload, transient=transient, durable=durable)
         if delivery is not None:
             delivery.offer(self, op)
         else:
@@ -1051,6 +1064,9 @@ class MirrorBot:
 
     def _enqueue_telegram(self, op):
         """Admission shared by live sends and a single current-reply subscription."""
+        from .message_policy import read_policy
+        if '_message_policy' in op.payload and not read_policy(op.payload['_message_policy']).allows('telegram'):
+            return
         # A CLI/Web mirroring preference must not disable replies to native
         # Telegram inputs. The shared worker only checks transport readiness.
         if os.environ.get('XGENT_CLI_NO_TG_MIRROR') and not getattr(self, '_is_xgent_telegram_bot', False):
@@ -1529,12 +1545,21 @@ def install_tg_to_web_mirror(real_bot: Any, outbox: WebOutbox):
     async def native_arguments(args, kwargs, *, send=False):
         native = dict(kwargs)
         positional = list(args)
+        from .telegram_presentation import chat_payload
+        prepared = chat_payload({'text': _kw_text(kwargs, args, send=send),
+            'parse_mode': kwargs.get('parse_mode'), 'reply_markup': _markup_to_frame(kwargs.get('reply_markup'))})
+        if prepared is None:
+            return positional, None
+        if prepared['reply_markup'] != _markup_to_frame(kwargs.get('reply_markup')):
+            native['reply_markup'] = markup_from_frame(prepared['reply_markup'])
+        if prepared['parse_mode'] != kwargs.get('parse_mode'):
+            native['parse_mode'] = prepared['parse_mode']
         if 'text' in native:
-            native['text'] = await render_telegram_text(native['text'], native.get('parse_mode'))
+            native['text'] = await render_telegram_text(prepared['text'], native.get('parse_mode'))
         else:
             index = 1 if send else 0
             if len(positional) > index:
-                positional[index] = await render_telegram_text(positional[index], native.get('parse_mode'))
+                positional[index] = await render_telegram_text(prepared['text'], native.get('parse_mode'))
         return positional, native
 
     # send_message
@@ -1542,7 +1567,8 @@ def install_tg_to_web_mirror(real_bot: Any, outbox: WebOutbox):
         if 'reply_markup' in kwargs:
             kwargs['reply_markup'] = bind_callback_markup(kwargs['reply_markup'])
         native_args, native_kwargs = await native_arguments(args, kwargs, send=True)
-        result = await saved["send_message"](real_bot, *native_args, **native_kwargs)
+        result = (await saved["send_message"](real_bot, *native_args, **native_kwargs) if native_kwargs is not None else
+                  WebMessage(real_bot, _allocate_web_message_id(), int(kwargs.get('chat_id') or args[0]), _kw_text(kwargs,args,send=True)))
         try:
             await emit_ui_frame(outbox, int(getattr(result, 'chat_id', None) or kwargs.get('chat_id')
                                            or (args[0] if args else 0)),
@@ -1561,7 +1587,8 @@ def install_tg_to_web_mirror(real_bot: Any, outbox: WebOutbox):
         if 'reply_markup' in kwargs:
             kwargs['reply_markup'] = bind_callback_markup(kwargs['reply_markup'])
         native_args, native_kwargs = await native_arguments(args, kwargs)
-        result = await saved["edit_message_text"](real_bot, *native_args, **native_kwargs)
+        result = (await saved["edit_message_text"](real_bot, *native_args, **native_kwargs) if native_kwargs is not None else
+                  WebMessage(real_bot, int(kwargs.get('message_id') or args[2]), int(kwargs.get('chat_id') or args[1]), _kw_text(kwargs,args)))
         try:
             mid = kwargs.get("message_id")
             if mid is None and len(args) >= 3:
@@ -1581,7 +1608,12 @@ def install_tg_to_web_mirror(real_bot: Any, outbox: WebOutbox):
     async def edit_message_reply_markup(*args: Any, **kwargs: Any) -> Any:
         if 'reply_markup' in kwargs:
             kwargs['reply_markup'] = bind_callback_markup(kwargs['reply_markup'])
-        result = await saved["edit_message_reply_markup"](real_bot, *args, **kwargs)
+        from .telegram_presentation import chat_payload
+        prepared = chat_payload({'reply_markup': _markup_to_frame(kwargs.get('reply_markup'))})
+        native = dict(kwargs)
+        if prepared is not None and prepared.get('reply_markup') != _markup_to_frame(kwargs.get('reply_markup')):
+            native['reply_markup'] = markup_from_frame(prepared['reply_markup'])
+        result = await saved["edit_message_reply_markup"](real_bot, *args, **native) if prepared is not None else True
         try:
             mid = kwargs.get("message_id")
             if mid is None and len(args) >= 2:

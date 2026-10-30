@@ -140,6 +140,7 @@ async def _dispatch_ask_callback_inner(update: Any, context: Any, data: str) -> 
             from xgent_app.ask_presentation import send_ask_input_notice
             await send_ask_input_notice(query.message,
                 f"请填写：{question.prompt}{hint}\n（直接发一条消息即可；发 cancel 取消录入）",
+                form_id=ask_id, field_id=qid,
             )
         return  # 不重画键盘，等用户把内容发进来再重画
 
@@ -246,7 +247,8 @@ async def _handle_presentation_callback(update, context, data):
     if stop_rows:
         markup = InlineKeyboardMarkup([*markup.inline_keyboard, *stop_rows])
     await query.answer()
-    await safe_edit_text(query.message, text, parse_mode=constants.ParseMode.HTML, reply_markup=markup)
+    with message_presentation({'kind': 'ai_reply', 'telegram_display': {'remove_stop': True}}):
+        await safe_edit_text(query.message, text, parse_mode=constants.ParseMode.HTML, reply_markup=markup)
 
 
 @conversation_entry()
