@@ -333,7 +333,7 @@ class WebOutbox:
                     self._inflight_bytes -= size
             return
         key = frame.get('message_id')
-        if key is None or kind not in {'message', 'edit', 'edit_markup', 'delete'}:
+        if key is None or kind not in {'message', 'edit', 'edit_markup', 'delete', 'thinking_state'}:
             return
         key = (frame.get('conversation_id'), frame.get('run_id'), key)
         previous = self._inflight.pop(key, None)
@@ -487,6 +487,11 @@ def _markup_to_frame(reply_markup: Any) -> Optional[List[List[Dict[str, Any]]]]:
                 "text": str(getattr(button, "text", "")),
                 "callback_data": str(getattr(button, "callback_data", "") or ""),
             }
+            native = button.to_dict() if hasattr(button,'to_dict') else {}
+            for key in ('copy_text','style','disabled','icon_custom_emoji_id','login_url','switch_inline_query',
+                        'switch_inline_query_current_chat','switch_inline_query_chosen_chat','pay','callback_game'):
+                if key in native:
+                    item[key] = native[key]
             url = getattr(button, "url", None)
             if url:
                 item["url"] = str(url)
@@ -525,11 +530,15 @@ def markup_from_frame(rows: Any) -> Optional[Any]:
             text = str(btn.get("text") or "")
             callback_data = str(btn.get("callback_data") or "")
             url = str(btn.get("url") or "")
-            if url:
-                buttons.append(InlineKeyboardButton(text, web_app=WebAppInfo(url=url)) if btn.get('web_app')
-                               else InlineKeyboardButton(text, url=url))
-            elif callback_data:
-                buttons.append(InlineKeyboardButton(text, callback_data=callback_data))
+            fields={'text':text}
+            for key in ('copy_text','style','disabled','icon_custom_emoji_id','login_url','switch_inline_query',
+                        'switch_inline_query_current_chat','switch_inline_query_chosen_chat','pay','callback_game'):
+                if key in btn:fields[key]=btn[key]
+            if url:fields['web_app' if btn.get('web_app') else 'url']={'url':url} if btn.get('web_app') else url
+            elif callback_data:fields['callback_data']=callback_data
+            if any(key in fields for key in ('url','web_app','callback_data','copy_text','disabled','login_url',
+                    'switch_inline_query','switch_inline_query_current_chat','switch_inline_query_chosen_chat','pay','callback_game')):
+                buttons.append(InlineKeyboardButton.de_json(fields,None))
         if buttons:
             keyboard.append(buttons)
     return InlineKeyboardMarkup(keyboard) if keyboard else None
@@ -756,7 +765,10 @@ class WebContext:
         self.args: List[str] = []
 
 
+from .telegram_records import track_delivery
+
 @_without_reverse_mirror
+@track_delivery
 async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
                             markup_builder: Optional[Any] = None) -> Any:
     """把一个 Op 真的打到某个 PTB bot 上；创建类操作返回原生 message_id。
@@ -778,6 +790,27 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
     payload = op.payload or {}
     extra = dict(payload.get("kwargs") or {})
     kind = op.kind
+    route = op.conversation_context or {}
+    thread_id = route.get('telegram_thread_id')
+    if (route.get('telegram_bot_id') and not thread_id and route.get('origin') in {'web','cli'}
+            and route.get('telegram_chat_id')==op.chat_id):
+        from .conversations import get_conversations, ConversationError
+        try:
+            topics=get_conversations().topics
+            refreshed=await topics.route(route['conversation_id']) if topics and topics.bot_id==route['telegram_bot_id'] else {}
+        except (RuntimeError,ConversationError):
+            refreshed={}
+        if not refreshed.get('telegram_thread_id'):
+            raise OpNotDeliverable('目标电报页面尚未绑定；消息仍保存在原会话，不改投其他页面')
+        route={**route,**refreshed}
+        op.conversation_context=route
+        thread_id=route['telegram_thread_id']
+    if (thread_id and route.get('telegram_chat_id')==op.chat_id
+            and kind in {OP_SEND,OP_DOCUMENT,OP_PHOTO,OP_CHAT_ACTION}):
+        extra['message_thread_id'] = thread_id
+    from .telegram_native import NATIVE_KINDS
+    if thread_id and route.get('telegram_chat_id')==op.chat_id and kind in NATIVE_KINDS:
+        payload['kwargs'] = {**(payload.get('kwargs') or {}),'message_thread_id':thread_id}
 
     def markup() -> Any:
         if "reply_markup" in op.transient:
@@ -805,6 +838,9 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
         return native_call
 
     try:
+        from .telegram_native import NATIVE_KINDS, deliver_native
+        if kind in NATIVE_KINDS:
+            return await deliver_native(bot, op, native_id, markup(), extra)
         if payload.get('queue_receipt'):
             from .conversations import get_conversations
             from .message_queue import queue_card_text
@@ -866,6 +902,7 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
             return None
 
         if kind in (OP_DOCUMENT, OP_PHOTO):
+            media_kind=extra.pop('native_media',None)
             arg_name = "document" if kind == OP_DOCUMENT else "photo"
             handle = op.transient.get(arg_name)
             opened = None
@@ -891,10 +928,14 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
                 handle = opened
             try:
                 if kind == OP_DOCUMENT:
-                    result = await method("send_document")(
-                        chat_id=op.chat_id, document=handle,
-                        filename=payload.get("filename"),
-                        caption=payload.get("caption"), **extra)
+                    if media_kind and callable(getattr(bot,'send_'+media_kind,None)):
+                        result=await method('send_'+media_kind)(chat_id=op.chat_id,
+                            **{media_kind:handle},caption=payload.get('caption'),**extra)
+                    else:
+                        result = await method("send_document")(
+                            chat_id=op.chat_id, document=handle,
+                            filename=payload.get("filename"),
+                            caption=payload.get("caption"), **extra)
                 else:
                     result = await method("send_photo")(
                         chat_id=op.chat_id, photo=handle,
@@ -1052,11 +1093,19 @@ class MirrorBot:
         native_payload = chat_payload(payload)
         if native_payload is None:
             return
+        from .telegram_native import native_offer_kind, OP_NATIVE_CONTROL, OP_NATIVE_DRAFT
+        kind = native_offer_kind(kind, native_payload, self.real_bot)
+        if kind is None:
+            return
+        if kind in {OP_NATIVE_CONTROL, OP_NATIVE_DRAFT}:
+            durable = False
         if native_payload.get('reply_markup') != (payload or {}).get('reply_markup'):
             transient = {**(transient or {}), 'reply_markup': markup_from_frame(native_payload.get('reply_markup'))}
         op = Op(kind, logical_id=logical_id,
                 chat_id=int(chat_id) if chat_id is not None else self.chat_id,
                 payload=native_payload, transient=transient, durable=durable)
+        from .stop_targets import admit_remote_phase
+        admit_remote_phase(op.conversation_context, native_payload.get('telegram_native') or {})
         if delivery is not None:
             delivery.offer(self, op)
         else:
@@ -1156,6 +1205,8 @@ class MirrorBot:
         }
         if isinstance(kwargs.get('disable_notification'), bool):
             result['disable_notification'] = kwargs['disable_notification']
+        if kwargs.get('native_media') in {'video','audio','voice','animation'}:
+            result['native_media']=kwargs['native_media']
         return result
 
     async def send_message(self, chat_id: Optional[int] = None, text: str = "",
@@ -1283,6 +1334,33 @@ class MirrorBot:
                         "kwargs": self._passthrough(kwargs),
                     }, transient={} if local_path is not None else {"photo": photo})
         return WebMessage(self, message_id, target, str(caption or ""))
+
+    async def finalize_generated_group(self, chat_id, message_id, artifacts, text, details, target_record_id):
+        from .telegram_native import OP_NATIVE_MEDIA
+        self._offer(OP_NATIVE_MEDIA, logical_id=message_id, chat_id=chat_id,
+            payload={'artifacts': list(artifacts), 'text': text, 'details_html': details, '_edit': True,
+                     'kwargs': {}, 'telegram_native': {'phase': 'media', 'owner_id': message_id, 'record_id': target_record_id}})
+
+    async def send_generated_group(self, chat_id, artifacts, text=''):
+        from .telegram_native import OP_NATIVE_MEDIA
+        from .web_media import build_media_presentation
+        from .reply_presentation import remember_reply_messages
+        mid = _allocate_web_message_id()
+        view = build_media_presentation(text, artifacts)
+        descriptors = []
+        for item in view['media']:
+            token = MEDIA_TOKEN_REGISTRY.register(item['path'], item['filename'])
+            descriptors.append({**item, 'download_url': '/api/media/'+token})
+        await emit_ui_frame(self.outbox, self.chat_id, 'message', source=self._ui_source, message_id=mid,
+            text=view['text'], media=descriptors, media_group_id=view['media_group_id'])
+        from .presentation import current_turn
+        record_id = current_turn().last_record_id if current_turn() else None
+        self._offer(OP_NATIVE_MEDIA, logical_id=mid, chat_id=chat_id,
+            payload={'artifacts': list(artifacts), 'text': view['text'], 'kwargs': {},
+                     'telegram_native': {'phase': 'media', 'owner_id': mid, 'record_id': record_id}})
+        message = WebMessage(self, mid, chat_id, view['text'])
+        remember_reply_messages([message])
+        return message
 
     async def get_file(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Web 端不支持下载 Telegram 文件")

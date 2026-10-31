@@ -81,7 +81,7 @@ async def _check_and_send_idle_message(context: ContextTypes.DEFAULT_TYPE):
                 conversation_context=True,
             )
             media_artifacts = []
-            if response and not error and 'data:image/' in response.lower():
+            if response and not error and (getattr(response, 'media', None) or 'data:image/' in response.lower()):
                 response, media_artifacts = await generated_reply.prepare(response)
             return response, error, media_artifacts
 
@@ -315,6 +315,15 @@ async def queue_api(action, conversation_id, data=None):
             if action == 'list':
                 return await queue.snapshot(scope.conversation_id)
             db = await BotMemoryDB.get_instance()
+            if action == 'status':
+                item = await db.queue_item(data.get('id'))
+                if item is None or item['conversation_id'] != scope.conversation_id:
+                    return {'state': 'unavailable'}
+                if item['status'] in {'edited', 'cancelled'}:
+                    return {'state': 'recovered' if item.get('edit_request_id') == data.get('request_id') else 'settled',
+                            'item': public_item(item)}
+                return {'state': 'waiting' if item['status'] in {'pending', 'paused', 'invalid'} else 'already_started',
+                        'item': public_item(item)}
             if action == 'resume':
                 if data.get('generation') != scope.generation or type(data.get('revision')) is not int or not data.get('request_id'):
                     raise ConversationChanged('上下文已改变，请刷新队列。')
@@ -678,6 +687,7 @@ async def _replay_relay_op_with_presentation(mirror: Any, op: str, payload: Dict
                     filename=payload.get('filename'), caption=caption,
                     relay_message_id=message_id,
                     read_timeout=120, write_timeout=120,
+                    native_media=payload.get('native_media'),
                 )
             else:
                 await mirror.send_photo(
@@ -1745,9 +1755,37 @@ def telegram_entry(handler):
         from xgent_app.web_bridge import install_tg_to_web_mirror
         restore = install_tg_to_web_mirror(context.bot, get_web_outbox() or globals().get('_web_external_outbox'))
         try:
-            with interaction('telegram', 'management'), bind_conversation(None):
+            with interaction('telegram', 'management'), bind_conversation(None), contextlib.ExitStack() as input_guards:
                 await UserDataManager.init()
                 manager = get_conversations()
+                topics = manager.topics
+                message = getattr(update,'effective_message',None) or getattr(update,'message',None) or getattr(getattr(update,'callback_query',None),'message',None)
+                if topics is not None and topics.enabled and update.effective_chat.id==topics.chat_id:
+                    from xgent_app.telegram_topics import bind_input_route
+                    thread_id = getattr(message,'message_thread_id',None)
+                    input_guards.enter_context(bind_input_route(topics.bot_id,topics.chat_id,thread_id))
+                    if thread_id:
+                        try:
+                            service_event=any(getattr(message,name,None) is not None for name in (
+                                'forum_topic_created','forum_topic_edited','forum_topic_closed','forum_topic_reopened'))
+                            mapped=next((row for row in await topics.rows() if row['thread_id']==int(thread_id)),None)
+                            if service_event and mapped:
+                                db=await BotMemoryDB.get_instance()
+                                if await db.get_session(mapped['conversation_id']):
+                                    await topics.incoming_event(mapped['conversation_id'],int(thread_id),message)
+                                return
+                            created=getattr(message,'forum_topic_created',None)
+                            cid=await topics.admit(int(thread_id),getattr(created,'name',None))
+                            db=await BotMemoryDB.get_instance()
+                            await db.manage_conversation('switch',cid,selector='telegram')
+                            if any(getattr(message,name,None) is not None for name in (
+                                    'forum_topic_created','forum_topic_edited','forum_topic_closed','forum_topic_reopened')):
+                                await topics.incoming_event(cid,int(thread_id),message)
+                                return
+                        except ConversationError as exc:
+                            if getattr(update,'callback_query',None):await update.callback_query.answer(str(exc),show_alert=True)
+                            else:await context.bot.send_message(chat_id=topics.chat_id,text=str(exc),message_thread_id=thread_id)
+                            return
                 state = await manager.state()
                 query = getattr(update, 'callback_query', None)
                 text = str(getattr(getattr(update, 'message', None), 'text', '') or '')
@@ -1760,8 +1798,12 @@ def telegram_entry(handler):
                         break
                     action = resolved
                 if action.startswith('act_stop_generation'):
-                    run_id = action.partition(':')[2]
-                    accepted = await manager.request_stop(run_id) if run_id else False
+                    from xgent_app.stop_targets import active_target
+                    target = action.split(':', 2)
+                    run_id = target[1] if len(target)>1 else ''
+                    ref = target[2] if len(target)>2 else None
+                    accepted = await manager.request_stop(run_id) if run_id and (
+                        ref is None or active_target(run_id,ref)) else False
                     await query.answer('已收到停止请求' if accepted else '该回合已结束，停止按钮已失效。')
                     return
                 chooser = action.startswith('tn:')
@@ -1772,6 +1814,9 @@ def telegram_entry(handler):
                         return
                 if state.get('telegram_conversation_id') is None:
                     command = text.split(maxsplit=1)[0].split('@')[0].lower() if text else ''
+                    if command in {'/topics','/topic_bind'}:
+                        await (cmd_topics if command=='/topics' else cmd_topic_bind)(update,context)
+                        return
                     if query is not None:
                         if not chooser:
                             await query.answer('这个按钮属于旧会话，请重新打开 /chats 选择对话。', show_alert=True, cache_time=0)
@@ -1800,6 +1845,12 @@ def telegram_entry(handler):
                     scope = current_scope()
                     from dataclasses import replace
                     with interaction('telegram', purpose), bind_conversation(replace(scope, purpose=purpose)):
+                        if (purpose=='chat' and UserDataManager.get('telegram_reactions',False)
+                                and getattr(message,'message_id',None)):
+                            from telegram import ReactionTypeEmoji
+                            with contextlib.suppress(Exception):
+                                await context.bot.set_message_reaction(chat_id=update.effective_chat.id,
+                                    message_id=message.message_id,reaction=[ReactionTypeEmoji('👀')])
                         return await handler(update, context)
         finally:
             restore()

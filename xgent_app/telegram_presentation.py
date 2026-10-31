@@ -21,6 +21,8 @@ def label_enabled():
 def should_label(scope):
     if not label_enabled():
         return False
+    if getattr(scope,'telegram_thread_id',None):
+        return False
     return presentation_mode() in {'menu', 'footer'} or _receiver.get() is _UNKNOWN or _receiver.get() != scope.conversation_id
 
 
@@ -47,7 +49,7 @@ def chat_payload(payload):
     if display.get('skip'):
         return None
     result = dict(payload or {})
-    for key in ('text', 'parse_mode', 'reply_markup'):
+    for key in ('text', 'parse_mode', 'reply_markup', 'telegram_native'):
         if key in display:
             result[key] = deepcopy(display[key])
     rows = result.get('reply_markup')

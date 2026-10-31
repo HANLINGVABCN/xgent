@@ -191,7 +191,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         # 默认实现直接往 stderr 写，会污染 bot 日志。降级到 debug 且不记路径
         # （路径里可能带查询参数）。
-        logger.debug("web %s", fmt % args)
+        logger.debug('web %s %s',getattr(self,'command',''),urllib.parse.urlsplit(getattr(self,'path','')).path)
 
     def _client_ip(self) -> str:
         # 只用 TCP 对端地址。X-Forwarded-For 由客户端提供，信它等于让攻击者
@@ -326,6 +326,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"authenticated": self._is_authenticated()})
             elif path == '/api/queue':
                 self._handle_queue('list')
+            elif path == '/api/queue/status':
+                self._handle_queue('status')
             elif path == "/healthz":
                 self._handle_liveness()
             elif path == "/api/health":
@@ -415,7 +417,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # --- 处理器 ---
 
     def _serve_workbench_asset(self, path: str) -> None:
-        allowed = {"ask-form.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
@@ -764,7 +766,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.config.queue_api is None:
             self._send_json({'error': '消息队列未启用'}, status=404)
             return
-        if action == 'list':
+        if action in {'list', 'status'}:
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             data = {key: values[0] for key, values in query.items()}
         else:
@@ -782,7 +784,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             result = self._run_coro(self.config.queue_api(action, cid, data))
         except ValueError as exc:
-            self._send_json({'error': str(exc)}, status=409)
+            self._send_json({'error': str(exc), 'code': getattr(exc, 'code', 'conflict')}, status=409)
             return
         self._send_json(result)
 
@@ -918,6 +920,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         data = self._read_json()
         if data is None:
             return
+        if data.get('phase_ref'):
+            from .stop_targets import active_target
+            if not active_target(data.get('run_id'),data['phase_ref']):
+                self._send_json({'error':'本阶段已结束，停止按钮已失效'},status=409);return
         try:
             accepted = self._run_coro(self.config.request_stop(data.get('run_id'), data.get('conversation_id')))
         except ValueError as exc:

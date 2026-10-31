@@ -87,7 +87,8 @@ async def _sync_presentation_footer(context, row_id, reply):
             reply_message_id=ids[0], presentation=presentation)
         stop = bool(AgentExecutor.extract_protocol_blocks(row['content'])) and getattr(turn, 'agent_enabled', False) and not presentation.get('summary')
         with web_display_scope(display), message_presentation({'kind': 'ai_reply', 'mode': turn.mode,
-                'telegram_display': {'text': base, 'parse_mode': 'HTML', 'remove_stop': True}}):
+                'telegram_display': {'text': base, 'parse_mode': 'HTML', 'remove_stop': True,
+                    'raw_markdown': row['content'], 'owner_id': ids[0] if ids else None}}):
             chunks = split_html_for_telegram(base + '\n\n' + footer, 3900)
             presentation['footer_message_html'] = chunks[-1]
             await safe_edit_text(message, chunks[0], parse_mode=constants.ParseMode.HTML,
@@ -136,6 +137,7 @@ async def _sync_protocol_states(context, *, terminal=False):
 
 async def _finish_presentation(context, turn):
     await _finish_shared_presentation(context, turn)
+    await context.bot.finish_telegram_controls()
     if not turn.replies or getattr(turn, 'awaiting_input', False):
         return
     facts = turn.replies[-1]
@@ -146,7 +148,7 @@ async def _finish_presentation(context, turn):
     telegram_reply = await context.bot.finish_telegram_reply(row, facts, turn.summary() if turn.operations else None)
     metadata = metadata_dict(row.get('metadata'))
     metadata['telegram_reply'] = telegram_reply
-    await db.backfill_attachment_metadata(row['id'], row.get('metadata'), metadata)
+    await db.patch_display_metadata(row['id'], {'telegram_reply': telegram_reply})
 
 
 async def _finish_shared_presentation(context, turn):
@@ -512,6 +514,9 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await UserDataManager.init()
+    from xgent_app.ask_presentation import consumed_input
+    if consumed_input(update.message):
+        return
     state = UserDataManager.get('state')
     configuration_upload = is_prompt_edit_state(state) or state in {
         BotState.SET_COMMAND_BLACKLIST, BotState.SET_MEMORY, BotState.IMPORT_PROVIDER_CONFIG,
@@ -546,173 +551,23 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
 
 def _rich_part_to_markdown(part):
-    """Convert a rich text part to markdown. Handles string, dict (formatted), and list."""
-    if isinstance(part, str):
-        return part
-    if isinstance(part, dict):
-        t = part.get('text')
-        if t is None:
-            return ''
-        if isinstance(t, (dict, list)):
-            inner = _rich_part_to_markdown(t)
-        else:
-            inner = str(t)
-        fmt = part.get('type', '')
-        if fmt == 'bold':
-            return '**' + inner + '**'
-        elif fmt == 'italic':
-            return '*' + inner + '*'
-        elif fmt == 'code':
-            return '`' + inner + '`'
-        elif fmt == 'pre':
-            return '```' + chr(10) + inner + chr(10) + '```'
-        elif fmt == 'strikethrough':
-            return '~~' + inner + '~~'
-        elif fmt == 'underline':
-            return '__' + inner + '__'
-        elif fmt == 'spoiler':
-            return '||' + inner + '||'
-        elif fmt in ('link', 'text_link'):
-            url = part.get('url', '')
-            return '[' + inner + '](' + url + ')' if url else inner
-        else:
-            return inner
-    if isinstance(part, list):
-        return ''.join(_rich_part_to_markdown(p) for p in part)
-    return ''
+    from xgent_app.rich_input import text
+    return text(part,markdown=True)
 
 
 def _rich_block_to_text(block):
-    """Convert a rich_message block to text. Handles paragraphs, blockquotes, tables, lists."""
-    if not isinstance(block, dict):
-        return ''
-    btype = block.get('type', '')
-    text = block.get('text')
-    if text is not None:
-        return _rich_part_to_markdown(text)
-    if 'blocks' in block:
-        nested = [_rich_block_to_text(b) for b in block['blocks'] if isinstance(b, dict)]
-        result = chr(10).join(nested)
-        if btype == 'blockquote':
-            result = chr(10).join('> ' + line for line in result.split(chr(10)) if line)
-        return result
-    if 'cells' in block:
-        cells = block['cells']
-        if not isinstance(cells, list):
-            return ''
-        rows = []
-        for row in cells:
-            if not isinstance(row, list):
-                continue
-            cell_texts = []
-            for cell in row:
-                if isinstance(cell, dict):
-                    ct = cell.get('text', '')
-                    cell_texts.append(_rich_part_to_markdown(ct))
-                else:
-                    cell_texts.append(str(cell))
-            rows.append(cell_texts)
-        if not rows:
-            return ''
-        lines = []
-        for i, row in enumerate(rows):
-            lines.append('| ' + ' | '.join(row) + ' |')
-            if i == 0:
-                lines.append('| ' + ' | '.join(['---'] * len(row)) + ' |')
-        return chr(10).join(lines)
-    if 'items' in block:
-        items = block['items']
-        if not isinstance(items, list):
-            return ''
-        lines = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            label = item.get('label', '-')
-            item_blocks = item.get('blocks', [])
-            item_text = chr(10).join(_rich_block_to_text(b) for b in item_blocks if isinstance(b, dict))
-            lines.append(label + ' ' + item_text)
-        return chr(10).join(lines)
-    # Fallback for unknown block types: recursively search all fields for text
-    logger.warning(f"_rich_block_to_text: unknown block type={btype}, keys={list(block.keys())}")
-    parts = []
-    for key, value in block.items():
-        if key == 'type':
-            continue
-        if isinstance(value, str) and value.strip():
-            parts.append(value)
-        elif isinstance(value, dict):
-            t = _rich_part_to_markdown(value)
-            if not t:
-                t = _rich_block_to_text(value)
-            if t:
-                parts.append(t)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str) and item.strip():
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    t = _rich_part_to_markdown(item)
-                    if not t:
-                        t = _rich_block_to_text(item)
-                    if t:
-                        parts.append(t)
-    if parts:
-        result = chr(10).join(parts)
-        logger.warning(f"_rich_block_to_text: fallback extracted len={len(result)} from type={btype}")
-        return result
-    return ''
+    from xgent_app.rich_input import block as decode
+    return decode(block,markdown=True)
 
 
 def _rich_part_to_plain_text(part):
-    """提取富文本的原始文字，不添加 Markdown 标记。配置值必须走这个路径。"""
-    if isinstance(part, str):
-        return part
-    if isinstance(part, dict):
-        value = part.get('text')
-        if value is not None:
-            return _rich_part_to_plain_text(value)
-        return ''
-    if isinstance(part, list):
-        return ''.join(_rich_part_to_plain_text(item) for item in part)
-    return ''
+    from xgent_app.rich_input import text
+    return text(part)
 
 
 def _rich_block_to_plain_text(block):
-    if not isinstance(block, dict):
-        return ''
-    if block.get('text') is not None:
-        return _rich_part_to_plain_text(block.get('text'))
-    if isinstance(block.get('blocks'), list):
-        return chr(10).join(
-            _rich_block_to_plain_text(item)
-            for item in block['blocks']
-            if isinstance(item, dict)
-        )
-    if isinstance(block.get('cells'), list):
-        rows = []
-        for row in block['cells']:
-            if not isinstance(row, list):
-                continue
-            rows.append(' | '.join(
-                _rich_part_to_plain_text(cell.get('text', '') if isinstance(cell, dict) else cell)
-                for cell in row
-            ))
-        return chr(10).join(rows)
-    if isinstance(block.get('items'), list):
-        rows = []
-        for item in block['items']:
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get('label', '') or '')
-            content = chr(10).join(
-                _rich_block_to_plain_text(child)
-                for child in item.get('blocks', [])
-                if isinstance(child, dict)
-            )
-            rows.append((label + ' ' + content).strip())
-        return chr(10).join(rows)
-    return ''
+    from xgent_app.rich_input import block as decode
+    return decode(block)
 
 
 def _extract_rich_message_plain_text(msg):
@@ -761,14 +616,8 @@ def _extract_rich_message_text(msg):
             rich = None
     if not rich or not isinstance(rich, dict):
         return ""
-    try:
-        rich_json = json.dumps(rich, ensure_ascii=False, default=str)
-        logger.warning(f"_extract_rich_message_text: source={rich_source}, keys={list(rich.keys())}, full={rich_json[:3000]}")
-    except Exception:
-        logger.warning(f"_extract_rich_message_text: source={rich_source}, keys={list(rich.keys()) if isinstance(rich, dict) else type(rich)}")
     md = rich.get('markdown')
     if md and isinstance(md, str) and md.strip():
-        logger.warning(f"_extract_rich_message_text: extracted via markdown, len={len(md)}: {md[:200]}")
         return md
     blocks = rich.get('blocks')
     if not blocks or not isinstance(blocks, list):
@@ -873,7 +722,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception:
                 pass
             if text:
-                logger.warning(f"handle_text_message: extracted via forwardMessage, len={len(text)}: {text[:200]}")
+                logger.warning(f"handle_text_message: extracted via forwardMessage, len={len(text)}")
             else:
                 logger.warning("handle_text_message: forwardMessage returned but no text/caption found")
         except Exception as e:
@@ -887,7 +736,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             text = _extract_rich_message_text(update.message).strip()
         if text:
-            logger.warning(f"handle_text_message: extracted via rich_message.blocks, len={len(text)}: {text[:200]}")
+            logger.warning(f"handle_text_message: extracted via rich_message.blocks, len={len(text)}")
 
     # 仍然没有文字：不是文字消息（如转发的语音/视频/位置等），交给 handle_other_message
     if not text:
@@ -906,7 +755,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if expected_state is not None and UserDataManager.get('state') != expected_state:
         raise ConversationChanged('录入状态已改变，本次内容未提交，请重新操作。')
     if state in (BotState.ASK_FIELD_INPUT, BotState.ASK_SECRET_INPUT):
-        await _handle_ask_text_input(update, context, state, text)
+        await _handle_ask_text_input(update, context, state, update.message.text if update.message.text is not None else text)
         return
 
     # Consume management values before ordinary recording/title/model admission.
@@ -2560,7 +2409,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             "（提交前可以反复改；密钥项的内容只进环境变量，绝不会发给 AI。）"
                         )
                         PENDING_ASKS.put(pending)
-                        with message_presentation({'kind': 'agent_result', 'mode': current_turn().mode, 'ask_id': ask_id}):
+                        with message_presentation({'kind': 'agent_result', 'mode': current_turn().mode, 'ask_id': ask_id, 'purpose': 'form'}):
                             form_msg = await context.bot.send_message(
                                 chat_id=update.effective_chat.id, text=form_header,
                                 reply_markup=ask_form.build_keyboard(ask_id, pending.draft))
@@ -2775,7 +2624,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
             # 就把回灌载荷丢掉，让下面的协调器落到"没有新上下文"那条既有分支——正常收尾、
             # 不再叫一次模型。该发的结果已经发了，该落库的也已经落库了。
             round_status_text = build_agent_round_status(
-                operation_iteration, 'completed', origin=agent_origin,
+                operation_iteration, 'failed' if any(op.get('success') is False for op in current_turn().operations if op.get('reply_record_id') == current_turn().replies[-1].get('record_id')) else 'completed', origin=agent_origin,
                 operation_count=len(protocol_blocks))
             completion_sent = False
             # Finish this operation round before claiming another user input.
@@ -3079,66 +2928,48 @@ async def cancel_ask(ask_id: str) -> str:
 
 async def _handle_ask_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                  state: str, text: str) -> None:
-    """处理 ask 表单里「自定义文本 / 密钥」的一条录入。自包含：不落通用状态机。
-
-    - 密钥（ASK_SECRET_INPUT）：明文只写 SecretStore（os.environ + 脱敏名单），
-      draft 只标记「已录入」，落库是占位符——明文绝不进 draft/模型/库。
-    - 自定义（ASK_FIELD_INPUT）：仅更新 draft，提交时再进入模型上下文。
-    录完清状态，只更新原表单键盘，不重发另一张表单。
-    """
+    from xgent_app.ask_presentation import cleanup_input, mark_input_consumed, send_ask_input_notice
     target = UserDataManager.get('ask_input_target') or {}
-    from xgent_app.ask_presentation import send_ask_input_notice
-    ask_id = target.get('ask_id', '')
-    qid = target.get('qid', '')
+    ask_id, qid = target.get('ask_id', ''), target.get('qid', '')
     pending = PENDING_ASKS.get(ask_id)
-
-    # 录入期间输 cancel：只取消这一项录入，回到表单（表单本身还在）。
-    is_cancel = text.strip().lower() == 'cancel'
-
-    if pending is None:
+    secret = state == BotState.ASK_SECRET_INPUT
+    if secret:
+        await cleanup_input(context.bot, update.effective_chat.id, [update.message.message_id])
+    if (pending is None or pending.conversation_id != current_scope().conversation_id
+            or pending.status != 'pending' or pending.generation != current_scope().generation):
         UserDataManager.set('state', BotState.IDLE)
         UserDataManager.set('ask_input_target', None)
-        await send_ask_input_notice(update.message, "这个表单已失效，请让 AI 重新发起提问。", form_id=ask_id, field_id=qid)
+        await send_ask_input_notice(update.message, '表单已失效，本次内容未填入。', form_id=ask_id, field_id=qid)
         return
-
-    if pending.conversation_id!=current_scope().conversation_id or pending.status!='pending':
+    async with pending.lock:
+        question = pending.form.question(qid)
+        cancelled = text.strip().lower() == 'cancel'
+        if question is None:
+            return
+        try:
+            if not cancelled:
+                if secret:
+                    SECRET_STORE.set(pending.conversation_id, question.var, text)
+                    pending.ensure_entry(qid)['filled'] = True
+                else:
+                    entry = pending.ensure_entry(qid)
+                    entry['custom'] = text
+                    if question.qtype == 'single':
+                        entry['selected'] = []
+                pending.revision += 1
+            from xgent_app.web_ask import sync_ask
+            await sync_ask(globals(), pending, require_delivery=True)
+        except Exception:
+            notice = await send_ask_input_notice(update.message, '表单更新失败，请重试填写；原有答案已保留。', form_id=ask_id, field_id=qid)
+            pending.input_notices.setdefault(qid, []).append((context.bot, getattr(notice, 'message_id', None)))
+            return
         UserDataManager.set('state', BotState.IDLE)
         UserDataManager.set('ask_input_target', None)
-        await send_ask_input_notice(update.message, '表单已提交或不属于当前会话，请回到表单所属会话。', form_id=ask_id, field_id=qid)
-        return
+        mark_input_consumed(update.message)
+        if not secret:
+            await cleanup_input(context.bot, pending.chat_id, [update.message.message_id])
+        for actor, mid in pending.input_notices.pop(qid, []):
+            await cleanup_input(actor, pending.chat_id, [mid])
 
-    question = pending.form.question(qid)
-    if question is None or is_cancel:
-        UserDataManager.set('state', BotState.IDLE)
-        UserDataManager.set('ask_input_target', None)
-        if is_cancel:
-            await send_ask_input_notice(update.message, "已取消这一项的录入，其它选项不受影响。", form_id=ask_id, field_id=qid)
-        return
-
-    if state == BotState.ASK_SECRET_INPUT:
-        # 明文只进 SecretStore：写 os.environ + 登记脱敏名单；draft 只留「已录入」。
-        db = await BotMemoryDB.get_instance()
-        generation = await db.get_attachment_generation()
-        SECRET_STORE.set(current_scope().conversation_id, question.var, text)
-        pending.ensure_entry(qid)['filled'] = True
-        # 录库占位符已在上游 masking 段记过；这里给用户一句可见回执（不含明文）。
-        await send_ask_input_notice(update.message,
-            f"🔒 已录入变量 ${question.var}，内容只进了环境变量，没有发给 AI。回到表单继续。", form_id=ask_id, field_id=qid,
-        )
-    else:
-        entry = pending.ensure_entry(qid)
-        entry['custom'] = text
-        # 选择题填了自定义 → 视为改选自定义，清掉预设勾选，避免二义。
-        if question.qtype in ('single', 'multi'):
-            entry['selected'] = []
-        await send_ask_input_notice(update.message, "✅ 已填入，回到表单继续。", form_id=ask_id, field_id=qid)
-
-    UserDataManager.set('state', BotState.IDLE)
-    UserDataManager.set('ask_input_target', None)
-
-    # 原地重画表单键盘反映「已填/已录入」。
-    pending.revision += 1
-    from xgent_app.web_ask import sync_ask
-    await sync_ask(globals(), pending)
 
 # --- ☆ 命令函数 ☆ ---

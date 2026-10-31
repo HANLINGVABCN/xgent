@@ -126,6 +126,14 @@ async def _dispatch_ask_callback_inner(update: Any, context: Any, data: str) -> 
         with contextlib.suppress(Exception):
             await query.answer("已切换")
     elif action in ("asko", "askk"):  # 自定义文本 / 密钥：进状态机，等用户下一条消息
+        if (action == 'askk' and question.qtype != 'secret') or (action == 'asko' and not question.allows_custom):
+            await query.answer('此字段不能这样录入。', show_alert=True)
+            return
+        from xgent_app.ask_presentation import cleanup_input
+        for notices in pending.input_notices.values():
+            for actor, mid in notices:
+                await cleanup_input(actor, pending.chat_id, [mid])
+        pending.input_notices.clear()
         state = BotState.ASK_SECRET_INPUT if action == "askk" else BotState.ASK_FIELD_INPUT
         UserDataManager.set("state", state)
         UserDataManager.set("ask_input_target", {"ask_id": ask_id, "qid": qid})
@@ -138,10 +146,11 @@ async def _dispatch_ask_callback_inner(update: Any, context: Any, data: str) -> 
             # 客户端把「回复某条消息」的草稿粘在输入框上——用户若没回而是点了别的按钮，
             # 这条草稿就一直挂着，每次进聊天都弹，故去掉。
             from xgent_app.ask_presentation import send_ask_input_notice
-            await send_ask_input_notice(query.message,
+            notice = await send_ask_input_notice(query.message,
                 f"请填写：{question.prompt}{hint}\n（直接发一条消息即可；发 cancel 取消录入）",
                 form_id=ask_id, field_id=qid,
             )
+            pending.input_notices.setdefault(qid, []).append((context.bot, getattr(notice, 'message_id', None)))
         return  # 不重画键盘，等用户把内容发进来再重画
 
     # 选项类：原地重画键盘反映最新草稿（Telegram 可靠；其它端草稿已存服务端，提交照样对）。
@@ -270,8 +279,12 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(str(exc), show_alert=True, cache_time=0)
         return
     if data == 'act_stop_generation' or data.startswith('act_stop_generation:'):
-        run_id = data.partition(':')[2]
-        accepted = await get_conversations().request_stop(run_id) if run_id else False
+        from xgent_app.stop_targets import active_target
+        target = data.split(':', 2)
+        run_id = target[1] if len(target) > 1 else ''
+        ref = target[2] if len(target) > 2 else None
+        accepted = await get_conversations().request_stop(run_id) if run_id and (
+            ref is None or active_target(run_id, ref)) else False
         await query.answer('已收到停止请求' if accepted else '该回合已结束，停止按钮已失效。')
         return
 

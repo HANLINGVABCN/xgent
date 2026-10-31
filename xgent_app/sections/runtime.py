@@ -240,6 +240,9 @@ def build_application() -> Any:
         ("chats", cmd_chats),
         ("queue", cmd_queue),
         ("new", cmd_new_chat),
+        ("topics", cmd_topics),
+        ("stop", cmd_stop_answer),
+        ("topic_bind", cmd_topic_bind),
         ("config", cmd_settings_menu),
         ("update", cmd_update_system),
         ("restart", cmd_restart_system),
@@ -268,6 +271,8 @@ def build_application() -> Any:
         app.add_handler(CommandHandler(cmd, telegram_entry(mirror_to_web(handler))))
 
     app.add_handler(CallbackQueryHandler(telegram_entry(mirror_to_web(handle_button_click))))
+    from telegram.ext import InlineQueryHandler
+    app.add_handler(InlineQueryHandler(handle_personal_inline_query))
     app.add_handler(MessageHandler(
         filters.Regex(r"^/(?:黑名单|blacklist)(?:@\w+)?(?:\s|$)"),
         telegram_entry(mirror_to_web(cmd_blacklist_menu))
@@ -639,6 +644,16 @@ async def run_app() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        manager = get_conversations()
+        for run in list(manager._runs.values()):
+            if run.scope.run_id:
+                await manager.request_stop(run.scope.run_id, run.scope.conversation_id)
+        with contextlib.suppress(Exception):
+            await get_text_queue().close()
+        with contextlib.suppress(Exception):
+            await manager.close()
+        with contextlib.suppress(Exception):
+            await telegram_channel().wait_idle(timeout=2)
         if tg_task is not None:
             tg_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

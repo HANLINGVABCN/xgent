@@ -114,7 +114,7 @@ class Workbench:
         from xgent_app.interaction import interaction
         try:
             with interaction('web', 'management'):
-                async with conversation_operation(cid, expected=method != 'GET' and not navigation and not version_operation, allow_archived=method=='GET' and (version_operation or resource in {'history','search','artifacts/preview','artifacts/cover'}), fresh=True, selector='shared'):
+                async with conversation_operation(cid, expected=method != 'GET' and not navigation and not version_operation and resource != 'ask', allow_archived=method=='GET' and (version_operation or resource in {'history','search','artifacts/preview','artifacts/cover'}), fresh=True, selector='shared'):
                     return await self._handle_scoped(method, resource, data)
         except ConversationError as exc:
             raise WorkbenchError(str(exc), exc.status) from exc
@@ -123,7 +123,7 @@ class Workbench:
         await self.db()
         if resource == 'ask':
             from .web_ask import handle_ask
-            return await handle_ask(self.ns,method,data,self.background)
+            return await handle_ask(self.ns,method,data,self.background,idempotent=True)
         if resource.startswith('data/'):
             if self._data_operations is None:
                 self._data_operations = DataOperations(self.ns)
@@ -250,7 +250,7 @@ class Workbench:
                     deleter = self.ns.get('_delete_withdrawn_telegram')
                     if callable(deleter):
                         self.background(deleter(result.get('telegram_native_message_ids', []),
-                                                result.get('telegram_logical_message_ids', [])))
+                                                result.get('telegram_logical_message_ids', []), data.get('request_id')))
                     await get_conversations().poll_once()
                     return result
                 raise WorkbenchError('对话分支接口不存在', 404)
