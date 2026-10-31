@@ -1448,10 +1448,11 @@ import {syncAskForm} from './ask-form.js';
     if(!entry.thinkingBlock){
       const block=entry.thinkingBlock=document.createElement('div');block.className='thinking-block';
       const head=document.createElement('div');head.className='thinking-head';head.tabIndex=0;head.setAttribute('role','button');
+      const caret=document.createElement('span');caret.className='thinking-caret';caret.setAttribute('aria-hidden','true');caret.innerHTML=svgIcon('chev');
       const label=document.createElement('span');label.className='thinking-label';
       const preview=document.createElement('span');preview.className='thinking-preview';
       const body=document.createElement('pre');body.className='thinking-body';body.hidden=true;
-      head.append(label,preview);block.append(head,body);entry.bubble.insertBefore(block,entry.body);
+      head.append(caret,label,preview);block.append(head,body);entry.bubble.insertBefore(block,entry.body);
       let timer;function toggle(event){clearTimeout(timer);if(event.detail>1||getSelection()?.toString())return;const apply=()=>{if(getSelection()?.toString())return;body.hidden=!body.hidden;head.setAttribute('aria-expanded',String(!body.hidden));};if(event.type==='keydown')apply();else timer=setTimeout(apply,240);}
       head.onclick=toggle;body.onclick=toggle;head.ondblclick=body.ondblclick=()=>clearTimeout(timer);head.onkeydown=event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();toggle(event);}};
       head.setAttribute('aria-expanded','false');
@@ -2439,12 +2440,12 @@ import {syncAskForm} from './ask-form.js';
     var items=queueState?.conversation_id===selectedConversationId?queueState.items:[];
     var recovering=Array.from(queueActions.values()).filter(p=>['cancel','edit'].includes(p.action)&&p.item?.conversation_id===selectedConversationId&&!items?.some(i=>i.id===p.item.id));
     var anchor=scrollAnchor();
-    panel.replaceChildren();panel.hidden=!items?.length&&!error&&!queueState?.paused&&!recovering.length;
+    panel.replaceChildren();panel.hidden=!items?.length&&!error&&!recovering.length;
     if(panel.hidden)return;
     var head=document.createElement('div');head.className='queue-head';
     var title=document.createElement('strong');title.textContent='待发消息 · '+(items?.length||0)+' 条';head.appendChild(title);
     function button(label,fn){var b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=fn;return b;}
-    if(queueState?.paused&&queueState.reason!=='ask')head.appendChild(button('继续发送',()=>changeQueue(null,'resume')));
+    if(items?.length&&queueState?.paused&&queueState.reason!=='ask')head.appendChild(button('继续发送',()=>changeQueue(null,'resume')));
     if(items?.length>3)head.appendChild(button(queueExpanded?'收起':'展开全部',()=>{queueExpanded=!queueExpanded;drawQueue();}));
     panel.appendChild(head);
     var list=document.createElement('div');list.className='queue-list';
@@ -2817,8 +2818,8 @@ import {syncAskForm} from './ask-form.js';
     } else {
       searchBar.classList.add("open");
       document.getElementById("btn-search").classList.add("active");
+      searchInput.value='';
       searchInput.focus();
-      if (searchInput.value.trim()) runSearch();
     }
   }
 
@@ -2826,6 +2827,7 @@ import {syncAskForm} from './ask-form.js';
     searchBar.classList.remove("open");
     document.getElementById("btn-search").classList.remove("active");
     clearSearchHighlights();
+    searchInput.value='';
     searchMatches = [];
     currentMatchIdx = -1;
     searchCount.textContent = "0/0";
@@ -2846,6 +2848,7 @@ import {syncAskForm} from './ask-form.js';
     clearSearchHighlights();
     searchMatches = [];
     currentMatchIdx = -1;
+    if(!searchBar.classList.contains('open')){searchCount.textContent='0/0';return;}
     var q = searchInput.value.trim();
     if (!q) { searchCount.textContent = "0/0"; return; }
 
@@ -2894,6 +2897,7 @@ import {syncAskForm} from './ask-form.js';
   document.getElementById("search-close").addEventListener("click", closeSearch);
   document.getElementById("search-prev").addEventListener("click", function () { jumpToMatch(currentMatchIdx - 1); });
   document.getElementById("search-next").addEventListener("click", function () { jumpToMatch(currentMatchIdx + 1); });
+  window.addEventListener('xgent-conversation-changed',closeSearch);
   searchInput.addEventListener("input", runSearch);
   searchInput.addEventListener("keydown", function (e) {
     if (e.key === "Enter") {

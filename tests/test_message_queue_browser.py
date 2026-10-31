@@ -17,7 +17,7 @@ def queue_browser(full_output_server):
         state['calls'].append((action, cid, data))
         if action == 'list':
             return {'conversation_id': cid, 'generation': 7, 'revision': state['revision'],
-                    'items': copy.deepcopy(state['items'][cid]), 'paused': False, 'reason': ''}
+                    'items': copy.deepcopy(state['items'][cid]), 'paused': state.get('paused', False), 'reason': state.get('reason', '')}
         if action == 'status':
             result=state['actions'].get(data.get('request_id'))
             return {'state':'recovered','item':result} if result else {'state':'already_started'}
@@ -37,7 +37,8 @@ def queue_browser(full_output_server):
             return state['requests'][request_id]
         state['revision'] += 1
         item = {'id': f"{state['revision']:032x}", 'seq': state['revision'], 'conversation_id': cid, 'generation': 7,
-                'revision': 1, 'origin': 'web', 'text': text, 'status': 'pending', 'reason': 'waiting'}
+                'revision': 1, 'origin': 'web', 'text': text, 'status': 'paused' if state.get('paused') else 'pending',
+                'reason': state.get('reason', '') or 'waiting'}
         state['items'][cid].append(item)
         state['requests'][request_id] = {'ok': True, 'queued': True, **item}
         return state['requests'][request_id]
@@ -73,6 +74,32 @@ def enqueue(page, text):
     page.locator('#input').fill(text)
     page.locator('#btn-send').click()
     page.wait_for_function('document.querySelector("#input").value===""')
+
+
+@pytest.mark.parametrize('reason', ['ask', 'stopped', 'restart'])
+def test_empty_paused_queue_hides_until_a_real_message_is_queued(queue_browser, reason):
+    _, page, _, base, state = queue_browser
+    state.update(paused=True, reason=reason)
+    ready(page, base)
+    assert page.locator('#message-queue').is_hidden()
+    page.reload()
+    page.wait_for_function('!document.querySelector("#btn-send").disabled')
+    assert page.locator('#message-queue').is_hidden()
+    enqueue(page, '确实等待发送的消息')
+    page.get_by_text('待发消息 · 1 条', exact=True).wait_for()
+    assert page.locator('.queue-preview p').inner_text() == '确实等待发送的消息'
+    if reason == 'ask':
+        assert not page.get_by_role('button', name='继续发送', exact=True).count()
+        assert '等待表单提交' in page.locator('.queue-preview small').inner_text()
+    else:
+        assert page.get_by_role('button', name='继续发送', exact=True).is_visible()
+    page.locator('.queue-item').get_by_role('button', name='❌ 取消', exact=True).click()
+    page.wait_for_function('document.querySelector("#message-queue").hidden')
+    assert state['paused'] and not state['items']['A']
+    assert page.locator('#input').input_value() == '确实等待发送的消息'
+    page.reload()
+    page.wait_for_function('!document.querySelector("#btn-send").disabled')
+    assert page.locator('#message-queue').is_hidden()
 
 
 def test_busy_submit_cancel_edit_batch_preview_and_no_log_jump(queue_browser, tmp_path):
@@ -186,15 +213,43 @@ def test_thinking_preview_closes_after_completion_and_is_plain_text(queue_browse
     server.outbox.put({**frame, 'type':'thinking_state', 'thinking':{'version':1,'capture_id':'one',
         'text':'第一行\n最新的一行','status':'running','elapsed_seconds':2,'revision':1}})
     page.locator('.thinking-preview').filter(has_text='最新的一行').wait_for()
+    assert page.locator('.thinking-caret svg').count() == 1
+    assert page.locator('.thinking-caret').bounding_box()['x'] < page.locator('.thinking-label').bounding_box()['x']
     assert page.locator('.thinking-block').evaluate('(node)=>node.previousElementSibling.classList.contains("bubble-header")')
     server.outbox.put({**frame, 'type':'thinking_state', 'thinking':{'version':1,'capture_id':'one',
         'text':'第一行\n最新的一行\n```run-x\nnever execute\n```','status':'completed','elapsed_seconds':3,'revision':2}})
     page.wait_for_function('document.querySelector(".thinking-preview").textContent===""')
     assert page.locator('.thinking-body').is_hidden()
-    page.locator('.thinking-head').click()
+    page.locator('.thinking-caret').click()
+    page.wait_for_function('document.querySelector(".thinking-head").getAttribute("aria-expanded")==="true"')
     assert 'never execute' in page.locator('.thinking-body').inner_text()
     assert not page.locator('.thinking-body button').count()
     assert page.locator('.thinking-label').inner_text() == '思考 · 约 3 秒'
+
+
+def test_hidden_search_input_cannot_highlight_names_and_close_clears_query(queue_browser):
+    server, page, _, base, _ = queue_browser
+    # Exercise the chat's fallback find control when optional workbench UI is absent.
+    page.route('**/assets/workbench.js*',lambda route:route.abort())
+    ready(page, base)
+    server.outbox.put({'conversation_id': 'A', 'ui_generation': 7, 'message_id': 99996,
+                      'type': 'message', 'msg_type': 'ai_reply', 'text': 'HANLING 测试 Hanling'})
+    page.get_by_text('HANLING 测试 Hanling', exact=True).wait_for()
+    assert not page.locator('#search-bar').evaluate('(node)=>node.classList.contains("open")')
+    page.locator('#search-input').evaluate('(node)=>{node.value="HANLING";node.dispatchEvent(new Event("input",{bubbles:true}));}')
+    assert page.locator('.highlight-match').count() == 0
+    page.keyboard.press('Control+f')
+    assert page.locator('#search-input').input_value() == ''
+    assert page.locator('.highlight-match').count() == 0
+    page.locator('#search-input').fill('HANLING')
+    page.locator('.highlight-match').first.wait_for()
+    assert page.locator('.highlight-match').count() == 2
+    page.locator('#search-close').click()
+    assert page.locator('.highlight-match').count() == 0
+    assert page.locator('#search-input').input_value() == ''
+    page.locator('#search-input').evaluate('(node)=>{node.value="HANLING";node.dispatchEvent(new Event("input",{bubbles:true}));}')
+    assert page.locator('.highlight-match').count() == 0
+    assert page.get_by_text('HANLING 测试 Hanling', exact=True).is_visible()
 
 
 def test_no_reasoning_or_whitespace_does_not_show_a_thinking_block(queue_browser):

@@ -79,9 +79,41 @@ async def main():
                                 assert '✓' in await multi.inner_text()
                                 await form.get_by_role('checkbox',name='备份',exact=True).click()
                                 await page.wait_for_function('document.querySelector(".web-ask-notice").textContent==="已保存"')
+                                pending=next(value for value in PENDING_ASKS._store.values() if value.form_record_id==int(aid))
+                                before_typing=pending.revision
                                 await form.get_by_role('textbox',name='选择环境 · 自定义答案',exact=True).fill('预发布环境')
+                                await page.wait_for_timeout(600)
+                                assert pending.revision==before_typing
                                 await form.get_by_role('textbox',name='补充说明',exact=True).fill('原地填写  <tag>  保留两个空格')
+                                await page.wait_for_timeout(600)
+                                assert pending.revision==before_typing
+                                save_button=form.get_by_role('button',name='保存 补充说明',exact=True)
+                                assert await save_button.inner_text()=='保存'
+                                input_box=await form.get_by_role('textbox',name='补充说明',exact=True).bounding_box()
+                                save_box=await save_button.bounding_box()
+                                assert save_box['x']>=input_box['x']+input_box['width']
+                                saved_mark=save_button.locator('..').locator('.web-ask-saved')
+                                assert not await saved_mark.is_visible()
+                                assert pending.draft['0'].get('custom','')=='' and pending.draft['2'].get('custom','')==''
+                                await page.reload();await form.wait_for()
+                                assert await form.get_by_role('textbox',name='选择环境 · 自定义答案',exact=True).input_value()=='预发布环境'
+                                assert await form.get_by_role('textbox',name='补充说明',exact=True).input_value()=='原地填写  <tag>  保留两个空格'
+                                # Choice updates do not commit still-unconfirmed text.
+                                await form.get_by_role('checkbox',name='备份',exact=True).click()
+                                await page.wait_for_timeout(800)
+                                assert pending.revision>before_typing
+                                assert pending.draft['0'].get('custom','')=='' and pending.draft['2'].get('custom','')==''
+                                assert await form.get_by_role('textbox',name='补充说明',exact=True).input_value()=='原地填写  <tag>  保留两个空格'
+                                await form.get_by_role('checkbox',name='备份',exact=True).click()
+                                await page.wait_for_timeout(800)
+                                await form.get_by_role('button',name='保存 选择环境',exact=True).click()
+                                await page.wait_for_function('Array.from(document.querySelectorAll(".web-ask-save")).some(n=>n.getAttribute("aria-label")==="保存 选择环境"&&!n.classList.contains("pending"))')
+                                assert pending.draft['0']['custom']=='预发布环境'
+                                assert pending.draft['2'].get('custom','')==''
+                                await form.get_by_role('button',name='保存 补充说明',exact=True).click()
                                 await page.wait_for_function('document.querySelector(".web-ask-notice").textContent==="已保存"')
+                                assert await saved_mark.is_visible()
+                                assert await saved_mark.evaluate('(node)=>getComputedStyle(node).color')=='rgb(34, 197, 94)'
                                 assert await single.get_attribute('aria-checked')=='false'
                                 await page.reload();await form.wait_for()
                                 assert await form.get_by_role('textbox',name='选择环境 · 自定义答案',exact=True).input_value()=='预发布环境'
@@ -95,6 +127,7 @@ async def main():
                                     'id':pending.ask_id,'conversation_id':pending.conversation_id,'action':'submit',
                                     'revision':pending.revision,'draft':{qid:answer for qid,answer in pending.draft.items() if qid!='3'}})
                                 assert not incomplete.ok and PENDING_ASKS.get(pending.ask_id) is pending and len(calls)==1
+                                await form.get_by_role('textbox',name='选择项目 · 自定义答案',exact=True).fill('跨端更新前未保存的草稿')
                                 class LocalInputBot:
                                     def __init__(self):self.notices=[];self.deleted=[]
                                     async def send_message(self,**kwargs):
@@ -124,6 +157,11 @@ async def main():
                                 assert await page.locator('.msg-row.user').filter(has_text='测试').count()==0
                                 await page.reload();await form.wait_for()
                                 assert await form.get_by_role('textbox',name='补充说明',exact=True).input_value()=='测试'
+                                assert await form.get_by_role('textbox',name='选择项目 · 自定义答案',exact=True).input_value()=='跨端更新前未保存的草稿'
+                                assert pending.draft['1'].get('custom','')==''
+                                await form.get_by_role('button',name='保存 选择项目',exact=True).click()
+                                await page.wait_for_function('document.querySelector(".web-ask-notice").textContent==="已保存"')
+                                assert pending.draft['1']['custom']=='跨端更新前未保存的草稿'
                                 assert '请填写：' not in await page.locator('#log').inner_text()
                                 assert '回到表单继续' not in await page.locator('#log').inner_text()
                                 assert await page.locator('.msg-row.user').filter(has_text='测试').count()==0
