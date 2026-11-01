@@ -891,6 +891,14 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
         # --- Agent模式切换 ---
+        elif data == 'menu_agent_call_mode':
+            await query.edit_message_text(build_agent_call_mode_text(), reply_markup=get_agent_call_mode_menu())
+        elif data.startswith('set_agent_call_mode:'):
+            from xgent_app.tool_calls import normalize_mode as normalize_call_mode
+            value = normalize_call_mode(data.split(':', 1)[1])
+            await UserDataManager.save_config('agent_call_mode', value)
+            UserDataManager.set('agent_call_mode', value)
+            await query.edit_message_text(build_agent_call_mode_text(), reply_markup=get_agent_call_mode_menu())
         elif data == "toggle_agent_mode":
             current = UserDataManager.get('agent_mode', False)
             new_mode = not current

@@ -155,7 +155,7 @@ class BotConfig:
     # 本地 Telegram Bot API server 支持（不配置则用官方 api.telegram.org）
     API_BASE_URL = (os.getenv("TELEGRAM_API_URL") or "").strip().rstrip("/")
     DB_FILE = str(DATA_PATHS.database)
-    NORMAL_UPDATE_ZIP_URL = "https://api.github.com/repos/HANLINGVABCN/xgent-telegram/zipball/main"
+    NORMAL_UPDATE_ZIP_URL = "https://api.github.com/repos/HANLINGVABCN/xgent/zipball/main"
     TEST_UPDATE_ZIP_URL = "https://api.github.com/repos/HANLINGVABCN/xgent-telegram-test/zipball/main"
     DEFAULT_UPDATE_ZIP_URL = NORMAL_UPDATE_ZIP_URL
     _ENV_UPDATE_ZIP_URL = (os.getenv("UPDATE_ZIP_URL") or "").strip()
@@ -1365,6 +1365,7 @@ class PromptFileManager:
         'assistant_prompt': 'main.txt',
         'global_prompt_addon': 'global_addon.txt',
         'agent_prompt_addon': 'agent_addon.txt',
+        'agent_toolcall_addon': 'toolcall_addon.txt',
         'agent_disabled_addon': 'agent_disabled_addon.txt',
         'idle_message_prompt': os.path.join('extras', 'idle_message.txt'),
         'unauthorized_reply_messages': os.path.join('extras', 'unauthorized_reply_messages.txt'),
@@ -1375,6 +1376,7 @@ class PromptFileManager:
         'assistant_prompt': '助手提示词',
         'global_prompt_addon': '全局追加提示词',
         'agent_prompt_addon': 'Agent 模式提示词',
+        'agent_toolcall_addon': 'Tool call 模式提示词',
         'agent_disabled_addon': 'Agent 关闭提示词',
         'idle_message_prompt': '空闲提醒提示词',
         'unauthorized_reply_messages': '未授权用户拦截回复语录',

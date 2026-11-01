@@ -51,6 +51,9 @@ def web_block_html(body, *, protocol=None, state='unknown', raw=None, path=None,
 
 def web_ai_segments(text, *, hide_unclosed=False, presentation=None):
     operations = list((presentation or {}).get('operations') or [])
+    if (presentation or {}).get('native_calls'):
+        from .native_rendering import segments
+        return segments(text, presentation['native_calls'], operations)
     segments = []
     for part in ProtocolParser.scan_folded_segments(text, hide_unclosed=hide_unclosed):
         if part['kind'] == 'prose':
@@ -87,6 +90,11 @@ def build_web_display(text: str, *, fold: bool = True, hide_unclosed: bool = Fal
                       reply_message_id=None, mode=None, presentation=None) -> dict:
     turn = current_turn()
     mode = normalize_mode(mode or (turn.mode if turn is not None else 'folded'))
+    from .tool_calls import current_session
+    call_mode = (presentation or {}).get('agent_call_mode') or (
+        current_session().mode if current_session() is not None else None)
+    if call_mode == 'toolcall' and not (presentation or {}).get('native_calls'):
+        fold = False
     if fold:
         segments = web_ai_segments(text, hide_unclosed=hide_unclosed, presentation=presentation)
     else:

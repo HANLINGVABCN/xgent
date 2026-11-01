@@ -88,6 +88,8 @@ def estimate_input_tokens(history: list, system_prompt: str, limits: dict) -> in
     tokens = len(system_prompt.encode("utf-8")) + 16
     for message in history:
         tokens += 16
+        if message.get('native_calls'):
+            tokens += len(json.dumps(message['native_calls'], ensure_ascii=False).encode('utf-8'))
         content = message.get("content")
         if isinstance(content, str):
             tokens += len(content.encode("utf-8"))
@@ -136,6 +138,8 @@ def validate_request_body(body: dict, history: list) -> None:
     estimate_label = ("Text/image portion estimate (native file tokens require API validation)"
                       if native else "Full input conservative estimate")
     tokens = estimate_input_tokens(history, history.system_prompt, limits)
+    if body.get('tools'):
+        tokens += len(json.dumps(body['tools'], ensure_ascii=False).encode('utf-8'))
     if limits.get("max_input_tokens") is not None and tokens > limits["max_input_tokens"]:
         raise AttachmentContextError(
             f"{estimate_label} {tokens} tokens exceeds input limit "

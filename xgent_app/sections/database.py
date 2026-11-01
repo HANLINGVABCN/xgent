@@ -15,6 +15,7 @@ class BotMemoryDB(ConversationStore):
     
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._fresh_database = not os.path.exists(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
         self._connection_lock = asyncio.Lock()
         # 全进程共用一条连接，且是自动提交模式。显式事务期间的每个 await 都会
@@ -278,6 +279,8 @@ class BotMemoryDB(ConversationStore):
         ''')
         
         # Provider表
+        await conn.execute('INSERT OR IGNORE INTO config(key,value) VALUES(?,?)',
+                           ('agent_call_mode', json.dumps('toolcall' if self._fresh_database else 'fence')))
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS providers (
                 name TEXT PRIMARY KEY,
@@ -2133,6 +2136,7 @@ class UserDataManager:
             'model_request_limits': await cls._require_db().get_config('model_request_limits', {}),
             'discovered_model_limits': await cls._require_db().get_config('discovered_model_limits', {}),
             'agent_mode': await cls._require_db().get_config('agent_mode', False),
+            'agent_call_mode': await cls._require_db().get_config('agent_call_mode', 'fence'),
             'agent_confirm': await cls._require_db().get_config('agent_confirm', False),
             'stream_mode': normalize_bool(await cls._require_db().get_config('stream_mode', True), True),
             # 流式风格：'foreground'（前台流式，实时推送）/ 'background'（后台流式，累积后一次发）

@@ -125,6 +125,8 @@ def get_main_menu():
          InlineKeyboardButton("🎯 模型", callback_data="menu_default_models")],
         [InlineKeyboardButton(f"🤖 Agent:{'开' if agent_on else '关'}", callback_data="toggle_agent_mode"),
          InlineKeyboardButton(f"🌊 流式:{'开' if stream_on else '关'}", callback_data="toggle_stream_mode")],
+        [InlineKeyboardButton('工具调用：' + ('Tool call' if UserDataManager.get('agent_call_mode', 'fence') == 'toolcall' else '正则围栏'),
+                              callback_data='menu_agent_call_mode')],
         [InlineKeyboardButton(f"🧩{stitch_label}", callback_data="menu_text_stitch_mode"),
          InlineKeyboardButton("🧠记忆", callback_data="menu_memory")],
         [InlineKeyboardButton(f"🌐 Web:{'开' if web_on else '关'}", callback_data="menu_web"),
@@ -132,6 +134,18 @@ def get_main_menu():
         [InlineKeyboardButton("⚙️ 更多", callback_data="menu_more_settings")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def get_agent_call_mode_menu():
+    current = UserDataManager.get('agent_call_mode', 'fence')
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(('✅ ' if current == value else '') + label, callback_data='set_agent_call_mode:' + value)]
+        for value, label in [('toolcall', 'Tool call'), ('fence', '正则围栏')]
+    ] + [[InlineKeyboardButton('🔙 返回', callback_data='menu_main')]])
+
+
+def build_agent_call_mode_text():
+    return '工具调用方式\n切换影响下一次新请求，正在执行及等待表单的回合保持原模式。'
 
 
 def _build_web_open_button():

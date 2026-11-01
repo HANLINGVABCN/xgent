@@ -2,6 +2,7 @@
 # Keep cross-section names available through the loader until the next decoupling phase.
 
 from xgent_app.agent_coordinator import plan_agent_round_transition
+from xgent_app import tool_calls as native_tools
 from xgent_app.message_queue import mark_outcome, batch_messages
 from xgent_app.agent_status import AgentTurnOrigin, build_agent_round_status
 from xgent_app.agent_ask import PENDING_ASKS, SECRET_STORE, PendingAsk, parse_ask_form
@@ -68,6 +69,10 @@ async def _sync_presentation_footer(context, row_id, reply):
     metadata['presentation'] = presentation
     footer = footer_html(presentation) if turn.folded else ''
     content = _folded_display_html(row['content'])
+    if presentation.get('native_calls'):
+        from xgent_app.native_rendering import segments as native_segments
+        content = '\n'.join(markdown_to_telegram_html(s['text']) if s['kind'] == 'markdown' else s['text']
+                            for s in native_segments(row['content'], presentation['native_calls'], presentation.get('operations', [])))
     metadata['display'] = {'content': content + ('\n\n' + footer if footer else ''), 'parse_mode': 'HTML'}
     metadata['web_display'] = build_web_display(row['content'], fold=True,
         mode=turn.mode, presentation=presentation)
@@ -87,6 +92,7 @@ async def _sync_presentation_footer(context, row_id, reply):
             reply_message_id=ids[0], presentation=presentation)
         stop = bool(AgentExecutor.extract_protocol_blocks(row['content'])) and getattr(turn, 'agent_enabled', False) and not presentation.get('summary')
         with web_display_scope(display), message_presentation({'kind': 'ai_reply', 'mode': turn.mode,
+                **({'native_calls': presentation['native_calls']} if presentation.get('native_calls') else {}),
                 'telegram_display': {'text': base, 'parse_mode': 'HTML', 'remove_stop': True,
                     'raw_markdown': row['content'], 'owner_id': ids[0] if ids else None}}):
             chunks = split_html_for_telegram(base + '\n\n' + footer, 3900)
@@ -126,7 +132,7 @@ async def _sync_protocol_states(context, *, terminal=False):
             from xgent_app.web_display import operation_state
             operation['state'] = operation_state(operation)
     for reply in turn.replies:
-        states = [{key: operation.get(key) for key in ('kind', 'sequence', 'command', 'path', 'state')}
+        states = [{key: operation.get(key) for key in ('kind', 'sequence', 'command', 'path', 'state', 'native_call_id')}
                   for operation in turn.operations if operation.get('reply_record_id') == reply.get('record_id')]
         if not states or reply.get('operations') == states:
             continue
@@ -145,6 +151,15 @@ async def _finish_presentation(context, turn):
     row = await db.get_display_message(facts['record_id'])
     if row is None:
         return
+    if not str(row['content']).strip() and not metadata_dict(row.get('metadata')).get('attachments'):
+        # Pure tool decisions are input cards, not an invented empty AI answer.
+        for candidate in reversed(turn.replies[:-1]):
+            previous = await db.get_display_message(candidate['record_id'])
+            if previous and (str(previous['content']).strip() or metadata_dict(previous.get('metadata')).get('attachments')):
+                facts, row = candidate, previous
+                break
+        else:
+            return
     telegram_reply = await context.bot.finish_telegram_reply(row, facts, turn.summary() if turn.operations else None)
     metadata = metadata_dict(row.get('metadata'))
     metadata['telegram_reply'] = telegram_reply
@@ -1838,6 +1853,7 @@ async def process_conversation(update: Update, context: ContextTypes.DEFAULT_TYP
             publish_conversation_event(context, {'type': 'generation_end'})
 
 
+@native_tools.process_scope
 async def _process_conversation_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
                                        content_override: Optional[Any] = None,
                                        force_agent_mode: bool = False,
@@ -1876,6 +1892,9 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
             mark_outcome('failed')
             return
     prov_name, prov_data = get_current_provider()
+    native_session = native_tools.current_session()
+    if native_session is not None:
+        prov_name, prov_data = native_session.provider_name, native_session.provider_config
     # 防御性回退：模型取值优先读会话绑定（chat_sessions.model），若某条
     # 配置变更路径漏了会话同步（历史上导入配置和 Web 设置都漏过），会话
     # 里残留的旧模型名会配着换掉后的新提供商通道发出去，上游 502
@@ -1886,6 +1905,8 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
     model = resolve_effective_chat_model(
         cdata.get('model'), UserDataManager.get('default_model'), prov_data
     )
+    if native_session is not None:
+        model = native_session.model
 
     if not prov_data or not model:
         mark_outcome('failed')
@@ -1947,7 +1968,11 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
     generated_reply = make_generated_reply_persistence(
         db, cid, update.effective_chat.id, attachment_generation, prov_name, model,
     )
-    if stream_mode:
+    resume_tools = bool(native_session and native_session.mode == 'toolcall' and native_session.remaining)
+    if resume_tools:
+        response = native_tools.ModelReply('', native_session.reply)
+        generated_reply.recorded = True
+    elif stream_mode:
         # stream_style: 'foreground'（前台流式，实时推送）/ 'background'（后台流式，累积后一次发）
         stream_style = normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
         if stream_style == STREAM_STYLE_BACKGROUND:
@@ -2039,7 +2064,9 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
             from types import SimpleNamespace
             await publish_saved_reply(context, token_row_id, SimpleNamespace(presentation_message_ids=_entry['message_ids']))
     agent_turn_history: List[Dict[str, Any]] = list(history)
-    agent_turn_history.append({'role': 'assistant', 'content': response})
+    if not resume_tools:
+        agent_turn_history.append(response.capture.message(response) if isinstance(response, native_tools.ModelReply)
+                                  else {'role': 'assistant', 'content': response})
     
     # --- Agent 模式：命令 / 读文件 / 发文件 / 写文件 / 媒体协议循环 ---
     pending_round_status_msg = trigger_status_msg
@@ -2069,7 +2096,11 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                     )
                 )
                 break
-            protocol_blocks = AgentExecutor.extract_protocol_blocks(response)
+            if native_session is not None and native_session.mode == 'toolcall':
+                protocol_blocks = native_session.remaining or [native_tools.operation(c) for c in getattr(response, 'capture', native_session.reply).calls]
+                native_session.remaining = []
+            else:
+                protocol_blocks = AgentExecutor.extract_protocol_blocks(response)
             if pending_round_status_msg is not None:
                 # 等待提示是临时消息：新响应到达即删除。对应轮次的 ✅ 完成状态
                 # 已在该轮执行结束时发到聊天底部，无需再原地编辑旧消息。
@@ -2124,9 +2155,17 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
 
             async def add_tool_context(message):
                 message = dict(message)
-                if retain_tools:
+                is_native = bool(native_session and native_session.mode == 'toolcall' and native_session.current)
+                if is_native:
+                    message['native_result'] = {'id': native_session.current, 'run_id': native_session.run_id,
+                                                'response_id': native_session.current_response_id}
+                if retain_tools or is_native:
+                    stored = message
+                    if is_native and not retain_tools and isinstance(message.get('content'), list):
+                        stored = {**message, 'content': [p for p in message['content'] if p.get('type') == 'text'] +
+                            [{'type': 'text', 'text': '[原生附件仅用于该回合；工具留存已关闭。]'}]}
                     payload = await asyncio.to_thread(
-                        freeze_tool_message, message, ArtifactManager.save_binary_upload,
+                        freeze_tool_message, stored, ArtifactManager.save_binary_upload,
                     )
                     scope = active_tool_result.get()
                     row_id = await db.persist_tool_context(
@@ -2135,6 +2174,21 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                     )
                     message[TOOL_CONTEXT] = row_id
                 round_state.add_context(message)
+                if is_native:
+                    native_session.current_results.append(round_state.continuation_messages[-1])
+
+            async def finish_native_operation():
+                if native_session is None or native_session.mode != 'toolcall':
+                    return
+                before = len(round_state.continuation_messages)
+                native_session.finish(round_state.continuation_messages)
+                for synthesized in round_state.continuation_messages[before:]:
+                    visible_anchor = current_turn().last_record_id
+                    await GlobalRecorder.record(MessageType.AGENT_RESULT, 'system', synthesized['content'],
+                        chat_id=update.effective_chat.id, metadata={'model_context': {'version': 1, 'messages': [synthesized], 'assets': []},
+                        'message_policy': {'version': 1, 'purpose': 'model_context', 'speaker': 'tool', 'audience': [], 'model_context': True,
+                                           'origin': current_scope().origin, 'transient': False}})
+                    current_turn().last_record_id = visible_anchor
 
             try:
                 def _smart_match_notice(blk: Dict[str, Any]) -> str:
@@ -2159,10 +2213,13 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                     return out
 
                 for protocol_index, block in enumerate(protocol_blocks):
+                    await finish_native_operation()
                     if is_stop_requested():
                         round_state.should_continue = False
                         break
-                    active_tool_result.set(ToolResultScope() if retain_tools else None)
+                    if native_session is not None and not native_session.claim(block):
+                        continue
+                    active_tool_result.set(ToolResultScope() if retain_tools or (native_session and native_session.mode == 'toolcall') else None)
                     smart_notice = _smart_match_notice(block)
                     block_type = block['type']
                     if current_turn() is not None:
@@ -2371,7 +2428,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                     if block_type == 'ask':
                         from xgent_app.conversation_branching import record_operation
                         await record_operation(db, 'ask', 'read_only')
-                        ask_form, ask_err = parse_ask_form(block.get('body') or '')
+                        ask_form, ask_err = (block['ask_form'], None) if block.get('ask_form') else parse_ask_form(block.get('body') or '')
                         if ask_err:
                             # 格式错误：回灌给模型让它改正，不阻断、不抛异常。
                             await safe_send_message(
@@ -2403,7 +2460,13 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             chat_id=update.effective_chat.id,
                             origin=AgentTurnOrigin.ask(),
                             form_bot=context.bot.original,
+                            native_session=native_session,
                         )
+                        if native_session is not None and native_session.mode == 'toolcall':
+                            native_session.remaining = list(protocol_blocks[protocol_index + 1:])
+                            import copy
+                            native_session.presentation = {'replies': copy.deepcopy(current_turn().replies),
+                                'operations': copy.deepcopy(current_turn().operations), 'started_at': current_turn().started_at}
                         form_header = (
                             "📝 需要你的输入：填好后点「✅ 提交」。\n"
                             "🔒 密钥不发送给 AI。"
@@ -2626,7 +2689,14 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
             round_status_text = build_agent_round_status(
                 operation_iteration, 'failed' if any(op.get('success') is False for op in current_turn().operations if op.get('reply_record_id') == current_turn().replies[-1].get('record_id')) else 'completed', origin=agent_origin,
                 operation_count=len(protocol_blocks))
+            if resume_tools:
+                # This batch follows ask in the same model response, so over
+                # cannot become eligible merely because the form was submitted.
+                round_state.over_blocked = True
+                resume_tools = False
             completion_sent = False
+            if not form_shown:
+                await finish_native_operation()
             # Finish this operation round before claiming another user input.
             # Both durable timestamps and live delivery then place the count
             # before a queued message, rather than underneath that new message.
@@ -2818,13 +2888,25 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                     from types import SimpleNamespace
                     await publish_saved_reply(context, token_row_id, SimpleNamespace(presentation_message_ids=_entry['message_ids']))
             agent_turn_history = next_history
-            agent_turn_history.append({'role': 'assistant', 'content': response})
+            agent_turn_history.append(response.capture.message(response) if isinstance(response, native_tools.ModelReply)
+                                      else {'role': 'assistant', 'content': response})
 
 
-async def persist_ask_answer(text, chat_id, generation):
+async def persist_ask_answer(text, chat_id, generation, native_session=None):
     answer = build_ask_context_message(text)
     metadata = {'attachment_generation': generation, 'ask_answer': True}
-    if normalize_bool(UserDataManager.get('readx_persist_context', False), False):
+    if native_session is not None and native_session.mode == 'toolcall':
+        answer['native_result'] = {'id': native_session.current, 'run_id': native_session.run_id,
+                                   'response_id': native_session.current_response_id}
+        for operation in (native_session.presentation or {}).get('operations', []):
+            if operation.get('native_call_id') == native_session.current:
+                cancelled = text.startswith('[用户已取消表单]')
+                operation.update(state='stopped' if cancelled else 'success', success=not cancelled,
+                    status='cancelled' if cancelled else 'completed',
+                    elapsed_seconds=time.monotonic() - operation['started_at'])
+        native_session.current_results = [answer]
+        native_session.finish([])
+    if native_session is not None and native_session.mode == 'toolcall' or normalize_bool(UserDataManager.get('readx_persist_context', False), False):
         from xgent_app.tool_context import freeze_tool_message
         metadata['model_context'] = freeze_tool_message(answer, ArtifactManager.save_binary_upload)
     await GlobalRecorder.record_user_message(text, MessageType.USER_TEXT, chat_id, metadata=metadata)
@@ -2860,7 +2942,7 @@ async def resume_from_ask(ask_id: str) -> str:
     answer_text = pending.form.assemble_answer(pending.draft)
 
     # Preserve the model's form context without another visible answer dump.
-    answer_message = await persist_ask_answer(answer_text, pending.chat_id, pending.generation)
+    answer_message = await persist_ask_answer(answer_text, pending.chat_id, pending.generation, pending.native_session)
     queue = get_text_queue()
     await queue.start()
     await db.queue_resume(current_scope(), queue.instance, ask=True)
@@ -2873,6 +2955,7 @@ async def resume_from_ask(ask_id: str) -> str:
         'turn_history_snapshot': pending.turn_history_snapshot,
         'answer_message': answer_message,
         'queue_submit': True,
+        'native_session': pending.native_session,
     }
     await process_conversation(
         update,
@@ -2908,13 +2991,26 @@ async def cancel_ask(ask_id: str) -> str:
     queue = get_text_queue()
     await queue.start()
     await db.queue_resume(current_scope(), queue.instance, ask=True, cancel_ask=True)
-    answer_message = await persist_ask_answer(notice, pending.chat_id, pending.generation)
+    answer_message = await persist_ask_answer(notice, pending.chat_id, pending.generation, pending.native_session)
+    if pending.native_session is not None and pending.native_session.mode == 'toolcall':
+        for block in pending.native_session.remaining:
+            pending.native_session.claim(block)
+            cancelled = {'role': 'user', 'content': '[工具结果] 用户取消表单，本调用未执行。'}
+            pending.native_session.current_results = [cancelled]
+            pending.native_session.finish([])
+            pending.turn_history_snapshot.append(cancelled)
+            await GlobalRecorder.record(MessageType.AGENT_RESULT, 'system', cancelled['content'],
+                chat_id=pending.chat_id, metadata={'model_context': {'version': 1, 'messages': [cancelled], 'assets': []},
+                'message_policy': {'version': 1, 'purpose': 'model_context', 'speaker': 'tool', 'audience': [], 'model_context': True,
+                                   'origin': current_scope().origin, 'transient': False}})
+        pending.native_session.remaining = []
     bot = build_trigger_delivery_bot(int(pending.chat_id))
     update = _SelfTriggerUpdate(bot, int(pending.chat_id))
     context = _SelfTriggerContext(bot)
     resume_state = {
         'turn_history_snapshot': pending.turn_history_snapshot,
         'answer_message': answer_message,
+        'native_session': pending.native_session,
     }
     await process_conversation(
         update, context, notice,

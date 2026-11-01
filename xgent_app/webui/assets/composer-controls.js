@@ -34,6 +34,9 @@ function render(){
     for(const item of responseModes)modes.append(el('button',{type:'button',class:'composer-option',role:'radio',
       'data-value':item.value,'aria-checked':String(responseMode()===item.value),onclick:()=>save('response_mode',item.value)},
       el('span',{},item.label),responseMode()===item.value?icon('check'):null));
+    const callModes=el('div',{class:'composer-response-modes',role:'radiogroup','aria-label':'工具调用方式'});
+    for(const item of [{value:'toolcall',label:'Tool call'},{value:'fence',label:'正则围栏'}])callModes.append(el('button',{type:'button',class:'composer-option',role:'radio','data-value':item.value,'aria-checked':String((values().agent_call_mode||'fence')===item.value),onclick:()=>save('agent_call_mode',item.value)},el('span',{},item.label),(values().agent_call_mode||'fence')===item.value?icon('check'):null));
+    popover.append(callModes);
     popover.append(modes,el('button',{type:'button',class:'composer-agent-option',role:'switch','aria-label':'Agent 模式',
       'aria-checked':String(!!values().agent_mode),onclick:()=>save('agent_mode',!values().agent_mode)},
       el('span',{},'Agent 模式'),el('span',{class:'composer-switch','aria-hidden':'true'})));

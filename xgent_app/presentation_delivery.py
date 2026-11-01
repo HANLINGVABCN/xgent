@@ -141,11 +141,18 @@ class PresentationBot:
                 end_phase(generation['run_id'], generation['ref'])
         phase = 'reply' if complete else 'draft' if (generation or {}).get('mode') == 'foreground' else 'control'
         record_id = hint.get('record_id') or (self.turn.active_reply or {}).get('record_id')
+        from .tool_calls import current_session
+        native_prose = current_session() is not None and current_session().mode == 'toolcall'
         result = {'phase': phase, **{key: (generation or {}).get(key) for key in ('ref', 'draft_id', 'mode')},
             'raw': raw, 'owner_id': owner_id, 'control_markup': (generation or {}).get('control_markup'),
-            'html': render_rich(raw, generating=not complete),
+            'html': render_rich(raw, generating=not complete, native_prose=native_prose),
             'fallback': fallback(raw, generating=not complete), 'record_id': record_id,
             'empty': complete and not raw.strip()}
+        if complete and hint.get('native_calls'):
+            from .native_rendering import rich_calls
+            result['html'], result['fallback'] = rich_calls(raw, hint['native_calls'])
+            result['native_calls'] = hint['native_calls']
+            result['empty'] = False
         if owner_id is not None:
             result['auxiliary'] = previous is None or previous.message_id != owner_id
         return result
@@ -279,9 +286,13 @@ class PresentationBot:
                     rows.append([InlineKeyboardButton('复制',copy_text=CopyTextButton(row['content']))])
                 buttons=InlineKeyboardMarkup(rows) if rows else None
                 native = {'phase': 'reply', 'owner_id': owner_id, 'record_id': row['id'],
-                          'html': render_rich(row['content'], details=''.join(details)),
+                          'html': render_rich(row['content'], details=''.join(details), native_prose=facts.get('agent_call_mode') == 'toolcall'),
                           'fallback': []}
-                fallback = legacy_chunks(row['content'])
+                if facts.get('native_calls'):
+                    from .native_rendering import rich_calls
+                    native['html'], fallback = rich_calls(row['content'], facts['native_calls'], details=''.join(details))
+                else:
+                    fallback = legacy_chunks(row['content'])
                 native['fallback'] = [*fallback[:-1], *append_details(fallback[-1], details)]
                 # Footer retries edit the same native parts, never append again.
                 await self._telegram_only('edit_message_text', native=native, record_id=row['id'],

@@ -111,7 +111,7 @@ class Harness:
         await self.db.save_provider("p", URL, "test-key", [MODEL], api_format="openai")
         for name, value in (
             ("active_provider", "p"), ("default_model", MODEL), ("global_depth", 2),
-            ("agent_mode", False), ("stream_mode", False), ("thinking_level", "auto"),
+            ("agent_mode", False), ("agent_call_mode", "fence"), ("stream_mode", False), ("thinking_level", "auto"),
         ):
             await self.db.set_config(name, value)
         await bot.UserDataManager.init()

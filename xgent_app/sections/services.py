@@ -333,6 +333,16 @@ class GlobalRecorder:
                               model: Optional[str] = None):
         """Keep a display snapshot separate from the original model-visible text."""
         metadata = {'generated_media_processed': True, **(metadata or {})}
+        from xgent_app.tool_calls import current_session
+        session = current_session()
+        if session is not None:
+            metadata.setdefault('agent_call_mode', session.mode)
+        if metadata.get('native_calls'):
+            from xgent_app.native_rendering import segments
+            pieces = segments(content, metadata['native_calls'])
+            metadata.setdefault('display', {'content': '\n'.join(markdown_to_telegram_html(s['text'])
+                if s['kind'] == 'markdown' else s['text'] for s in pieces), 'parse_mode': 'HTML'})
+            metadata.setdefault('web_display', {'version': 1, 'segments': pieces, 'presentation_mode': 'folded'})
         if provider or model:
             metadata.setdefault('ai_generation', {
                 'provider': str(provider or ''), 'model': str(model or ''),
@@ -344,7 +354,8 @@ class GlobalRecorder:
             metadata['display'] = {'content': display, 'parse_mode': 'HTML'}
         if 'web_display' not in metadata:
             from xgent_app.web_display import build_web_display
-            metadata['web_display'] = build_web_display(content, fold=True, mode=_presentation_mode())
+            metadata['web_display'] = build_web_display(content, fold=True, mode=_presentation_mode(),
+                presentation={'agent_call_mode': metadata.get('agent_call_mode')})
         return await GlobalRecorder.record(
             msg_type=MessageType.AI_REPLY,
             role='assistant',
@@ -558,9 +569,9 @@ def is_test_update_source(update_url: str) -> bool:
 
 def get_update_source_label(update_url: str) -> str:
     if is_test_update_source(update_url):
-        return "test 私有目录"
+        return "原 XGent 测试项目"
     if str(update_url or "").strip() == BotConfig.NORMAL_UPDATE_ZIP_URL:
-        return "正常 bot 项目"
+        return "XGent 私人项目"
     return "自定义更新源"
 
 def persist_update_github_token(token: str, update_url: Optional[str] = None):
@@ -1351,6 +1362,10 @@ def build_absolute_path_prompt_section() -> str:
 
 def get_agent_runtime_prompt(agent_mode: bool) -> str:
     prompt = PromptFileManager.get('agent_prompt_addon')
+    from xgent_app.tool_calls import current_session, select_prompt
+    session = current_session()
+    if agent_mode and session is not None and session.mode == 'toolcall':
+        prompt = select_prompt(prompt, PromptFileManager.get('agent_toolcall_addon'))
     prompt += build_absolute_path_prompt_section()
     prompt += build_skill_prompt_section()
     prompt += (
@@ -1361,6 +1376,15 @@ def get_agent_runtime_prompt(agent_mode: bool) -> str:
     )
     if not agent_mode:
         prompt += PromptFileManager.get('agent_disabled_addon')
+    else:
+        if session is not None and session.mode == 'toolcall':
+            prompt += ('\n【当前工具调用模式：Tool call】\n'
+                '本回合仅接受 API tools 中的原生函数调用。前面的执行规则继续适用；'
+                '围栏与 BEGIN/END 语法是旧模式参考，在本模式绝不执行。'
+                '需要工具时直接提交对应函数参数，不必先生成客套正文；不要把调用写进普通回复。'
+                '字符串参数保留原始换行、缩进和空格；同批调用按顺序执行，依赖结果的步骤等待下一轮。'
+                'ask_x 使用结构化 questions；不得填写或猜测用户密钥，secret 仅指定变量名。'
+                'over_x 仅在原有允许的操作全部成功时省略回传，不提前宣称执行成功。\n')
     return prompt
 
 

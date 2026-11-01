@@ -3,6 +3,8 @@ from xgent_app.telegram_presentation import telegram_label, label_enabled, strea
 # Keep cross-section names available through the loader until the next decoupling phase.
 
 from xgent_app.protocols import ProtocolParser
+from xgent_app import tool_calls as native_tools
+from xgent_app.native_rendering import finish as finish_native_reply
 from xgent_app.reply_presentation import track_reply_presentation, bind_reply_message_ids, remember_reply_messages
 from xgent_app.web_display import web_text_response, web_stream_display
 from xgent_app.presentation import current_turn, normalize_mode, ai_html, message_presentation
@@ -798,6 +800,9 @@ def _folded_display_html(response: str, hide_unclosed: bool = False, monospace: 
     render_folded_html 原样返回输入 → 这里退回 markdown→HTML，保证产物始终是 HTML。
     只改显示：绝不触碰落库 / 执行 / 镜像的原始文本。
     """
+    session = native_tools.current_session()
+    if session is not None and session.mode == 'toolcall':
+        return markdown_to_telegram_html(response)
     folded = ai_html(response, _presentation_mode(), markdown_to_telegram_html,
                      hide_unclosed=hide_unclosed)
     if not raw_copy:
@@ -1447,7 +1452,8 @@ def _remember_live_reply(reply, context, message_ids):
 def live_reply_metadata(reply):
     live = getattr(reply, 'web_live', None)
     thinking = getattr(reply, 'thinking', None)
-    return {**({'web_live': live} if live else {}), **({'thinking': thinking.snapshot()} if thinking and thinking.snapshot() else {})}
+    capture = getattr(reply, 'native_capture', None)
+    return {**native_tools.metadata(capture, getattr(reply, 'text', '')), **({'web_live': live} if live else {}), **({'thinking': thinking.snapshot()} if thinking and thinking.snapshot() else {})}
 
 
 async def finalize_reported_error(context, chat_id, msg, text):
@@ -1488,6 +1494,7 @@ async def _preserve_media_after_error(generated_reply, raw, *, stopped=False):
 
 @without_ui_history
 @track_reply_presentation
+@native_tools.rendering_capture('foreground')
 async def send_streaming_response(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    prov_name: str, prov_data: Dict, model: str,
                                    system_prompt: str, history: List[Dict],
@@ -1729,6 +1736,9 @@ async def send_streaming_response(update: Update, context: ContextTypes.DEFAULT_
                 stopped_partial_sink.append(full_response)
             return None
 
+        if native_tools.has_calls():
+            return await finish_native_reply(globals(), context, chat_id, msg, generated_reply,
+                full_response, usage_sink, generation_started_at, token_text_sink, renderer=renderer)
         if full_response or generated_reply.media_capture.parts:
             full_response, media_artifacts = await generated_reply.prepare(full_response)
             full_response = append_external_media_notices_to_response(full_response, extra_media_artifacts)
@@ -1840,6 +1850,7 @@ async def send_streaming_response(update: Update, context: ContextTypes.DEFAULT_
 
 @without_ui_history
 @track_reply_presentation
+@native_tools.rendering_capture('background')
 async def send_background_streaming_response(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                               prov_name: str, prov_data: Dict, model: str,
                                               system_prompt: str, history: List[Dict],
@@ -2044,6 +2055,9 @@ async def send_background_streaming_response(update: Update, context: ContextTyp
             return partial or timeout_notice.strip()
 
         # 正常完成
+        if native_tools.has_calls():
+            return await finish_native_reply(globals(), context, chat_id, msg, generated_reply,
+                partial, usage_sink, generation_started_at, token_text_sink)
         if partial or generated_reply.media_capture.parts:
             partial, media_artifacts = await generated_reply.prepare(partial)
             partial = append_external_media_notices_to_response(partial, extra_media_artifacts)
@@ -2167,6 +2181,7 @@ def _nonstream_hard_timeout_seconds() -> float:
 
 @without_ui_history
 @track_reply_presentation
+@native_tools.rendering_capture('nonstream')
 async def send_non_streaming_response(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                        prov_name: str, prov_data: Dict, model: str,
                                        system_prompt: str, history: List[Dict],
@@ -2337,6 +2352,9 @@ async def send_non_streaming_response(update: Update, context: ContextTypes.DEFA
             await finalize_reported_error(context, chat_id, msg, error)
             return None
 
+        if native_tools.has_calls():
+            return await finish_native_reply(globals(), context, chat_id, msg, generated_reply,
+                response or '', usage_sink, generation_started_at, token_text_sink)
         if response:
             response, media_artifacts = await generated_reply.prepare(response)
             response = append_external_media_notices_to_response(response, extra_media_artifacts)

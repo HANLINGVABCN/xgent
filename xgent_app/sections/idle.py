@@ -353,7 +353,7 @@ from xgent_app.web_appearance import FONT_SETTINGS, read_appearance, write_appea
 
 WEB_EDITABLE_SETTINGS = {
     *FONT_SETTINGS,
-    'thinking_level', 'stream_mode', 'response_mode', 'agent_mode', 'text_stitch_mode',
+    'thinking_level', 'stream_mode', 'response_mode', 'agent_mode', 'agent_call_mode', 'text_stitch_mode',
     'global_depth', 'agent_max_iterations', 'stream_timeout', 'chat_model',
     'disabled_skills', 'hidden_skills', 'skill_state', 'agent_command_timeout', 'idle_message_interval',
     'smart_match_threshold',
@@ -918,6 +918,7 @@ async def _web_read_settings() -> Dict[str, Any]:
             'presentation_mode': normalize_mode(UserDataManager.get('presentation_mode', 'folded')),
             'hide_protocol_blocks': True,
             'agent_mode': bool(UserDataManager.get('agent_mode', False)),
+            'agent_call_mode': UserDataManager.get('agent_call_mode', 'fence'),
             'text_stitch_mode': normalize_text_stitch_mode(UserDataManager.get('text_stitch_mode')),
             'global_depth': int(UserDataManager.get('global_depth', 30) or 30),
             'agent_max_iterations': normalize_agent_max_iterations(
@@ -940,6 +941,7 @@ async def _web_read_settings() -> Dict[str, Any]:
             'stats_metric': stats_metric,
         },
         'options': {
+            'agent_call_mode': [{'value': 'toolcall', 'label': 'Tool call'}, {'value': 'fence', 'label': '正则围栏'}],
             'response_mode': [{'value': 'foreground', 'label': '前台流式'},
                               {'value': 'background', 'label': '后台流式'},
                               {'value': 'nonstream', 'label': '非流式'}],
@@ -998,6 +1000,11 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
         values = await (await BotMemoryDB.get_instance()).set_response_mode(value)
         for setting, selected in values.items():
             UserDataManager.set(setting, selected)
+    elif key == 'agent_call_mode':
+        from xgent_app.tool_calls import normalize_mode as normalize_call_mode
+        mode = normalize_call_mode(value)
+        await UserDataManager.save_config(key, mode)
+        UserDataManager.set(key, mode)
     elif key in {'stream_mode', 'agent_mode'}:
         flag = normalize_bool(value, False)
         UserDataManager.set(key, flag)

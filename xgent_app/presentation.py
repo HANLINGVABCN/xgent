@@ -240,6 +240,9 @@ class PresentationTurn:
         self.active_reply = {'version': 1, 'mode': self.mode, 'kind': 'ai_reply',
             'round': len(self.replies) + 1, 'model': getattr(reply, 'presentation_model', ''),
             'message_ids': ids, 'record_id': None, 'execution_schema': 1}
+        from .tool_calls import current_session
+        if current_session() is not None:
+            self.active_reply['agent_call_mode'] = current_session().mode
 
     def saved_reply(self, record_id):
         if self.active_reply is not None and self.active_reply.get('record_id') is None and record_id is not None:
@@ -256,6 +259,8 @@ class PresentationTurn:
                                  'started_at': time.monotonic(), 'command': str(block.get('body') or ''),
                                  'path': block.get('path'), 'state': 'running',
                                  'reply_record_id': self.replies[-1].get('record_id') if self.replies else None}
+        if block.get('native_call_id'):
+            self.active_operation['native_call_id'] = block['native_call_id']
         from .conversations import current_scope
         from .stop_targets import begin_phase
         scope = current_scope(required=False)

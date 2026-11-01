@@ -73,7 +73,7 @@ def test_mobile_generation_panel_switch_and_resize(browser_context,workspace_url
     page.wait_for_function('(old)=>document.getElementById("composer-agent").getAttribute("aria-pressed")===String(!old)',arg=original)
     assert page.locator('#composer-options-popover').is_hidden()
     trigger.click()
-    assert page.locator('#composer-options-popover .composer-option').count()==3
+    assert page.locator('#composer-options-popover .composer-option').count()==5
     assert page.get_by_role('radio',name='前台流式',exact=True).is_visible()
     assert page.get_by_role('radio',name='后台流式',exact=True).is_visible()
     assert page.get_by_role('radio',name='非流式',exact=True).is_visible()

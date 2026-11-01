@@ -13,6 +13,8 @@ from xgent_app.media_inputs import MediaInputError, native_binary_kind, redact_m
 
 from xgent_app.media_response import separate as separate_media, reply as provider_reply
 from xgent_app.thinking_display import capture_stream, capture_complete, observe as observe_thinking
+from xgent_app import tool_calls as native_tools
+import copy
 
 class ModelClient:
     _VALID_ROLES = {'user', 'assistant', 'system'}
@@ -70,6 +72,7 @@ class ModelClient:
 
     @staticmethod
     def _check_compression_completion(history: list, reason: Any) -> None:
+        native_tools.note_finish(reason=reason)
         if (getattr(history, 'require_complete', False) and reason is not None
                 and str(reason).lower() not in {'stop', 'end_turn', 'stop_sequence', 'eos_token'}):
             raise AttachmentContextError(
@@ -78,11 +81,17 @@ class ModelClient:
 
     @staticmethod
     def _check_compression_stream_end(history: list, finished: bool) -> None:
+        native_tools.note_finish(finished=finished)
         if getattr(history, 'require_complete', False) and not finished:
             raise AttachmentContextError('压缩恢复流未收到完整结束标记，原文归档保留，可手动重试。')
 
     @staticmethod
     def _validate_conversation_request(body: Dict[str, Any], history: list) -> None:
+        native_tools.apply_request(body, history, {
+            'openai': ModelClient._to_openai_content, 'openai_compatible': ModelClient._to_openai_content,
+            'gemini': ModelClient._to_gemini_parts, 'vertex': ModelClient._to_gemini_parts,
+            'claude': ModelClient._to_claude_content,
+        })
         try:
             validate_request_body(body, history)
         except AttachmentContextError as exc:
@@ -100,6 +109,12 @@ class ModelClient:
     def _raise_conversation_request_error(history: list, error: Any) -> None:
         from xgent_app.thinking_display import mark_failed
         mark_failed()
+        if native_tools.current_response() is not None:
+            detail = error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)
+            if any(word in detail.lower() for word in ('tools', 'tool_choice', 'function calling', 'function_call')) and any(
+                    word in detail.lower() for word in ('not supported', 'unsupported', 'unknown parameter', 'unrecognized', 'not allowed')):
+                hint = '\n当前模型或接口不支持 Tool call，请切换“正则围栏”后重试。'
+                error = detail[:max(0, 2000 - len(hint))] + hint
         if isinstance(history, ConversationRequest):
             detail = error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)
             if getattr(history, 'explicit_media', False):
@@ -168,10 +183,11 @@ class ModelClient:
                 role = 'assistant'
             if role not in ModelClient._VALID_ROLES:
                 continue  # 跳过无效角色
-            content = msg.get('content', "")
+            content = msg.get('content', "") if native_tools.current_response() else native_tools.historical_content(msg)
             normalized_content = ModelClient._normalize_content(content)
-            if normalized_content:
-                clean_history.append({"role": role, "content": normalized_content})
+            if normalized_content or msg.get('native_calls'):
+                clean_history.append({"role": role, "content": normalized_content or '',
+                    **{key: copy.deepcopy(msg[key]) for key in ('native_calls', 'native_result', 'native_binding', '_native_continuation') if key in msg}})
         return clean_history
 
     @staticmethod
@@ -419,6 +435,7 @@ class ModelClient:
 
     @staticmethod
     def _extract_gemini_text_response(data: Dict[str, Any]) -> Optional[str]:
+        native_tools.observe(data, 'gemini')
         observe_thinking(data, 'gemini')
         data = separate_media(data, 'gemini')
         candidates = data.get('candidates', [])
@@ -440,6 +457,7 @@ class ModelClient:
 
     @staticmethod
     def _extract_claude_text_response(data: Dict[str, Any]) -> Optional[str]:
+        native_tools.observe(data, 'claude')
         observe_thinking(data, 'claude')
         text_parts = []
         for block in data.get('content', []):
@@ -623,6 +641,7 @@ class ModelClient:
 
     @staticmethod
     def _extract_openai_compatible_text(data: Dict[str, Any], *, stream: bool = False) -> str:
+        native_tools.observe(data, stream=stream)
         observe_thinking(data)
         data = separate_media(data)
         texts: List[str] = []
@@ -708,8 +727,8 @@ class ModelClient:
             try:
                 data = json.loads(payload)
             except json.JSONDecodeError:
-                if getattr(history, 'require_complete', False):
-                    raise AttachmentContextError('压缩响应包含损坏的数据，原文归档保留，可手动重试。')
+                if getattr(history, 'require_complete', False) or native_tools.current_response() is not None:
+                    raise AttachmentContextError('模型响应包含损坏的数据，原文归档保留，可手动重试。')
                 continue
             if data.get("error"):
                 ModelClient._raise_conversation_request_error(history, data["error"])
@@ -723,6 +742,7 @@ class ModelClient:
                 texts.append(chunk_text)
         if getattr(history, 'require_complete', False) and not finished:
             raise AttachmentContextError('压缩响应中途结束，原文归档保留，可手动重试。')
+        native_tools.note_finish(finished=finished)
         return provider_reply("".join(texts))
 
     @staticmethod
@@ -870,7 +890,7 @@ class ModelClient:
             raw_text = resp.text or ""
             if raw_text.lstrip().startswith("data:"):
                 text = ModelClient._extract_openai_compatible_sse_text(raw_text, usage_sink, history)
-                if text:
+                if text or native_tools.has_calls():
                     write_model_trace("model_response", {
                         "trace_id": trace_id,
                         "provider": prov_name,
@@ -892,7 +912,7 @@ class ModelClient:
             for choice in data.get('choices') or []:
                 ModelClient._check_compression_completion(history, choice.get('finish_reason'))
             text = ModelClient._extract_openai_compatible_text(data)
-            if text:
+            if text or native_tools.has_calls():
                 write_model_trace("model_response", {
                     "trace_id": trace_id,
                     "provider": prov_name,
@@ -1001,8 +1021,8 @@ class ModelClient:
                             try:
                                 data = json.loads(payload)
                             except json.JSONDecodeError:
-                                if getattr(history, 'require_complete', False):
-                                    raise AttachmentContextError('压缩恢复流包含损坏的数据，原文归档保留。')
+                                if getattr(history, 'require_complete', False) or native_tools.current_response() is not None:
+                                    raise AttachmentContextError('模型响应流包含损坏的数据，原文归档保留。')
                                 logger.debug(f"OpenAI compatible SSE parse failed: {payload[:200]}")
                                 continue
                             if data.get("error"):
@@ -1024,7 +1044,7 @@ class ModelClient:
                     break
 
             ModelClient._check_compression_stream_end(history, finished)
-            if not yielded_any_text:
+            if not yielded_any_text and not native_tools.has_calls():
                 if last_response is not None:
                     error = ModelClient._provider_response_error(last_response)
                     ModelClient._raise_conversation_request_error(history, error)
@@ -1171,7 +1191,7 @@ class ModelClient:
                     f"candidates={len(candidates)}, max_tokens_param={max_tokens}"
                 )
 
-                if text:
+                if text or native_tools.has_calls():
                     write_model_trace("model_response", {
                         "trace_id": trace_id,
                         "provider_format": "gemini",
@@ -1294,7 +1314,7 @@ class ModelClient:
                     f"max_tokens_param={max_tokens}"
                 )
 
-                if text:
+                if text or native_tools.has_calls():
                     write_model_trace("model_response", {
                         "trace_id": trace_id,
                         "provider_format": "claude",
@@ -1538,6 +1558,7 @@ class ModelClient:
                 api_format, model, base_url, prov_name
             )
             ModelClient._merge_thinking_params(request_kwargs, thinking_params)
+            ModelClient._validate_conversation_request(request_kwargs, history)
             ModelClient._validate_conversation_request(
                 {**request_kwargs, "stream_options": {"include_usage": True}}, history,
             )
@@ -1551,6 +1572,7 @@ class ModelClient:
                 "stream_options": {"include_usage": True},
             })
             try:
+                await ModelClient._before_request(history)
                 stream = await ModelClient._chat_completions_api(client).create(
                     **request_kwargs,
                     stream_options={"include_usage": True}
@@ -1592,7 +1614,7 @@ class ModelClient:
                         elif (_value_from_obj(chunk.choices[0].delta, 'reasoning_content') or _value_from_obj(chunk.choices[0].delta, 'reasoning_details')):
                             yield ''
             ModelClient._check_compression_stream_end(history, finished)
-            if not yielded_any_text:
+            if not yielded_any_text and not native_tools.has_calls():
                 error = ModelClient._provider_response_error(last_response) if last_response is not None else '模型未返回有效内容。'
                 ModelClient._raise_conversation_request_error(history, error)
                 yield error
@@ -1716,8 +1738,8 @@ class ModelClient:
                         try:
                             data = json.loads(payload)
                         except json.JSONDecodeError:
-                            if getattr(history, 'require_complete', False):
-                                raise AttachmentContextError('压缩恢复流包含损坏的数据，原文归档保留。')
+                            if getattr(history, 'require_complete', False) or native_tools.current_response() is not None:
+                                raise AttachmentContextError('模型响应流包含损坏的数据，原文归档保留。')
                             logger.debug(f"Gemini SSE parse failed: {payload[:200]}")
                             continue
 
@@ -1725,6 +1747,7 @@ class ModelClient:
                             ModelClient._raise_conversation_request_error(history, data["error"])
                         if data.get('candidates') or data.get('promptFeedback'):
                             last_response = data
+                        native_tools.observe(data, 'gemini', stream=True)
                         thought_event = observe_thinking(data, 'gemini')
                         if thought_event:
                             yield ''
@@ -1751,7 +1774,7 @@ class ModelClient:
                                     if isinstance(part, dict) and ModelClient._media_part_to_data_url(part):
                                         text = f"\n{text}\n"
                                     yield text
-                            if not yielded_any_text:
+                            if not yielded_any_text and not native_tools.has_calls():
                                 finish_reason = candidates[0].get('finishReason')
                                 part_shapes = [sorted(part.keys()) for part in parts if isinstance(part, dict)]
                                 logger.warning(
@@ -1763,7 +1786,7 @@ class ModelClient:
                 break
             ModelClient._check_compression_stream_end(history, finished)
             from xgent_app.media_response import current_media
-            if not text_event_count and not (current_media.get() and current_media.get().parts):
+            if not text_event_count and not native_tools.has_calls() and not (current_media.get() and current_media.get().parts):
                 error = ModelClient._provider_response_error(last_response) if last_response is not None else 'Gemini 未返回有效内容。'
                 ModelClient._raise_conversation_request_error(history, error)
                 yield error
@@ -1883,8 +1906,8 @@ class ModelClient:
                         try:
                             data = json.loads(payload)
                         except json.JSONDecodeError:
-                            if getattr(history, 'require_complete', False):
-                                raise AttachmentContextError('压缩恢复流包含损坏的数据，原文归档保留。')
+                            if getattr(history, 'require_complete', False) or native_tools.current_response() is not None:
+                                raise AttachmentContextError('模型响应流包含损坏的数据，原文归档保留。')
                             logger.debug(f"Claude SSE parse failed: {payload[:200]}")
                             continue
 
@@ -1892,6 +1915,7 @@ class ModelClient:
                             ModelClient._raise_conversation_request_error(history, data["error"])
                         if data.get('message') or data.get('delta', {}).get('stop_reason'):
                             last_response = data
+                        native_tools.observe(data, 'claude', stream=True)
                         if observe_thinking(data, 'claude'):
                             yield ''
                         if data.get('type') == 'message_start':
@@ -1919,7 +1943,7 @@ class ModelClient:
                 # 流正常跑完，不要进入第二轮重试。
                 break
             ModelClient._check_compression_stream_end(history, finished)
-            if not yielded_any_text:
+            if not yielded_any_text and not native_tools.has_calls():
                 error = ModelClient._provider_response_error(last_response) if last_response is not None else 'Claude 未返回有效内容。'
                 ModelClient._raise_conversation_request_error(history, error)
                 yield error
@@ -2027,7 +2051,7 @@ class ModelClient:
 
             choice = completion.choices[0]
             content = ModelClient._openai_sdk_message_text(choice.message)
-            if not content:
+            if not content and not native_tools.has_calls():
                 error = ModelClient._provider_response_error(completion.model_dump())
                 ModelClient._raise_conversation_request_error(history, error)
                 return None, error

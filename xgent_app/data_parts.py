@@ -373,3 +373,5 @@ def apply_database(conn, files):
         conn.execute("DELETE FROM config WHERE key='message_policy_import_pending'")
         conn.execute("INSERT INTO config(key,value) VALUES(?,?)",
                      ('message_policy_import_pending', json.dumps(uuid.uuid4().hex)))
+    if 'app_settings' in headers and headers['app_settings']['config']:
+        conn.execute('INSERT OR IGNORE INTO config(key,value) VALUES(?,?)', ('agent_call_mode', json.dumps('fence')))

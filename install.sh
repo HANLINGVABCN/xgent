@@ -51,9 +51,9 @@ SKIP_CONFIRM=0
 VENV_CREATED=0
 # 完整更新（update）时置 1：忽略依赖快照，强制升级 pip 与全部依赖。
 FORCE_DEPS_UPGRADE=0
-# 更新代码用的 GitHub 仓库信息（强制写死正式公开仓库）
-UPDATE_REPO_URL="https://github.com/HANLINGVABCN/xgent-telegram"
-UPDATE_BRANCH="main"
+# 默认更新私人仓库；明确配置的源仍可覆盖。
+UPDATE_REPO_URL="${UPDATE_REPO_URL:-https://github.com/HANLINGVABCN/xgent}"
+UPDATE_BRANCH="${UPDATE_BRANCH:-main}"
 
 # ensure_python 挑出来的解释器绝对路径。空串代表还没挑过。
 PYTHON_BIN=""
@@ -2125,7 +2125,15 @@ update_via_download() {
     # 下载
     info "[更新] 正在从 GitHub 下载最新代码..."
     echo "   $zip_url"
-    if command_exists curl; then
+    if [ -f "$SCRIPT_DIR/xgent_app/repository_archive.py" ]; then
+        local archive_python
+        if [ -x "$VENV_PYTHON" ]; then archive_python="$VENV_PYTHON"; else archive_python="${XGENT_PYTHON:-python3}"; fi
+        if ! "$archive_python" "$SCRIPT_DIR/xgent_app/repository_archive.py" "$ENV_FILE" "$UPDATE_REPO_URL" "$UPDATE_BRANCH" "$tmp_zip"; then
+            error "[错误] 更新包未下载；私人仓库需配置 GitHub 访问权限。"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+    elif command_exists curl; then
         if ! curl -fSL "$zip_url" -o "$tmp_zip" 2>&1; then
             error "[错误] 下载失败。请检查网络连接。"
             rm -rf "$tmp_dir"
@@ -3533,7 +3541,22 @@ import io,os,stat,sys,urllib.request,zipfile
 from pathlib import Path
 target=Path(sys.argv[1]);required=set(sys.argv[2:])
 try:
-    request=urllib.request.Request('https://github.com/HANLINGVABCN/xgent-telegram/archive/refs/heads/main.zip',headers={'User-Agent':'XGent-data-migration'})
+    import ast
+    options={}
+    envfile=Path('.env')
+    if envfile.is_file():
+        for line in envfile.read_text(encoding='utf-8').splitlines():
+            if '=' not in line or line.lstrip().startswith('#'):continue
+            key,value=line.strip().removeprefix('export ').split('=',1)
+            if key.strip() in {'UPDATE_GITHUB_TOKEN','GITHUB_TOKEN'}:
+                value=value.strip()
+                try:value=ast.literal_eval(value) if value[:1] in {'\"',"'"} else value
+                except (ValueError,SyntaxError):value=value.strip('\"\'')
+                options[key.strip()]=value
+    headers={'User-Agent':'XGent-data-migration','Accept':'application/vnd.github+json'}
+    token=os.environ.get('UPDATE_GITHUB_TOKEN') or os.environ.get('GITHUB_TOKEN') or options.get('UPDATE_GITHUB_TOKEN') or options.get('GITHUB_TOKEN')
+    if token:headers['Authorization']='Bearer '+token
+    request=urllib.request.Request('https://api.github.com/repos/HANLINGVABCN/xgent/zipball/main',headers=headers)
     with urllib.request.urlopen(request,timeout=60) as response:
         raw=response.read(32*1024*1024+1)
     if len(raw)>32*1024*1024:raise ValueError('代码包大小异常')

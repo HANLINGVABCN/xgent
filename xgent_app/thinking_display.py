@@ -148,14 +148,14 @@ def observe(data, provider='openai'):
                 for detail in part['reasoning_details']:
                     if isinstance(detail, dict) and detail.get('type') in {'reasoning.text', 'reasoning.summary'}:
                         sink.append(detail.get('text') or detail.get('summary'))
-            answer = bool(part.get('content'))
+            answer = bool(part.get('content') or part.get('tool_calls'))
     elif provider == 'gemini':
         for candidate in (data.get('candidates') or [])[:1]:
             for part in candidate.get('content', {}).get('parts', []):
                 if part.get('thought') is True:
                     sink.append(part.get('text'))
                 else:
-                    answer = answer or bool(part.get('text'))
+                    answer = answer or bool(part.get('text') or part.get('functionCall'))
     elif provider == 'claude':
         for part in data.get('content') or []:
             if part.get('type') == 'thinking':
@@ -168,6 +168,8 @@ def observe(data, provider='openai'):
         elif delta.get('type') == 'text_delta':
             answer = True
         if data.get('type') == 'content_block_stop':
+            sink.finish()
+        if data.get('type') == 'content_block_start' and (data.get('content_block') or {}).get('type') == 'tool_use':
             sink.finish()
     if answer:
         sink.finish()

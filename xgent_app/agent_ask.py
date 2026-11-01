@@ -272,6 +272,7 @@ class PendingAsk:
     status: str = 'pending'
     lock: Any = field(default_factory=asyncio.Lock, repr=False)
     input_notices: Dict[str, Any] = field(default_factory=dict, repr=False)
+    native_session: Any = field(default=None, repr=False)
 
     def ensure_entry(self, qid: str) -> Dict[str, Any]:
         return self.draft.setdefault(qid, {})

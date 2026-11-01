@@ -24,7 +24,8 @@ async def write_text_protocol_file(
     block: Mapping[str, Any], *, executor: Any
 ) -> WrittenFile:
     """Execute the existing UTF-8 ``file`` protocol write."""
-    result = await executor.write_file(block["path"], block["body"])
+    result = await executor.write_file(block["path"], block["body"],
+        **({'native_content': True} if block.get('native_call_id') else {}))
     saved_path = result["path"]
     return {
         "path": saved_path,

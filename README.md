@@ -1,4 +1,6 @@
-# XGent for Telegram
+# XGent 私人版
+
+支持 **Tool call／正则围栏** 两种工具调用方式。Web 输入框设置、Agent 设置页、Bot 和 CLI 原生菜单共用全局开关；正在运行及等待表单的回合固定原模式，新实例默认 Tool call，旧数据首次升级保留正则围栏。原有工具、消息折叠、表单、思考、媒体、队列及历史继续使用同一套服务。实现范围和验证说明见 [双模式说明](docs/tool-call-mode.md)。
 
 Web 对话菜单增加“导出”，直接下载所点对话的完整记忆 ZIP，包含压缩记录和已清空上下文前保留的历史，与 Bot `/export` 使用同一格式，聊天里不新增消息。侧栏默认显示“默认分组”，下拉第二项为“全部对话”，集中显示各组置顶；“移动到”改为桌面悬停、手机点击的分组子菜单，移除侧栏“重置上下文”按钮。
 
@@ -27,8 +29,8 @@ Web 新增默认收起的思考块：两种流式展示最新行，结束后只�
 </p>
 
 <p align="center">
-  <a href="https://github.com/HANLINGVABCN/xgent-telegram/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/HANLINGVABCN/xgent-telegram/actions/workflows/tests.yml/badge.svg"></a>
-  <a href="https://github.com/HANLINGVABCN/xgent-telegram/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
+  <a href="https://github.com/HANLINGVABCN/xgent/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/HANLINGVABCN/xgent/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="https://github.com/HANLINGVABCN/xgent/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
   <img alt="Self-hosted" src="https://img.shields.io/badge/Self--hosted-private-24A1DE?logo=telegram&logoColor=white">
 </p>
@@ -37,10 +39,9 @@ Web 新增默认收起的思考块：两种流式展示最新行，结束后只�
 > **本项目不提供任何沙箱、容器或强制安全隔离。** 除命令黑名单外，Agent 模式的执行行为没有任何拦截机制：模型生成的命令将以运行账号的完整权限直接作用于服务器，可访问的文件、可执行的操作均由该账号的权限边界决定。命令黑名单仅为字符串匹配，可被规避，不应视为安全边界。部署前请务必阅读[安全说明](#安全说明)，并使用独立的低权限账号运行。
 
 > [!NOTE]
-> **本仓库（`xgent-telegram-test`）是发布仓库 `xgent-telegram` 的测试副本。**
-> 下面的徽章、克隆命令和默认更新源都指向发布仓库，这是有意为之。
-> `/update` 会先弹菜单让你选更新源（正常更新 = 发布仓库，测试更新 = 本仓库），
-> 不会自动跨仓覆盖。在本仓库做的改动需要同步到发布仓库才会进入正式发布。
+> 本仓库 `HANLINGVABCN/xgent` 为私人项目，从已验证的 XGent 基线保留历史与许可证。
+> 安装前需使用有权限的 GitHub 账号认证；在线更新默认读取本私仓，GitHub Token 只用于仓库访问。
+> 原发布仓库和测试仓库不会收到本次双模式改动。
 
 ## 本次改进：统一单行预览与紧凑回复尾注
 
@@ -190,10 +191,10 @@ XGent 由三个可以自由组合的组件构成，`install.sh` 装完环境后�
 
 ### 一键命令
 
-以下命令会将项目安装到 `/opt/xgent-telegram`；可将 `/opt` 换成其他目录。
+以下命令会在当前目录克隆私人项目；先安装 GitHub CLI，并用有仓库权限的账号登录。也可使用已配置认证的普通 `git clone`。
 
 ```bash
-cd /opt && sudo git clone https://github.com/HANLINGVABCN/xgent-telegram.git && sudo chown -R "$USER":"$USER" xgent-telegram && cd xgent-telegram && chmod +x install.sh && ./install.sh
+gh auth login && gh repo clone HANLINGVABCN/xgent && cd xgent && chmod +x install.sh && ./install.sh
 ```
 
 安装脚本会先让你选**保活方式**（系统级 systemd / PM2 / nohup / 前台，只在首次安装时问一次），
@@ -223,9 +224,9 @@ cd /opt && sudo git clone https://github.com/HANLINGVABCN/xgent-telegram.git && 
 
 ```bash
 cd /opt
-sudo git clone https://github.com/HANLINGVABCN/xgent-telegram.git
-sudo chown -R "$USER":"$USER" xgent-telegram
-cd xgent-telegram
+gh auth login
+gh repo clone HANLINGVABCN/xgent
+cd xgent
 chmod +x install.sh
 ./install.sh
 ```
@@ -237,15 +238,15 @@ BOT_TOKEN=你的 Telegram Bot Token
 AUTHORIZED_USER_ID=你的 Telegram 用户 ID
 ```
 
-如果仓库以后改为私有，并希望继续使用 `/update`，可额外配置：
+私人仓库的 `/update` 和安装脚本在线更新需要配置：
 
 ```env
 # Fine-grained token 只需要该仓库 Contents: Read-only。
 UPDATE_GITHUB_TOKEN=你的 GitHub Token
-UPDATE_ZIP_URL=https://api.github.com/repos/HANLINGVABCN/xgent-telegram/zipball/main
+UPDATE_ZIP_URL=https://api.github.com/repos/HANLINGVABCN/xgent/zipball/main
 ```
 
-`UPDATE_ZIP_URL` 可省略，默认使用上面的公开仓库地址。私有仓库没有配置 Token 时，GitHub 会返回 404/403，在线更新将失败。
+`UPDATE_ZIP_URL` 可省略，默认使用上面的私人仓库地址。私有仓库没有配置 Token 时，GitHub 会返回 404/403，在线更新将失败。
 
 ## 第一次使用
 

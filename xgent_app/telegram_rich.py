@@ -337,8 +337,8 @@ def split_blocks(blocks, *, budget=TEXT_BUDGET, block_budget=BLOCK_BUDGET):
     return chunks or [' ']
 
 
-def render_rich(text, *, generating=False, details=None):
-    blocks = rich_blocks(text, generating=generating)
+def render_rich(text, *, generating=False, details=None, native_prose=False):
+    blocks = [piece for block in markdown_blocks(str(text)) for piece in _tables(block)] if native_prose else rich_blocks(text, generating=generating)
     if details:
         blocks.append(html_block(details))
     return split_blocks(blocks)

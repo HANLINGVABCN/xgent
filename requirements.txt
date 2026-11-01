@@ -5,6 +5,7 @@
 python-telegram-bot[job-queue]>=22.8,<23.0
 # Telegram Rich HTML is rendered from Markdown tokens, never by splitting pipes.
 markdown-it-py>=4.2,<5.0
+jsonschema>=4.23,<5.0
 mdit-py-plugins>=0.6,<0.7
 openai>=1.0.0,<3.0
 python-dotenv>=1.0.0,<2.0

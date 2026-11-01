@@ -935,7 +935,7 @@ class AgentExecutor:
         return cls._map_conversation_path(cleaned)
 
     @classmethod
-    async def write_file(cls, requested_path: str, content: str) -> Dict[str, Any]:
+    async def write_file(cls, requested_path: str, content: str, *, native_content=False) -> Dict[str, Any]:
         """将文件真实写入服务器。"""
         target_path = cls.resolve_write_path(requested_path)
         existed = os.path.exists(target_path)
@@ -945,7 +945,7 @@ class AgentExecutor:
             parent = os.path.dirname(target_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            with open(target_path, 'w', encoding='utf-8') as f:
+            with open(target_path, 'w', encoding='utf-8', newline='' if native_content else None) as f:
                 f.write(content)
 
         loop = asyncio.get_running_loop()
@@ -957,7 +957,7 @@ class AgentExecutor:
         }
 
     @classmethod
-    async def edit_file(cls, edit_body: str, explicit_path: str = "") -> Dict[str, Any]:
+    async def edit_file(cls, edit_body: str, explicit_path: str = "", *, native_edit=None) -> Dict[str, Any]:
         """字符串级原地替换：把文件中唯一存在的 old_str 换成 new_str。
 
         body 格式（<<OLD / <<NEW 哨兵各自顶格独占一行，内容区原样、可多行）：
@@ -972,7 +972,11 @@ class AgentExecutor:
         随机后缀即可彻底隔离：<<OLD_k9f2 … <<NEW_k9f2（OLD 与 NEW 后缀须一致）。
         返回 dict 含 success/path/backed_up/matches/line_range 等。
         """
-        old_str, new_str, requested_path, parse_err = cls._parse_edit_body(edit_body, explicit_path)
+        if native_edit is not None:
+            old_str, new_str = native_edit
+            requested_path, parse_err = explicit_path, ''
+        else:
+            old_str, new_str, requested_path, parse_err = cls._parse_edit_body(edit_body, explicit_path)
         if parse_err:
             return {'success': False, 'error': parse_err, 'output': parse_err}
 
@@ -1006,7 +1010,7 @@ class AgentExecutor:
                 return {'success': False, 'error': msg, 'output': msg}
 
         def _read() -> str:
-            with open(target_path, 'r', encoding='utf-8') as f:
+            with open(target_path, 'r', encoding='utf-8', newline='' if native_edit is not None else None) as f:
                 return f.read()
 
         loop = asyncio.get_running_loop()
@@ -1058,7 +1062,7 @@ class AgentExecutor:
                 shutil.copy2(target_path, backup_path)
             except Exception:
                 backup_path = ''
-            with open(target_path, 'w', encoding='utf-8') as f:
+            with open(target_path, 'w', encoding='utf-8', newline='' if native_edit is not None else None) as f:
                 f.write(new_content)
             return backup_path
 
