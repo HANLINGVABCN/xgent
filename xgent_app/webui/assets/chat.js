@@ -3335,13 +3335,30 @@ import {syncAskForm} from './ask-form.js';
     resync().catch(function(){});
     connectStream();
   }
-  function tryLogin(payload) { return api("/api/login", { method: "POST", body: JSON.stringify(payload) }); }
+  var loginChallenge = null;
+  function resetLoginFactor() {
+    loginChallenge = null;document.getElementById('login-code').value='';document.getElementById('login-code').hidden=true;
+    document.getElementById('password').value='';document.getElementById('password').hidden=false;document.getElementById('login-back').hidden=true;
+    document.getElementById('btn-login').textContent='登 录';loginSub.textContent='请输入访问密码以继续使用 XGent Web';
+  }
+  function tryLogin(payload) {
+    return api('/api/login', {method:'POST',body:JSON.stringify(payload)}).then(function(data){
+      if(data.requires_2fa){
+        loginChallenge=data.challenge_id;document.getElementById('password').value='';document.getElementById('password').hidden=true;
+        document.getElementById('login-code').hidden=false;document.getElementById('login-back').hidden=false;
+        document.getElementById('btn-login').textContent='验证并登录';loginSub.textContent='请输入验证器动态验证码，或使用一次性恢复码';
+        if(!loginDlg.open)loginDlg.showModal();document.getElementById('login-code').focus();return false;
+      }
+      resetLoginFactor();boot();return true;
+    });
+  }
+  document.getElementById('login-back').onclick=resetLoginFactor;
 
   api("/api/session").then(function (data) {
     if (data.authenticated) { boot(); return; }
     var initData = tg && tg.initData ? tg.initData : "";
     if (initData) {
-      return tryLogin({ init_data: initData }).then(boot).catch(function () {
+      return tryLogin({ init_data: initData }).catch(function () {
         loginErr.textContent = "Telegram 免密登录失败，请输入访问密码";
         loginDlg.showModal();
       });
@@ -3352,12 +3369,14 @@ import {syncAskForm} from './ask-form.js';
 
   document.getElementById("btn-login").addEventListener("click", function () {
     loginErr.textContent = "";
-    tryLogin({ password: document.getElementById("password").value })
-      .then(boot).catch(function (err) { loginErr.textContent = err.message; });
+    var payload=loginChallenge?{challenge_id:loginChallenge,code:document.getElementById('login-code').value}:{password:document.getElementById('password').value};
+    var button=document.getElementById('btn-login');button.disabled=true;
+    tryLogin(payload).catch(function(err){loginErr.textContent=err.message;if(err.status===410)resetLoginFactor();}).finally(function(){button.disabled=false;});
   });
   document.getElementById("password").addEventListener("keydown", function (e) {
     if (e.key === "Enter") document.getElementById("btn-login").click();
   });
+  document.getElementById('login-code').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('btn-login').click();});
 
   btnSend.addEventListener("click", send);
   bindContentClicks(log);

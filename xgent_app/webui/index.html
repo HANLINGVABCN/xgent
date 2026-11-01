@@ -234,6 +234,8 @@
     <p class="login-sub" id="login-sub">请输入访问密码以继续</p>
     <div class="err" id="login-err"></div>
     <input type="password" id="password" placeholder="访问密码" autocomplete="current-password">
+    <input type="text" id="login-code" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
+    <button type="button" id="login-back" class="login-sub" hidden>返回密码登录</button>
     <button class="btn-primary" id="btn-login">登 录</button>
   </div>
   <div class="login-foot" id="login-foot">在 Telegram 中通过菜单按钮打开可免密直接登录</div>

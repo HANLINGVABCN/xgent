@@ -131,13 +131,17 @@ async def serve(port, count, conversation_count=0, workbench_demo=False, version
                 demo['current_version']=saved['current']
     service=Workbench(ns)
     async def history(limit):return (await service.handle('GET','history',{'limit':limit}))['messages']
-    config=WebChatConfig(host='127.0.0.1',port=port,password_hash=hash_password('preview-only'),bot_token='',authorized_user_id=1,
+    password_hash=hash_password('preview-only')
+    await db.set_config('web_password_hash',password_hash)
+    from xgent_app.web_two_factor import WebTwoFactor
+    config=WebChatConfig(host='127.0.0.1',port=port,password_hash=password_hash,bot_token='',authorized_user_id=1,
         loop=asyncio.get_running_loop(),submit_message=lambda *args,**kwargs:None,read_history=history,
         read_history_message=ns['_web_read_history_message'],read_conversations=ns['get_conversations']().state,
         submit_callback=ns['_web_submit_callback'],submit_ui_callback=ns['_web_submit_ui_callback'],submit_command=ns['_web_submit_command'],
         read_settings=ns['_web_read_settings'],write_setting=ns['_web_write_setting'],request_stop=lambda:None,is_busy=lambda:False,
         read_health=lambda:{'components':{'web':{'state':'up'},'telegram':{'state':'degraded','error':'演示：连接重试中'},'triggers':{'state':'up'}}},
-        media_allowed_roots=[ns['ArtifactManager'].ROOT_DIR],is_terminal_enabled=lambda:True,workbench=service.handle)
+        media_allowed_roots=[ns['ArtifactManager'].ROOT_DIR],is_terminal_enabled=lambda:True,workbench=service.handle,
+        security_api=WebTwoFactor(lambda: ns['BotMemoryDB'].get_instance()).handle)
     server=WebChatServer(config);server.start()
     ns['_web_chat_server']=server
     ns['get_conversations']().start()

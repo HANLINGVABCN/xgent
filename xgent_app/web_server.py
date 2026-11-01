@@ -20,6 +20,7 @@ import base64
 import contextlib
 import http.server
 import hashlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -37,6 +38,7 @@ from xgent_app import web_auth
 from xgent_app import web_terminal
 from xgent_app.output_archive import OutputArchiveError, read_output_page
 from xgent_app.workbench import WorkbenchError
+from xgent_app.web_two_factor import TwoFactorError
 from xgent_app.web_bridge import MEDIA_TOKEN_REGISTRY, WebOutbox, build_web_conversation_objects
 from xgent_app.file_transfers import FileTransfers, TransferError
 
@@ -135,8 +137,10 @@ class WebChatConfig:
         submit_file_batch: Optional[Callable[..., Any]] = None,
         upload_directory: Optional[str] = None,
         file_transfer_directory: Optional[str] = None,
+        security_api: Optional[Callable[..., Any]] = None,
     ):
         self.accept_text = accept_text
+        self.security_api = security_api
         self.queue_api = queue_api
         self.workbench = workbench
         self.host = host
@@ -273,7 +277,51 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return False
         cookies = web_auth.parse_cookie_header(self.headers.get("Cookie", ""))
         value = cookies.get(web_auth.SESSION_COOKIE_NAME, "")
-        return web_auth.verify_session_cookie(self.server.session_key, value)  # type: ignore[attr-defined]
+        if not value:
+            return False
+        try:
+            key = self._session_signing_key() if getattr(getattr(self, 'config', None), 'security_api', None) is not None else self.server.session_key
+            return web_auth.verify_session_cookie(key, value)
+        except TwoFactorError:
+            return False
+
+    def _security(self, method, action, data, owner=''):
+        if self.config.security_api is None:
+            if method == 'GET':
+                return {'enabled': False, 'auth_version': '', 'recovery_remaining': 0}
+            raise TwoFactorError('当前服务未接入两步验证', 503)
+        return self._run_coro(self.config.security_api(method, action, data, owner))
+
+    def _session_signing_key(self, expected=None):
+        version = self._security('GET', 'policy', {})['auth_version']
+        if expected is not None and version != expected:
+            raise TwoFactorError('安全设置已更新，请重新登录', 409)
+        key = self.server.session_key
+        return hmac.new(key, ('web-2fa:' + version).encode(), hashlib.sha256).digest() if version else key
+
+    def _login_cookie(self, expected=None):
+        return web_auth.build_set_cookie(web_auth.make_session_cookie_value(self._session_signing_key(expected)),
+                                         secure=web_auth.is_https_request(self._headers_dict()))
+
+    def _handle_security(self, method, action='status'):
+        if not self._require_auth():
+            return
+        if method == 'POST' and action not in {'setup', 'confirm', 'disable', 'recovery'}:
+            self._send_json({'error': '未知安全操作'}, status=404)
+            return
+        data = self._read_json() if method == 'POST' else {}
+        if data is None:
+            return
+        cookie = web_auth.parse_cookie_header(self.headers.get('Cookie', '')).get(web_auth.SESSION_COOKIE_NAME, '')
+        owner = hashlib.sha256(cookie.encode()).hexdigest()
+        try:
+            result = self._security(method, action, data, owner)
+            headers = {'Cache-Control': 'private, no-store'}
+            if method == 'POST' and action in {'confirm', 'disable', 'recovery'}:
+                headers['Set-Cookie'] = self._login_cookie(result.pop('_auth_version', None))
+            self._send_json(result, extra_headers=headers)
+        except TwoFactorError as exc:
+            self._send_json({'error': str(exc)}, status=exc.status, extra_headers={'Cache-Control': 'private, no-store'})
 
     def _require_auth(self) -> bool:
         if self._is_authenticated():
@@ -323,7 +371,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             elif path.startswith("/api/media/"):
                 self._handle_media_download(path[len("/api/media/"):])
             elif path == "/api/session":
-                self._send_json({"authenticated": self._is_authenticated()})
+                self._send_json({"authenticated": self._is_authenticated()}, extra_headers={'Cache-Control': 'private, no-store'})
+            elif path == '/api/security/2fa':
+                self._handle_security('GET')
             elif path == '/api/queue':
                 self._handle_queue('list')
             elif path == '/api/queue/status':
@@ -369,6 +419,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     self._handle_workbench("POST", path[len("/api/workbench/"):])
             elif path == "/api/login":
                 self._handle_login()
+            elif path.startswith('/api/security/2fa/'):
+                self._handle_security('POST', path[len('/api/security/2fa/'):])
             elif path == "/api/logout":
                 self._handle_logout()
             elif path == "/api/chat":
@@ -417,7 +469,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # --- 处理器 ---
 
     def _serve_workbench_asset(self, path: str) -> None:
-        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
@@ -583,6 +635,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
 
         authenticated = False
+        telegram_authenticated = False
+        if data.get('challenge_id'):
+            try:
+                result = self._security('POST', 'login_finish', data, ip)
+                cookie = self._login_cookie(result.pop('_auth_version', None))
+            except TwoFactorError as exc:
+                limiter.record_failure(ip)
+                self._send_json({'error': str(exc)}, status=exc.status, extra_headers={'Cache-Control': 'private, no-store'})
+                return
+            limiter.record_success(ip)
+            self._send_json({'ok': True}, extra_headers={'Set-Cookie': cookie, 'Cache-Control': 'private, no-store'})
+            return
 
         # 路径一：Telegram WebApp 免密登录。initData 由 Telegram 用 bot token
         # 签名，校验通过再比对 user.id 等价于 check_authorized_user_middleware。
@@ -592,6 +656,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             user_id = web_auth.init_data_user_id(parsed)
             if user_id is not None and user_id == self.config.authorized_user_id:
                 authenticated = True
+                telegram_authenticated = True
             else:
                 logger.warning("web 登录：initData 校验失败或用户不匹配 (ip=%s)", ip)
 
@@ -606,11 +671,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "认证失败"}, status=401)
             return
 
+        # Signed Telegram identity is the explicitly trusted exemption. A
+        # password or a caller-supplied flag alone cannot use this path.
+        try:
+            expected = None
+            if not telegram_authenticated and self.config.security_api is not None:
+                result = self._security('POST', 'login_start', {'password_hash': self.config.password_hash}, ip)
+                if result.get('requires_2fa'):
+                    self._send_json(result, extra_headers={'Cache-Control': 'private, no-store'})
+                    return
+                expected = result.get('_auth_version')
+            cookie = self._login_cookie(expected)
+        except TwoFactorError as exc:
+            self._send_json({'error': str(exc)}, status=exc.status)
+            return
+
         limiter.record_success(ip)
-        cookie = web_auth.build_set_cookie(
-            web_auth.make_session_cookie_value(self.server.session_key),  # type: ignore[attr-defined]
-            secure=web_auth.is_https_request(self._headers_dict()),
-        )
         self._send_json({"ok": True}, extra_headers={"Set-Cookie": cookie})
 
     def _handle_logout(self) -> None:

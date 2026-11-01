@@ -15,7 +15,7 @@ function api(path, opts) {
   opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
   return fetch(path, Object.assign({ credentials: 'same-origin' }, opts)).then(function (r) {
     if (!r.ok) {
-      return r.json().then(function (j) { throw new Error(j.error || ('HTTP ' + r.status)); });
+      return r.json().then(function (j) { var error=new Error(j.error || ('HTTP ' + r.status));error.status=r.status;throw error; });
     }
     return r.json();
   });
@@ -156,13 +156,19 @@ function setConnState(state) {
   updateStatus();
 }
 
+var terminalChallenge=null;
+function acceptLogin(data){
+  if(data.requires_2fa){terminalChallenge=data.challenge_id;$('pw').value='';$('pw').hidden=true;$('otp').hidden=false;$('loginBack').hidden=false;$('loginBtn').textContent='验证并登录';showLogin();$('otp').focus();return false;}
+  terminalChallenge=null;$('otp').value='';$('otp').hidden=true;$('pw').hidden=false;$('loginBack').hidden=true;$('loginBtn').textContent='登录终端';return true;
+}
+$('loginBack').onclick=function(){acceptLogin({});$('pw').focus();};
 function login() {
   return api('/api/session').then(function (d) {
     if (d.authenticated) return true;
     var initData = tg && tg.initData ? tg.initData : '';
     if (initData) {
       return api('/api/login', { method: 'POST', body: JSON.stringify({ init_data: initData }) })
-        .then(function () { return true; });
+        .then(acceptLogin);
     }
     return false;
   });
@@ -179,13 +185,14 @@ function startLogin() {
 }
 
 $('loginBtn').onclick = function () {
-  var pw = $('pw').value;
-  if (!pw) { $('err').textContent = '请输入密码'; return; }
-  api('/api/login', { method: 'POST', body: JSON.stringify({ password: pw }) }).then(function () {
-    hideLogin(); initTerm();
-  }).catch(function (e) { $('err').textContent = e.message || '登录失败'; });
+  var pw=$('pw').value,payload=terminalChallenge?{challenge_id:terminalChallenge,code:$('otp').value}:{password:pw};
+  if(!terminalChallenge&&!pw){$('err').textContent='请输入密码';return;}
+  $('loginBtn').disabled=true;$('err').textContent='';
+  api('/api/login',{method:'POST',body:JSON.stringify(payload)}).then(function(data){if(acceptLogin(data)){hideLogin();initTerm();}})
+    .catch(function(e){$('err').textContent=e.message||'登录失败';if(e.status===410)acceptLogin({});}).finally(function(){$('loginBtn').disabled=false;});
 };
 $('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('loginBtn').click(); });
+$('otp').addEventListener('keydown',function(e){if(e.key==='Enter')$('loginBtn').click();});
 
 var outputCursor = 0;
 var inputChain = Promise.resolve();

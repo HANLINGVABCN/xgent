@@ -222,6 +222,10 @@ async def _dispatch(command: str, args: list) -> int:
             await _get_web_state(ns)
         elif command == "set-password":
             await _set_password(ns)
+        elif command == 'reset-web-2fa':
+            from xgent_app.web_two_factor import WebTwoFactor
+            await WebTwoFactor(lambda: ns['BotMemoryDB'].get_instance()).reset_local()
+            print('ok')
         elif command == "get-port":
             await _get_port(ns)
         elif command == "set-port":
@@ -251,7 +255,7 @@ def main(argv: list) -> int:
             "用法: xgent_config.py "
             "{get-web-state|set-password|get-port|set-port <值>|set-web-enabled 0|1"
             "|set-terminal-enabled 0|1|probe-port <端口>"
-            "|outbox-stats|outbox-purge all|<小时>|deadletter [list|clear]}",
+            "|reset-web-2fa|outbox-stats|outbox-purge all|<小时>|deadletter [list|clear]}",
             file=sys.stderr,
         )
         return 2

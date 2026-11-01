@@ -46,6 +46,28 @@ def test_prompt_changed_during_default_upgrade_is_not_overwritten(tmp_path, monk
     assert not list(tmp_path.glob('.prompt-upgrade-*'))
 
 
+def test_detailed_native_default_is_upgraded_but_user_rules_are_kept(tmp_path):
+    path = tmp_path / 'toolcall_addon.txt'
+    original = (FIXTURES / 'toolcall_detailed.txt').read_bytes()
+    path.write_bytes(original)
+    assert migrate_shipped_prompt(path, 'agent_toolcall_addon')
+    assert path.read_text(encoding='utf-8') == DEFAULT_TOOLCALL_PROMPT
+    assert next(tmp_path.glob('*.bak')).read_bytes() == original
+    customized = original + '\nCUSTOM_RULE_TO_KEEP'.encode()
+    path.write_bytes(customized)
+    assert not migrate_shipped_prompt(path, 'agent_toolcall_addon')
+    assert path.read_bytes() == customized
+
+
+def test_slim_native_prompt_retains_execution_rules_without_tool_manual():
+    detailed = (FIXTURES / 'toolcall_detailed.txt').read_text(encoding='utf-8')
+    assert len(DEFAULT_TOOLCALL_PROMPT) < len(detailed) * .4
+    for required in ('用户授权范围', '先说明对象和影响并确认', '原始换行', '等待真实结果',
+                     '不盲目重复执行', '检查非空', '实际目标检查语法', '不自动加载 .bashrc', '不能为省调用跳过验证'):
+        assert required in DEFAULT_TOOLCALL_PROMPT
+    assert '【函数参数】' not in DEFAULT_TOOLCALL_PROMPT
+
+
 def test_mode_prompt_isolation_keeps_persona_memory_and_selected_custom_file(tmp_path):
     result = run_in_app('''import asyncio
 from unittest.mock import patch

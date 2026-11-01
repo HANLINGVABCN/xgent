@@ -1988,6 +1988,8 @@ async def start_web_chat_if_enabled(app: Optional[Any] = None, *,
     )
     from xgent_app.workbench import Workbench
     config.workbench = Workbench(globals()).handle
+    from xgent_app.web_two_factor import WebTwoFactor
+    config.security_api = WebTwoFactor(lambda: BotMemoryDB.get_instance()).handle
     server = WebChatServer(config)
     try:
         await asyncio.to_thread(server.start)

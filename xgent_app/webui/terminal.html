@@ -67,6 +67,8 @@
     <p class="sub">终端拥有系统级执行权限，仅授权用户可用。</p>
     <div id="err"></div>
     <input id="pw" type="password" placeholder="访问密码" autocomplete="current-password">
+    <input id="otp" type="text" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
+    <button type="button" id="loginBack" hidden>返回密码登录</button>
     <button class="btn-primary" id="loginBtn">登录终端</button>
     <div class="muted">在 Telegram 菜单中打开时可自动免密。</div>
   </div>
