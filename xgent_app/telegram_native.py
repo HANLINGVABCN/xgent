@@ -102,8 +102,12 @@ async def _stored_parts(bot, op, value=None):
     metadata = metadata_dict(row.get('metadata'))
     saved = metadata.get('telegram_native_parts') or {}
     if value is None:
-        return saved.get('ids') if saved.get('bot_id') == _bot_id(bot) and saved.get('owner_id') == op.logical_id else None
-    metadata['telegram_native_parts'] = {'bot_id': _bot_id(bot), 'owner_id': op.logical_id, 'ids': list(value)}
+        return saved.get('ids') if (saved.get('bot_id') == _bot_id(bot) and saved.get('owner_id') == op.logical_id
+            and saved.get('conversation_id') in {None, row['session_id']}
+            and saved.get('record_id') in {None, row['id']}
+            and (not row.get('source_record_id') or saved.get('record_id') == row['id'])) else None
+    metadata['telegram_native_parts'] = {'bot_id': _bot_id(bot), 'owner_id': op.logical_id, 'ids': list(value),
+                                        'conversation_id': row['session_id'], 'record_id': row['id']}
     await db.patch_display_metadata(record_id, {'telegram_native_parts': metadata['telegram_native_parts']})
     return value
 

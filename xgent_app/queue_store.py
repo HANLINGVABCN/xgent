@@ -281,8 +281,11 @@ class QueueStore:
                     from .telegram_records import source_bot_id
                     metadata['telegram_source_bot_id'] = scope.telegram_bot_id or source_bot_id()
                     parts = str(item.get('request_key') or '').split(':')
-                    if len(parts) == 3 and parts[0] == 'telegram' and parts[1].isdigit() and parts[2].isdigit():
-                        metadata['source_message_id'] = int(parts[2])
+                    if len(parts) == 3 and parts[0] == 'telegram' and parts[1].isdigit():
+                        source_ids = parts[2].split(',')
+                        if all(mid.isascii() and mid.isdigit() and int(mid) > 0 for mid in source_ids):
+                            metadata['source_message_ids'] = list(dict.fromkeys(int(mid) for mid in source_ids))
+                            metadata['source_message_id'] = metadata['source_message_ids'][0]
                 msg_type = 'user_text'
                 if index == 0 and draft is not None:
                     try:

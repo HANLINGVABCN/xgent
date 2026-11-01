@@ -1045,6 +1045,8 @@ class PendingTextConversation:
         self.update = update
         self.context = context
         self.parts: List[str] = [text]
+        mid = getattr(update.message, 'message_id', None)
+        self.source_message_ids = [mid] if type(mid) is int else []
         self.attachments: List[Dict[str, Any]] = []
         self.committing = False
         self.conversation_context = conversation_snapshot()
@@ -1056,6 +1058,9 @@ class PendingTextConversation:
         self.update = update
         self.context = context
         self.parts.append(text)
+        mid = getattr(update.message, 'message_id', None)
+        if type(mid) is int and mid not in self.source_message_ids:
+            self.source_message_ids.append(mid)
         self.last_at = time.monotonic()
 
     def total_chars(self) -> int:

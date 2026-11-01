@@ -1036,6 +1036,8 @@ class ConversationBranchService:
             row['_branch_metadata'] = await localize_branch_metadata(
                 row['_branch_metadata'], branch_id, self.uploads, self.objects,
             )
+            from .telegram_records import detach_delivery_metadata
+            row['_branch_metadata'] = detach_delivery_metadata(row['_branch_metadata'])
             row['_branch_content'] = row['content']
             for old_path, object_path in row['_branch_metadata'].pop('_branch_path_map', {}).items():
                 row['_branch_content'] = row['_branch_content'].replace(old_path, object_path)
@@ -1049,6 +1051,8 @@ class ConversationBranchService:
             draft_metadata = await localize_branch_metadata(
                 draft_metadata, branch_id, self.uploads, self.objects,
             )
+            from .telegram_records import detach_delivery_metadata
+            draft_metadata = detach_delivery_metadata(draft_metadata)
             draft_metadata.pop('_branch_path_map', None)
         async with self.db._transaction() as conn:
             name_cursor = await conn.execute('SELECT name FROM chat_sessions WHERE deleting=0 AND name IS NOT NULL')
@@ -1308,12 +1312,12 @@ class ConversationBranchService:
         if ids:
             placeholders = ','.join('?' for _ in ids)
             cursor = await conn.execute(
-                f'SELECT metadata,msg_type FROM global_messages WHERE session_id=? AND withdrawn=0 AND (id>=? OR turn_id IN ({placeholders}))',
+                f'SELECT id,metadata,msg_type,source_record_id,chat_id FROM global_messages WHERE session_id=? AND withdrawn=0 AND (id>=? OR turn_id IN ({placeholders}))',
                 (conversation_id, record_id, *ids),
             )
         else:
             cursor = await conn.execute(
-                'SELECT metadata,msg_type FROM global_messages WHERE session_id=? AND withdrawn=0 AND id>=?',
+                'SELECT id,metadata,msg_type,source_record_id,chat_id FROM global_messages WHERE session_id=? AND withdrawn=0 AND id>=?',
                 (conversation_id, record_id),
             )
         native_ids, logical_ids = set(), set()
@@ -1325,15 +1329,31 @@ class ConversationBranchService:
         missing_delivery = False
         for row in await cursor.fetchall():
             metadata = _metadata(row['metadata'])
+            deliveries = [metadata.get(key) for key in ('telegram_delivery', 'telegram_native_parts')]
+            # Older branches copied transport IDs with their history. Only an
+            # explicit delivery to this new record can authorize deleting them.
+            if row['source_record_id'] is not None and not any(
+                    isinstance(item, dict) and item.get('conversation_id') == conversation_id
+                    and item.get('record_id') == row['id'] for item in deliveries):
+                continue
             previous_targets = len(native_ids) + len(logical_ids)
             if type(metadata.get('source_message_id')) is int:
                 if expected_bot is None or metadata.get('telegram_source_bot_id') == expected_bot:
                     native_ids.add(metadata['source_message_id'])
                 else:
                     missing_delivery = True
+            if isinstance(metadata.get('source_message_ids'), list):
+                if expected_bot is None or metadata.get('telegram_source_bot_id') == expected_bot:
+                    native_ids.update(mid for mid in metadata['source_message_ids'] if type(mid) is int and mid > 0)
+                else:
+                    missing_delivery = True
             for key in ('telegram_delivery', 'telegram_native_parts'):
                 delivery = metadata.get(key) or {}
-                if isinstance(delivery, dict) and expected_bot is not None and delivery.get('bot_id') not in {None, expected_bot}:
+                if isinstance(delivery, dict) and (
+                        expected_bot is not None and delivery.get('bot_id') not in {None, expected_bot}
+                        or delivery.get('conversation_id') not in {None, conversation_id}
+                        or delivery.get('record_id') not in {None, row['id']}
+                        or delivery.get('chat_id') not in {None, row['chat_id']}):
                     invalid_delivery = True
                     continue
                 if isinstance(delivery, dict):
@@ -1361,6 +1381,10 @@ class ConversationBranchService:
                     and len(native_ids) + len(logical_ids) == previous_targets):
                 missing_delivery = True
         await cursor.close()
+        from .telegram_records import logical_message_belongs_to
+        kept_logical_ids = {mid for mid in logical_ids if logical_message_belongs_to(mid, conversation_id)}
+        invalid_delivery = invalid_delivery or kept_logical_ids != logical_ids
+        logical_ids = kept_logical_ids
         async with self.db._transaction() as conn:
             await conn.execute('UPDATE global_messages SET withdrawn=1 WHERE session_id=? AND id>=?',
                                (conversation_id, record_id))
@@ -1386,7 +1410,7 @@ class ConversationBranchService:
                     'restored_files': 0, 'conversation_id': conversation_id,
                     'draft': {'text': record['content']},
                     'warnings': preview['warnings'],
-                    'telegram_sync_warning': '部分电报关联属于其他Bot，未删除对应消息。' if invalid_delivery else ('部分旧记录没有可靠的电报消息关联，电报里可能有残留。' if missing_delivery else None),
+                    'telegram_sync_warning': '部分电报关联不属于当前对话或Bot，未删除对应消息。' if invalid_delivery else ('部分旧记录没有可靠的电报消息关联，电报里可能有残留。' if missing_delivery else None),
                     'telegram_native_message_ids': sorted(native_ids),
                     'telegram_logical_message_ids': sorted(logical_ids)}
         await self._save_request(data.get('request_id'), 'withdraw', conversation_id, response)

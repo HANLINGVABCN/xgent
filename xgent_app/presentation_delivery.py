@@ -69,6 +69,7 @@ class PresentationBot:
         message.media_payload = {'artifacts': artifacts, 'text': text}
         message.record_id = self.turn.last_record_id
         self.messages[message.message_id] = message
+        self.turn.last_message = message
         return message
 
     def _native_enabled(self):

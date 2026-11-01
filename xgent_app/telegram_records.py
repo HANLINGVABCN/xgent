@@ -1,5 +1,6 @@
 """Exact delivered IDs tied to durable records; never infer neighbouring messages."""
 from collections import OrderedDict
+from copy import deepcopy
 import inspect
 import secrets
 
@@ -7,6 +8,25 @@ INSTANCE = secrets.token_hex(16)
 _records = OrderedDict()
 _deliveries = OrderedDict()
 _withdrawal_notices = set()
+
+
+def detach_delivery_metadata(metadata):
+    """A copied history record owns no messages in its source conversation."""
+    value = deepcopy(metadata)
+    for key in ('telegram_delivery', 'telegram_native_parts', 'telegram_reply', 'telegram_logical_ids',
+                'telegram_logical_instance', 'telegram_source_bot_id', 'source_message_id',
+                'source_message_ids', 'web_live'):
+        value.pop(key, None)
+    for ref in value.get('attachments') or []:
+        if isinstance(ref, dict):
+            ref.pop('source_message_id', None)
+    return value
+
+
+def logical_message_belongs_to(logical_id, conversation_id):
+    owner = _records.get(logical_id)
+    delivery = _deliveries.get(logical_id) or {}
+    return (owner is None or owner[1] == conversation_id) and delivery.get('conversation_id') in {None, conversation_id}
 
 
 def _bot_id(bot):
@@ -32,7 +52,8 @@ def source_bot_id():
 
 async def bind_record(db, row, logical_ids):
     from .presentation import metadata_dict
-    ids = list(dict.fromkeys(mid for mid in logical_ids if type(mid) is int))
+    ids = list(dict.fromkeys(mid for mid in logical_ids if type(mid) is int
+        and (_records.get(mid) is None or _records[mid][1] == row['session_id'])))
     for mid in ids:
         _records[mid] = (row['id'], row['session_id'])
     while len(_records) > 5000:
@@ -42,10 +63,13 @@ async def bind_record(db, row, logical_ids):
     metadata['telegram_logical_ids'] = list(dict.fromkeys([*metadata.get('telegram_logical_ids', []), *ids]))
     for mid in ids:
         delivery = _deliveries.get(mid)
-        if delivery:
+        if delivery and delivery.get('conversation_id') in {None, row['session_id']}:
             old = metadata.get('telegram_delivery') or {}
-            metadata['telegram_delivery'] = {**delivery, 'ids': list(dict.fromkeys([
-                *(old.get('ids', []) if old.get('bot_id') == delivery['bot_id'] else []), *delivery['ids']]))}
+            metadata['telegram_delivery'] = {**delivery, 'conversation_id': row['session_id'], 'record_id': row['id'],
+                'ids': list(dict.fromkeys([
+                *(old.get('ids', []) if old.get('bot_id') == delivery['bot_id']
+                  and old.get('conversation_id') in {None, row['session_id']}
+                  and old.get('chat_id') == delivery['chat_id'] else []), *delivery['ids']]))}
     await db.patch_display_metadata(row['id'], {key: metadata[key] for key in
         ('telegram_logical_ids', 'telegram_logical_instance', 'telegram_delivery') if key in metadata})
 
@@ -73,7 +97,8 @@ async def delivered(bot, op, result):
     ids = list(op.payload.get('_native_parts') or ([result] if type(result) is int else []))
     if not ids:
         return
-    _deliveries[op.logical_id] = {'bot_id': _bot_id(bot), 'chat_id': op.chat_id, 'ids': ids}
+    _deliveries[op.logical_id] = {'bot_id': _bot_id(bot), 'chat_id': op.chat_id, 'ids': ids,
+                                'conversation_id': (op.conversation_context or {}).get('conversation_id')}
     while len(_deliveries) > 5000:
         _deliveries.popitem(last=False)
     entry = _records.get(op.logical_id)

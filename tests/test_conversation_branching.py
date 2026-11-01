@@ -67,6 +67,32 @@ class ConversationBranchingTests(unittest.IsolatedAsyncioTestCase):
             answer = await self.db.record_global_message(1, 0, 'ai_reply', 'assistant', '完成')
         return user, answer
 
+    async def test_branch_withdraw_cannot_delete_source_telegram_messages_even_for_old_copies(self):
+        from xgent_app.conversations import bind_conversation
+        from xgent_app.presentation import metadata_dict
+        user, answer = await self.make_edit_turn()
+        original = (await self.manager.resolve()).conversation_id
+        async with self.manager.operation(original):
+            await self.db.patch_display_metadata(user, {'source_message_id': 10,
+                'source_message_ids': [10, 11], 'telegram_source_bot_id': 7001})
+            await self.db.patch_display_metadata(answer, {'telegram_delivery': {'bot_id': 7001, 'ids': [12, 13]}})
+            branch = await self.service.create_branch(original, answer, 'assistant')
+        with bind_conversation(await self.manager.resolve(branch['conversation_id'])):
+            rows = await self.db.get_display_history(100)
+            assert all('telegram_delivery' not in metadata_dict(row.get('metadata')) for row in rows)
+            copied_user = next(row for row in rows if row['msg_type'] == 'user_text')
+            assert not metadata_dict(copied_user['metadata']).get('source_message_ids')
+            # Existing branch records from older versions can still contain source IDs.
+            await self.db.patch_display_metadata(copied_user['id'], {'source_message_id': 10,
+                'telegram_delivery': {'bot_id': 7001, 'ids': [12, 13]}})
+            preview = await self.service.withdraw_preview(branch['conversation_id'], copied_user['id'])
+            result = await self.service.withdraw(branch['conversation_id'], copied_user['id'], {
+                'confirm': True, 'turn_id': preview['turn_id'], 'current_digest': preview['current_digest']})
+            assert result['telegram_native_message_ids'] == []
+            assert result['telegram_logical_message_ids'] == []
+        with bind_conversation(await self.manager.resolve(original)):
+            assert [row['id'] for row in await self.db.get_display_history(100)] == [user, answer]
+
     def test_snapshot_excludes_nested_mounts_and_symlinks(self):
         mounted = self.root / 'nodequality-runtime' / 'proc'
         mounted.mkdir(parents=True)

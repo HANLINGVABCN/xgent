@@ -77,10 +77,15 @@ async def _delete_withdrawn_telegram(native_ids, logical_ids, request_id=None):
         return
     channel = telegram_channel()
     channel.ensure_started()
+    # A Web management action does not mirror ordinary messages. These exact
+    # IDs were authorized by withdrawal, independently of the selected Bot chat.
+    route = {**conversation_snapshot(), 'telegram_delivery': True}
     for mid in native_ids or []:
-        channel.offer(Op(OP_DELETE, chat_id=BotConfig.AUTHORIZED_USER_ID, payload={'native_id': int(mid), '_withdrawal': request_id}))
+        channel.offer(Op(OP_DELETE, chat_id=BotConfig.AUTHORIZED_USER_ID, payload={
+            'native_id': int(mid), '_withdrawal': request_id, '_conversation_context': route}))
     for mid in logical_ids or []:
-        channel.offer(Op(OP_DELETE, logical_id=int(mid), chat_id=BotConfig.AUTHORIZED_USER_ID, payload={'_withdrawal': request_id}))
+        channel.offer(Op(OP_DELETE, logical_id=int(mid), chat_id=BotConfig.AUTHORIZED_USER_ID, payload={
+            '_withdrawal': request_id, '_conversation_context': route}))
 
 
 def current_ui_workflow_guard() -> str:
@@ -208,7 +213,7 @@ class GlobalRecorder:
                 turn.record_contents = {}
             turn.record_ids[msg_type] = rowid
             turn.record_contents[msg_type] = str(content)
-        if turn is not None and msg_type in {MessageType.AI_REPLY, MessageType.AGENT_RESULT, 'presentation_note', MessageType.RUNTIME_ERROR}:
+        if turn is not None and msg_type in {MessageType.AI_REPLY, MessageType.MEDIA_REPLY, MessageType.AGENT_RESULT, 'presentation_note', MessageType.RUNTIME_ERROR}:
             turn.last_record_id = rowid
         if msg_type == MessageType.AI_REPLY:
             if turn is not None:

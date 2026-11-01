@@ -1647,7 +1647,10 @@ async def finish_text_conversation(update: Update, context: ContextTypes.DEFAULT
     try:
         from xgent_app.conversations import replay_conversation
         with replay_conversation(pending.conversation_context):
-            await submit_ordinary_text(text, chat_id=pending.update.effective_chat.id)
+            chat_id = pending.update.effective_chat.id
+            sources = ','.join(str(mid) for mid in pending.source_message_ids)
+            await submit_ordinary_text(text, chat_id=chat_id,
+                request_key=f'telegram:{chat_id}:{sources}' if current_scope().origin == 'telegram' and sources else None)
     except BaseException:
         with _pending_text_conversations_lock:
             newer = _pending_text_conversations.get(key)

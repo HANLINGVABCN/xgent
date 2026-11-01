@@ -12,7 +12,10 @@ async def send(bot, op, extra, rich=True):
     artifacts = op.payload['artifacts']
     saved = op.payload.setdefault('_native_parts', [])
     routing = op.payload.get('kwargs') or {}
-    routing = {key: value for key, value in routing.items() if key in {'message_thread_id', 'disable_notification'}}
+    routing = {key: value for key, value in {**extra, **routing}.items()
+               if key in {'message_thread_id', 'disable_notification', 'protect_content', 'reply_parameters'}}
+    request_options = {key: value for key, value in extra.items()
+                       if key in {'read_timeout', 'write_timeout', 'connect_timeout', 'pool_timeout'}}
     editing = bool(op.payload.get('_edit'))
     if rich:
         groups, group, budget = [], [], 0
@@ -51,7 +54,7 @@ async def send(bot, op, extra, rich=True):
                         if index < len(pages) and pages[index] == html:
                             continue
                         data['message_id'] = saved[index]
-                    result = await bot._post('editMessageText' if index < len(saved) else 'sendRichMessage', data, **extra)
+                    result = await bot._post('editMessageText' if index < len(saved) else 'sendRichMessage', data, **request_options)
                 except Exception as exc:
                     if not saved and _unsupported(exc):
                         return await send(bot, op, extra, rich=False)
@@ -77,11 +80,11 @@ async def send(bot, op, extra, rich=True):
                 items = [(InputMediaPhoto if photo else InputMediaDocument)(InputFile(stack.enter_context(Path(a['path']).open('rb')), read_file_handle=False),
                     caption=str(a['path']) if len(str(a['path']))<=1000 else None) for a in group]
                 if len(items)>1:
-                    messages = await bot.send_media_group(chat_id=op.chat_id, media=items, **routing, **extra)
+                    messages = await bot.send_media_group(chat_id=op.chat_id, media=items, **routing, **request_options)
                 else:
                     method = bot.send_photo if photo else bot.send_document
                     argument = {'photo' if photo else 'document': items[0].media}
-                    messages = [await method(chat_id=op.chat_id, **argument, caption=items[0].caption, **routing, **extra)]
+                    messages = [await method(chat_id=op.chat_id, **argument, caption=items[0].caption, **routing, **request_options)]
                 saved.extend(message.message_id for message in messages)
             progress += len(group)
             op.payload['_media_sent'] = progress
@@ -102,7 +105,7 @@ async def send(bot, op, extra, rich=True):
                 data['message_id'] = saved[position]
                 if position < len(pages) and pages[position] == body:
                     remaining.pop(0); position += 1; continue
-            result = await bot._post(method, data, **extra)
+            result = await bot._post(method, data, **request_options)
             if not rich or position >= len(saved):
                 saved.append(result['message_id'])
             while len(pages) <= position:

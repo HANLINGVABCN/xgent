@@ -797,7 +797,9 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
     kind = op.kind
     route = op.conversation_context or {}
     thread_id = route.get('telegram_thread_id')
-    if (route.get('telegram_bot_id') and not thread_id and route.get('origin') in {'web','cli'}
+    from .telegram_native import OP_NATIVE_DELETE
+    if (kind not in {OP_DELETE, OP_NATIVE_DELETE} and route.get('telegram_bot_id')
+            and not thread_id and route.get('origin') in {'web','cli'}
             and route.get('telegram_chat_id')==op.chat_id):
         from .conversations import get_conversations, ConversationError
         try:
@@ -961,6 +963,8 @@ async def deliver_op_to_bot(bot: Any, op: Op, native_id: Optional[int], *,
         if (kind in {OP_EDIT, OP_EDIT_MARKUP} and isinstance(exc, _TgBadRequest)
                 and 'message is not modified' in str(exc).lower()):
             return None  # Replaying an already applied edit is successful.
+        if kind == OP_DELETE and isinstance(exc, _TgBadRequest) and 'message to delete not found' in str(exc).lower():
+            return None  # Retried withdrawal of an already removed exact message.
         raise classify_telegram_error(exc) from exc
 
 
@@ -1356,10 +1360,21 @@ class MirrorBot:
         for item in view['media']:
             token = MEDIA_TOKEN_REGISTRY.register(item['path'], item['filename'])
             descriptors.append({**item, 'download_url': '/api/media/'+token})
-        await emit_ui_frame(self.outbox, self.chat_id, 'message', source=self._ui_source, message_id=mid,
-            text=view['text'], media=descriptors, media_group_id=view['media_group_id'])
         from .presentation import current_turn
         record_id = current_turn().last_record_id if current_turn() else None
+        if record_id is not None:
+            from .web_history import _section_ns
+            namespace = _section_ns()
+            if namespace:
+                from .telegram_records import bind_record
+                db = await namespace['BotMemoryDB'].get_instance()
+                row = await db.get_display_message(record_id)
+                if row:
+                    await db.patch_display_metadata(record_id, {'web_live': {
+                        'epoch': self.outbox.snapshot()['epoch'], 'message_ids': [mid]}})
+                    await bind_record(db, row, [mid])
+        await emit_ui_frame(self.outbox, self.chat_id, 'message', source=self._ui_source, message_id=mid,
+            text=view['text'], media=descriptors, media_group_id=view['media_group_id'])
         self._offer(OP_NATIVE_MEDIA, logical_id=mid, chat_id=chat_id,
             payload={'artifacts': list(artifacts), 'text': view['text'], 'kwargs': {},
                      'telegram_native': {'phase': 'media', 'owner_id': mid, 'record_id': record_id}})
