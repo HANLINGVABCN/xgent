@@ -1,1 +1,1 @@
-"""XGent for Telegram application package."""
+"""XGent application package."""

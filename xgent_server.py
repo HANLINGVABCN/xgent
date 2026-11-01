@@ -1,4 +1,4 @@
-"""XGent for Telegram executable entrypoint.
+"""XGent executable entrypoint.
 
 Application bootstrap lives in :mod:`xgent_app.bootstrap`. Domain code is
 kept in ordered sections during the compatibility-first refactor phase.

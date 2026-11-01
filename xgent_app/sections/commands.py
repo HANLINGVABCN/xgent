@@ -12,7 +12,7 @@ def build_start_menu_text() -> str:
     thinking_level = get_thinking_level_label()
 
     welcome_msg = (
-        f"<b>XGent for Telegram 已就绪</b>\n"
+        f"<b>XGent 已就绪</b>\n"
         f"━━━━━━━━━━━━━━\n"
         f"🛡️ 防御系统: <b>已开启</b>\n"
         f"📡 当前对话提供商: <b>{safe_text(active_prov)}</b>\n"
@@ -391,12 +391,12 @@ async def send_update_source_menu(message: Any, *, new=False):
     card = await (message.reply_text if new else message.edit_text)(
         "⬆️ <b>选择更新来源</b>\n\n"
         "请选择这次要从哪里拉取最新代码：\n"
-        "1. 正常更新：从 <code>xgent-telegram</code> 项目拉取。\n"
-        "2. Test 更新：从 <code>xgent-telegram-test</code> 私有目录拉取，需要 GitHub Token。",
+        "1. XGent 私仓：从 <code>HANLINGVABCN/xgent</code> 拉取，需要 GitHub Token。\n"
+        "2. 测试仓库：从 <code>HANLINGVABCN/xgent-test</code> 拉取，需要 GitHub Token。",
         parse_mode=constants.ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("1 正常更新（bot 项目）", callback_data="select_update_source_normal")],
-            [InlineKeyboardButton("2 Test 更新（私有，需要 Token）", callback_data="select_update_source_test")],
+            [InlineKeyboardButton("1 XGent 私仓", callback_data="select_update_source_normal")],
+            [InlineKeyboardButton("2 XGent 测试仓库", callback_data="select_update_source_test")],
             [InlineKeyboardButton("取消", callback_data="menu_more_settings")]
         ])
     )
@@ -641,7 +641,7 @@ def parse_provider_config_import(raw_bytes: bytes) -> Tuple[Dict[str, Dict[str, 
         raise ValueError('配置文件根节点必须是 JSON 对象')
     file_format = payload.get('format')
     if file_format != PROVIDER_CONFIG_FORMAT and file_format not in LEGACY_PROVIDER_CONFIG_FORMATS:
-        raise ValueError('不是 XGent for Telegram 导出的提供商配置文件')
+        raise ValueError('不是 XGent 导出的提供商配置文件')
     version = payload.get('version')
     if version != PROVIDER_CONFIG_VERSION:
         raise ValueError(f'不支持的配置版本：{version!r}')

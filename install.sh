@@ -72,8 +72,8 @@ LOCAL_API_ALLOWED_IPS_FILE="$STATE_DIR/local-api-allowed-ips"
 print_banner() {
     echo -e "${CYAN}"
     echo "========================================================"
-    echo " XGent for Telegram 启动器"
-    echo " 异步 SQLite + 快速流式输出部署助手"
+    echo " XGent 启动器"
+    echo " Web 私人 AI 工作界面 · 支持 Telegram 与 CLI 接入"
     echo "========================================================"
     echo -e "${NC}"
 }
@@ -920,7 +920,7 @@ uninstall_app() {
 
     echo ""
     echo -e "${CYAN}========================================================${NC}"
-    echo -e "${CYAN} XGent for Telegram 主安装内容已卸载。${NC}"
+    echo -e "${CYAN} XGent 主安装内容已卸载。${NC}"
     echo -e "${CYAN} 已保留项目文件、配置、数据库、日志、skill-public 服务和 PM2 本体。${NC}"
     echo -e "${CYAN}========================================================${NC}"
 }
@@ -1602,7 +1602,7 @@ check_database() {
         db_size="$(du -h "$DATA_DIR/xgent_memory.db" | cut -f1)"
         echo "   数据库已存在，大小: $db_size"
     elif [ -f "bot_memory.db" ]; then
-        echo "   检测到旧版数据库，将在 XGent for Telegram 下次启动前自动迁移。"
+        echo "   检测到旧版数据库，将在 XGent 下次启动前自动迁移。"
     else
         echo "   数据库会在首次运行时自动创建。"
     fi
@@ -1818,7 +1818,7 @@ setup_pm2_startup() {
 }
 
 start_foreground() {
-    info "[运行] 正在前台启动 XGent for Telegram..."
+    info "[运行] 正在前台启动 XGent..."
     echo "   IP 出站模式: $(ip_mode_label)"
     XGENT_APP_ENTRY="$APP_ENTRY" TELEGRAM_AI_BOT_APP_ENTRY="" \
         run_bot_python python -c "$(bot_python_code)"
@@ -1828,7 +1828,7 @@ start_background() {
     local mode pythonpath code socks5_url
     mkdir -p "$LOG_DIR"
 
-    info "[运行] 正在后台启动 XGent for Telegram..."
+    info "[运行] 正在后台启动 XGent..."
 
     # 彻底停止旧进程
     if [ -f "$PID_FILE" ]; then
@@ -1931,7 +1931,7 @@ start_with_pm2() {
     ensure_pm2
     migrate_legacy_pm2_process
 
-    info "[运行] 正在使用 PM2 启动 XGent for Telegram..."
+    info "[运行] 正在使用 PM2 启动 XGent..."
     echo "   IP 出站模式: $(ip_mode_label)"
     if [ "$PM2_MEMORY_RESTART_ENABLED" -eq 1 ]; then
         echo "   PM2 固定内存重启阈值: $pm2_memory_limit（$PM2_MEMORY_RESTART_SOURCE）"
@@ -2067,7 +2067,7 @@ rebuild_pm2_app() {
 }
 
 restart_app() {
-    info "[重启] 正在彻底重启 XGent for Telegram..."
+    info "[重启] 正在彻底重启 XGent..."
 
     # 分发依据必须和 start_service / stop_service 一致——都只看 runtime mode。
     # 以前这里第二步是"**存在** PM2 进程就走 PM2"：把保活方式改成 nohup 之后，
@@ -2702,7 +2702,7 @@ write_systemd_unit() {
     # 顺带躲开在 unit 文件里给一大段内联 Python 加引号这件事。
     cat > "$unit_tmp" <<EOF
 [Unit]
-Description=XGent for Telegram
+Description=XGent
 After=network-online.target
 Wants=network-online.target
 
@@ -2734,7 +2734,7 @@ start_with_systemd() {
         exit 1
     fi
 
-    info "[运行] 正在用 systemd 启动 XGent for Telegram..."
+    info "[运行] 正在用 systemd 启动 XGent..."
     echo "   IP 出站模式: $(ip_mode_label)"
 
     write_systemd_unit
@@ -3802,7 +3802,7 @@ main() {
 
     echo ""
     echo -e "${CYAN}========================================================${NC}"
-    echo -e "${CYAN} XGent for Telegram 已准备就绪。${NC}"
+    echo -e "${CYAN} XGent 已准备就绪。${NC}"
     echo -e "${CYAN} 保活方式: $(runtime_mode_label)${NC}"
     echo -e "${CYAN} 本地终端: 输入 ${GREEN}xgent${CYAN} 随时打开命令行客户端${NC}"
     echo -e "${CYAN}========================================================${NC}"

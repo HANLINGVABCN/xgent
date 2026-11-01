@@ -1,4 +1,8 @@
-# XGent 私人版
+# XGent
+
+以 Web 为主要入口的自托管私人 AI Agent。在网页中聊天、管理模型与会话、查看思考和执行过程、处理文件、生成媒体，并操作服务器终端。
+
+Telegram 和 CLI 继续作为完整接入端，与 Web 共用模型、记忆、工具执行和表单服务。可以单独部署 Web，也可以同时使用多个客户端。
 
 Web 安全页可手动添加验证器两步验证：扫码或录入密钥后验证六位动态码，启用后密码登录需第二步；提供一次性恢复码及本地恢复入口。电报授权和 Telegram 免密登录不加二次验证，Cloudflare 邮箱验证保留。详见 [Web 2FA 使用说明](docs/web-two-factor.md)。
 
@@ -29,7 +33,7 @@ Web 新增默认收起的思考块：两种流式展示最新行，结束后只�
 项目内单目录数据、无感导出、定时备份、整套恢复，以及 Web 分组与消息展示的新约定见 [数据管理与迁移说明](docs/data-management.md)。导出不停服、不重启；导入只替换数据并保留源码、公共技能和依赖。
 
 <p align="center">
-  <strong>把你的 Linux 服务器装进 Telegram。</strong>
+  <strong>在自己的网页里使用 AI，处理文件与执行服务器任务。</strong>
 </p>
 
 <p align="center">
@@ -40,7 +44,7 @@ Web 新增默认收起的思考块：两种流式展示最新行，结束后只�
   <a href="https://github.com/HANLINGVABCN/xgent/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/HANLINGVABCN/xgent/actions/workflows/tests.yml/badge.svg"></a>
   <a href="https://github.com/HANLINGVABCN/xgent/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Self-hosted" src="https://img.shields.io/badge/Self--hosted-private-24A1DE?logo=telegram&logoColor=white">
+  <img alt="Self-hosted" src="https://img.shields.io/badge/Self--hosted-private-24A1DE">
 </p>
 
 > [!CAUTION]
@@ -49,7 +53,8 @@ Web 新增默认收起的思考块：两种流式展示最新行，结束后只�
 > [!NOTE]
 > 本仓库 `HANLINGVABCN/xgent` 为私人项目，从已验证的 XGent 基线保留历史与许可证。
 > 安装前需使用有权限的 GitHub 账号认证；在线更新默认读取本私仓，GitHub Token 只用于仓库访问。
-> 原发布仓库和测试仓库不会收到本次双模式改动。
+> 现用仓库为 `HANLINGVABCN/xgent` 和 `HANLINGVABCN/xgent-test`；更新菜单的测试源读取后者，两者均为私有。
+> 旧发布与测试仓库已改为私有并加上 `pending-delete-` 前缀，简介标为“待删除”；历史保留，后续改动发布到现用仓库。
 
 ## 本次改进：统一单行预览与紧凑回复尾注
 
@@ -82,7 +87,7 @@ Telegram 新旧能力的官方核查、当前接线缺口及改进优先级见 [
 
 ## 它能做什么
 
-| 场景 | 你可以直接在 Telegram 里说 |
+| 场景 | 你可以在 Web 对话中说 |
 | --- | --- |
 | 服务器排障 | “检查磁盘为什么快满了，找出最大的文件并给我一份报告。” |
 | 文件处理 | “找到今天生成的备份，压缩后直接发给我。” |
@@ -101,7 +106,7 @@ AI：我会先采集系统状态，然后分析异常项。
     ✓ 执行磁盘检查
     ✓ 执行内存与进程检查
     ✓ 生成诊断报告
-    ✓ 已将 report.md 发送到 Telegram
+    ✓ 已将 report.md 发送到当前对话
 
 AI：当前主要问题是 /var/log 占用增长过快……
 
@@ -111,7 +116,7 @@ AI：已创建后台任务：cron 每天 03:00 清理 /var/log 下 7 天前的
     日志；同时部署条件监控，剩余空间 < 10% 时立即通知你。
 ```
 
-这不是一个公开群聊机器人，也不只是把模型 API 接到 Telegram。它更适合把 Telegram 变成你的**私人 AI 控制台**。
+XGent 面向单用户私有部署，Web 是主要工作界面，Telegram 和 CLI 也能完成同样的聊天与工具流程。
 
 ## 核心能力
 
@@ -121,15 +126,16 @@ AI：已创建后台任务：cron 每天 03:00 清理 /var/log 下 7 天前的
 - **服务器文件操作**：读取、创建、覆盖和发送服务器文件，命令完整输出自动归档。
 - **多模型提供商**：支持 OpenAI、OpenAI 兼容接口、Gemini、Vertex 和 Claude。
 - **思考深度控制**：8 档全局思考深度，按提供商自动翻译成 `thinking.budget_tokens`、`thinkingConfig.thinkingBudget`、`reasoning_effort` 或 `reasoning.effort`。
-- **本地终端客户端**：可选的 `xgent` 终端界面，与 Telegram / Web 共用同一套对话核心、记忆与 Agent 能力。
-- **网页版聊天**：可选的本地 Web 界面，与 Telegram 共享同一套对话核心、记忆与 Agent 能力，可作为 Telegram Web App 内嵌打开。
+- **Web 工作界面**：聊天、会话分组、模型与设置、文件、任务、用量统计、思考展示和浏览器终端；可独立部署。
+- **Telegram 接入**：原生聊天、表单、工具输出、文件与会话同步；保留 `/start → Web配置 → 打开网页版` 入口。
+- **本地终端客户端**：`xgent` 终端界面，与 Web、Telegram 共用同一套对话核心、记忆与 Agent 能力。
 - **对话与媒体模型分离**：可分别设置默认聊天模型和默认媒体模型。
 - **轻量多会话**：支持新建、切换、重命名、归档与恢复；消息、附件、压缩和执行结果按会话隔离，Telegram、Web 和每个终端独立选择，历史按会话互通。
 - **全量附件上下文**：每轮直接携带当前未清空对话的全部图片原件和文本全文，不受普通消息历史深度或 Agent 开关影响。
-- **流式回复**：支持流式与非流式请求，并可在 Telegram 中随时切换。
+- **回复方式**：前台流式、后台流式和非流式，Web、Telegram 与 CLI 共用设置。
 - **Skill 扩展**：Skill 只按索引进入提示词，需要时再由模型读取具体说明。
 - **配置迁移**：提供商、模型和默认选择可导出为 JSON，并在其他实例中合并或覆盖导入。
-- **私有访问控制**：只有 `.env` 中指定的 Telegram 用户 ID 可以使用机器人。
+- **私有访问控制**：Web 密码登录、可选验证器两步验证；Telegram 按授权用户 ID 校验。
 - **在线维护**：支持通过 Telegram 更新代码、重启 Bot 和管理常用配置。
 
 ## 适合与不适合
@@ -137,7 +143,7 @@ AI：已创建后台任务：cron 每天 03:00 清理 /var/log 下 7 天前的
 **适合你，如果你：**
 
 - 有一台 Linux VPS、家庭服务器或开发机；
-- 日常使用 Telegram，希望随时处理服务器任务；
+- 希望在浏览器里使用私人 AI 工作界面，也能通过 Telegram 或终端处理任务；
 - 已有模型 API Key，并希望数据与运行环境由自己掌控；
 - 理解 Shell 权限边界，愿意为 Agent 使用独立低权限账号。
 
@@ -151,7 +157,9 @@ AI：已创建后台任务：cron 每天 03:00 清理 /var/log 下 7 天前的
 
 ```mermaid
 flowchart LR
-    U[Telegram 用户] -->|消息 / 文件 / 图片| B[XGent for Telegram]
+    W[Web 工作界面] <-->|聊天 / 文件 / 终端| B[XGent 对话与执行核心]
+    U[Telegram] <-->|消息 / 文件 / 图片| B
+    T[CLI] <-->|对话 / 工具操作| B
     B --> M[模型提供商]
     B --> D[(SQLite 记忆)]
     B --> S[Skill 索引]
@@ -162,16 +170,15 @@ flowchart LR
     C --> B
     P --> B
     F --> B
-    B -->|回复 / 文件 / 媒体| U
 ```
 
 ## 快速部署
 
 XGent 由三个可以自由组合的组件构成，`install.sh` 装完环境后会让你在清单里勾选（可多选，也可以事后随时加装或移除）：
 
-- **cli**：本地终端客户端，装完敲 `xgent` 就能用（详见下方[本地终端客户端](#本地终端客户端xgent)）。
 - **web**：浏览器网页访问，需要设访问密码和端口（详见下方[纯 Web 模式](#纯-web-模式)）。
 - **bot**：Telegram Bot，需要 Bot Token 和你的 Telegram 用户 ID。
+- **cli**：本地终端客户端，装完敲 `xgent` 就能用（详见下方[本地终端客户端](#本地终端客户端xgent)）。
 
 三种模式彼此独立，每个都能单独成立，也可以任意组合：
 
@@ -258,13 +265,15 @@ UPDATE_ZIP_URL=https://api.github.com/repos/HANLINGVABCN/xgent/zipball/main
 
 ## 第一次使用
 
-Telegram / Web 端：
+Web 端：
 
-1. 在 Telegram 中向机器人发送 `/start`（或浏览器打开 Web 地址）。
+1. 在浏览器打开 Web 地址并登录。
 2. 打开「提供商」，添加 API URL、API Key 和模型列表。
 3. 打开「默认模型」，选择默认对话模型。
 4. 如需媒体生成，再选择默认媒体模型。
 5. 确认安全边界后，根据需要开启 Agent 模式。
+
+Telegram 端向机器人发送 `/start`，CLI 端运行 `xgent`；两端继续提供自己的原生菜单和输入流程。
 
 CLI 端流程完全一样：敲 `xgent` 进入终端界面后，`/start` 打开主菜单，`/providers` 配置提供商，`/models` 选默认模型——和 Telegram 里的操作一一对应。
 
@@ -595,13 +604,13 @@ prompts/extras/agent_command_blacklist.txt
 
 模型拒绝思考参数时，系统会自动去掉参数重发一次，并记住该「提供商 + 模型」组合不再重试；切换档位会清空这份记录。
 
-思考内容不会显示在对话里，也不会写入记忆；思考消耗的 token 仍会计入用量统计行。
+Web 在回复头像下方显示独立的折叠思考块，仅展示接口实际返回的思考内容；思考不进入回答正文、后续模型上下文、Telegram 或 CLI 展示。思考消耗的 Token 仍按上游用量记录。
 
-## 网页版聊天
+## Web 工作界面
 
-`/web` 或 `/start` 里的「🌐 Web」按钮可配置网页版界面。它复用同一套对话核心，Agent 模式、协议执行、记忆与停止按钮的行为和 Telegram 完全一致，两端共享同一份 SQLite 记忆。
+Web 是 XGent 的主要入口，可通过安装器配置后直接在浏览器使用。Telegram 的 `/web` 或 `/start → Web配置 → 打开网页版` 仍可配置和打开同一网页。Web、Telegram 和 CLI 复用同一套对话核心、工具执行与 SQLite 记忆。
 
-网页里可以聊天，并调整思考深度、流式开关、Agent 模式、文字拼接、记忆深度、Agent 轮数、回复超时和对话模型。提供商与 API Key 仍只在 Telegram 中管理。
+网页里可以管理对话、分组、文件、任务、用量和浏览器终端，在设置中管理提供商与 API Key，并调整思考深度、回复方式、Agent 模式、Tool call／正则围栏、记忆深度、轮数、超时和模型。
 
 配置项：
 
@@ -816,7 +825,7 @@ systemd 的 unit 写在 `/etc/systemd/system/xgent.service`，`ExecStart` 只是
 ## 项目结构
 
 ```text
-xgent-telegram/
+xgent/
 ├─ xgent_server.py              # Bot / Web 可执行入口
 ├─ xgent_cli.py               # 终端客户端入口（安装 cli 组件后注册为 xgent 命令）
 ├─ install.sh                 # 安装、启动、更新与维护脚本

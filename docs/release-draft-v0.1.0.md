@@ -2,9 +2,11 @@
 
 > 这是可直接粘贴到 GitHub Release 的草稿。创建 `v0.1.0` 标签前，请先确认安装、更新和回滚流程。
 
-## 把你的 Linux 服务器装进 Telegram
+> 历史发布草稿；当前产品名称为 XGent，以 Web 为主要入口。当前私仓部署与功能范围以 README 为准。
 
-XGent for Telegram 是一个面向单用户私有部署的 AI Agent。它不仅能完成多模型对话，还可以在授权服务器上执行命令、管理 Shell 会话、处理文件并通过 Skill 扩展工作流。
+## XGent：自托管私人 AI Agent
+
+XGent 是一个面向单用户私有部署的 AI Agent。它不仅能完成多模型对话，还可以在授权服务器上执行命令、管理 Shell 会话、处理文件并通过 Skill 扩展工作流。
 
 ## 主要能力
 

@@ -127,7 +127,7 @@ class TelegramConversationControlTests(unittest.TestCase):
         for surface in ('telegram', 'web'):
             with self.subTest(surface=surface):
                 result = self.probe('named_menu_probe', surface)
-                menus = [item for item in result['sent'] if 'XGent for Telegram 已就绪' in item['text']]
+                menus = [item for item in result['sent'] if 'XGent 已就绪' in item['text']]
                 self.assertEqual(1, len(menus))
                 prefix = '\n🗂 洛溪，在不在 &lt;&amp;&gt; · ' + result['id'][:6]
                 self.assertTrue(menus[0]['text'].endswith(prefix), menus[0]['text'])
@@ -135,7 +135,7 @@ class TelegramConversationControlTests(unittest.TestCase):
                 self.assertNotIn('💾 记忆系统', menus[0]['text'])
                 self.assertEqual(1, menus[0]['text'].count(prefix))
                 self.assertEqual('HTML', menus[0]['parse_mode'])
-                web = [frame for frame in result['frames'] if 'XGent for Telegram 已就绪' in str(frame.get('text', ''))]
+                web = [frame for frame in result['frames'] if 'XGent 已就绪' in str(frame.get('text', ''))]
                 self.assertEqual(1, len(web))
                 self.assertEqual(result['id'], web[0]['conversation_id'])
                 self.assertNotIn(prefix, web[0]['text'])

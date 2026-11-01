@@ -1,5 +1,8 @@
 # Architecture
 
+XGent uses Web as its primary interface. Telegram and CLI remain full clients
+of the same conversation, memory, form and execution services.
+
 ## Current refactor phase
 
 `xgent_server.py` is now a minimal executable entrypoint. Manifest parsing,

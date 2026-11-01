@@ -3,7 +3,7 @@
 XGent 使用单目录模式：源码和运行数据都在当前项目目录中，但导入、更新和备份会按白名单区分“程序文件”和“实例数据”。不再读取 `XGENT_DATA_DIR`，旧的 `data-location.json` 也不会改变数据位置。
 
 ```text
-xgent-telegram/
+xgent/
   .env
   xgent_memory.db
   memory/

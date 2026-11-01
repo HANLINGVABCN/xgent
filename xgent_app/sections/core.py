@@ -3,7 +3,7 @@
 
 # pyright: reportOptionalMemberAccess=false, reportAttributeAccessIssue=false
 # xgent_server.py
-# XGent for Telegram - 私有 Telegram AI 助手服务端。
+# XGent - 以 Web 为主要入口，支持 Telegram 与 CLI 的私人 AI Agent。
 #
 # 核心职责：
 # - 单用户访问控制与未授权用户处理。
@@ -156,7 +156,7 @@ class BotConfig:
     API_BASE_URL = (os.getenv("TELEGRAM_API_URL") or "").strip().rstrip("/")
     DB_FILE = str(DATA_PATHS.database)
     NORMAL_UPDATE_ZIP_URL = "https://api.github.com/repos/HANLINGVABCN/xgent/zipball/main"
-    TEST_UPDATE_ZIP_URL = "https://api.github.com/repos/HANLINGVABCN/xgent-telegram-test/zipball/main"
+    TEST_UPDATE_ZIP_URL = "https://api.github.com/repos/HANLINGVABCN/xgent-test/zipball/main"
     DEFAULT_UPDATE_ZIP_URL = NORMAL_UPDATE_ZIP_URL
     _ENV_UPDATE_ZIP_URL = (os.getenv("UPDATE_ZIP_URL") or "").strip()
     UPDATE_ZIP_URL = _ENV_UPDATE_ZIP_URL or DEFAULT_UPDATE_ZIP_URL
