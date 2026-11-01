@@ -1,52 +1,46 @@
-"""Telegram delivery helpers for files produced by Agent file protocols."""
+"""Compact write results; files are delivered only by the explicit sendfile tool."""
 
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Mapping
+import html
+
+from .presentation import current_turn, message_presentation
+from .web_display import web_display_scope
 
 
-async def send_written_agent_file(
+async def present_written_agent_file(
     written_file: Mapping[str, Any],
     *,
     protocol: str,
     context: Any,
     chat_id: Any,
-    max_file_size: int,
     safe_send_message: Callable[..., Awaitable[Any]],
     safe_text: Callable[[Any], str],
     html_parse_mode: Any,
 ) -> str:
-    """Deliver a written file and return the legacy Agent history notice."""
+    """Show the actual write result without uploading a file or creating a media card."""
     saved_path = str(written_file["path"])
     saved_size = int(written_file["size"])
-    safe_filename = str(written_file["filename"])
-    label = "base64" if protocol == "file:base64" else ""
-
-    if saved_size <= max_file_size:
-        with open(saved_path, "rb") as saved_file:
-            caption = (
-                f"📄 已写入服务器并发送 (base64): {safe_filename}"
-                if label
-                else f"📄 已写入服务器并发送: {safe_filename}"
-            )
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=saved_file,
-                filename=safe_filename,
-                caption=caption,
-            )
-    else:
-        size_label = "base64 文件" if label else "文件"
-        await safe_send_message(
-            context,
-            chat_id,
-            (
-                f"✅ {size_label}已写入服务器，但超过发送大小限制。\n"
-                f"路径: <code>{safe_text(saved_path)}</code>\n"
-                f"大小: {saved_size} bytes"
-            ),
-            parse_mode=html_parse_mode,
-        )
+    text = f"✅ 已写入 · {saved_path}"
+    facts = {'version': 1, 'protocol': protocol, 'path': saved_path,
+             'filename': str(written_file['filename']), 'size': saved_size,
+             'overwritten': bool(written_file['existed']), 'text': text}
+    turn = current_turn()
+    facts['operation_sequence'] = (turn.active_operation or {}).get('sequence') if turn else None
+    if turn and turn.active_operation is not None:
+        turn.active_operation['file_write'] = facts
+    previous_message = turn.last_message if turn else None
+    from .message_policy import new_policy
+    display = {'version': 1, 'segments': [{'kind': 'html',
+               'text': '<span class="file-write-result">' + html.escape(text) + '</span>'}],
+               'presentation_mode': 'folded'}
+    with message_presentation({'kind': 'agent_result', 'purpose': 'status',
+            'message_policy': new_policy('agent_result', hint={'purpose': 'status'}).to_dict(),
+            'telegram_display': {'text': text, 'parse_mode': None}}), web_display_scope(display):
+        await safe_send_message(context, chat_id, html.escape(text), parse_mode=html_parse_mode)
+    if turn is not None and turn.last_message is not None and turn.last_message is not previous_message:
+        turn.last_message.file_write = facts
 
     return (
         f"[{protocol}结果] 已写入服务器文件: {saved_path} "

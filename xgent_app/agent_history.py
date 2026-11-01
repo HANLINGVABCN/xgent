@@ -34,12 +34,22 @@ async def persist_agent_result(
     ``notice`` when the caller has no separate presentation.
     """
     metadata = dict(display_metadata or {})
-    media = delivered_file_reference(notice)
+    from .presentation import current_turn
+    turn = current_turn()
+    message = turn.last_message if turn else None
+    operation = turn.active_operation if turn else None
+    write = (operation or {}).get('file_write')
+    if (write and operation and operation.get('kind') in {'file', 'file_base64'}
+            and write.get('operation_sequence') == operation.get('sequence')):
+        metadata['file_write'] = dict(write)
+        from .message_policy import new_policy
+        metadata['message_policy'] = new_policy('agent_result', hint={'purpose': 'status'}).to_dict()
+        outbox = getattr(getattr(message, 'bot', None), 'outbox', None)
+        if outbox is not None and getattr(message, 'file_write', None) == write:
+            metadata['web_live'] = {'epoch': outbox.snapshot()['epoch'], 'message_ids': [message.message_id]}
+    media = [] if metadata.get('file_write') else delivered_file_reference(notice)
     if media:
-        from .presentation import current_turn
         from pathlib import Path
-        turn = current_turn()
-        message = turn.last_message if turn else None
         delivery = getattr(message, 'file_delivery', None)
         if delivery and Path(delivery['path']).resolve() == Path(media[0]['path']).resolve():
             metadata['file_delivery'] = dict(delivery)

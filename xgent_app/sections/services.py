@@ -166,6 +166,8 @@ class GlobalRecorder:
         stamped_metadata.setdefault('src', _RECORDER_SOURCE_ID)
         if current_scope().run_id:
             stamped_metadata.setdefault('run_id', current_scope().run_id)
+        if turn is not None:
+            stamped_metadata.setdefault('reply_group_id', turn.reply_group_id)
         if current_scope().telegram_delivery is False:
             stamped_metadata['telegram_route_enabled'] = False
         if current_scope().origin == 'telegram':

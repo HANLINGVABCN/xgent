@@ -320,7 +320,7 @@ async def nonstandard_results(bot, root):
                  patch.object(bot, 'execute_sendfile_protocol', AsyncMock(return_value='EXACT-SENDFILE')), \
                  patch.object(bot, 'write_text_protocol_file', AsyncMock(return_value={})), \
                  patch.object(bot, 'write_base64_protocol_file', AsyncMock(return_value={})), \
-                 patch.object(bot, 'send_written_agent_file', AsyncMock(return_value='EXACT-FILE-' + kind)), \
+                 patch.object(bot, 'present_written_agent_file', AsyncMock(return_value='EXACT-FILE-' + kind)), \
                  patch.object(bot, 'execute_shell_protocol', fake_shell):
                 h.replies = ['DO-TOOL', 'DONE']
                 await h.turn('perform ' + kind)

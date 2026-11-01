@@ -339,12 +339,16 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif data in {"menu_price_table", "add_price_model", "menu_merge_map"} or data.startswith("edit_price_"):
             await handle_price_table_callbacks(update, context)
 
-        elif data == "menu_more_settings":
+        elif data in {"menu_more_settings", "menu_more_settings:2"}:
             await query.message.edit_text(
                 build_settings_menu_text(),
-                reply_markup=get_more_settings_menu(),
+                reply_markup=get_more_settings_menu(2 if data.endswith(':2') else 1),
                 parse_mode=constants.ParseMode.HTML
             )
+
+        elif data.startswith(('menu_backup_', 'backup_export:', 'backup_import:', 'backup_page:', 'backup_status:')):
+            from xgent_app.bot_data import handle
+            await handle(globals(), context, query, data)
 
         elif data == "menu_skills":
             await query.message.edit_text(

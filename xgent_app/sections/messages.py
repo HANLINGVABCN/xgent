@@ -19,7 +19,7 @@ from xgent_app.agent_history import (
 )
 from xgent_app.agent_dispatch import dispatch_standard_protocol
 from xgent_app.agent_shell import execute_shell_protocol
-from xgent_app.agent_file_delivery import send_written_agent_file
+from xgent_app.agent_file_delivery import present_written_agent_file
 from xgent_app.agent_files import (
     write_base64_protocol_file,
     write_text_protocol_file,
@@ -1828,6 +1828,8 @@ async def process_conversation(update: Update, context: ContextTypes.DEFAULT_TYP
                 mode = normalize_mode(await db.get_config_fresh('presentation_mode', 'folded'))
                 UserDataManager.set('presentation_mode', mode)
                 turn = PresentationTurn(mode)
+                if resume_state and resume_state.get('reply_group_id'):
+                    turn.reply_group_id = resume_state['reply_group_id']
                 context = PresentationContext(context, turn)
                 with presentation_turn(turn):
                     try:
@@ -2350,12 +2352,11 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                                 block, executor=AgentExecutor
                             )
                             current_turn().observe_operation({'success': True})
-                            file_notice = await send_written_agent_file(
+                            file_notice = await present_written_agent_file(
                                 written_file,
                                 protocol="file",
                                 context=context,
                                 chat_id=update.effective_chat.id,
-                                max_file_size=AgentExecutor.MAX_FILE_SIZE,
                                 safe_send_message=safe_send_message,
                                 safe_text=safe_text,
                                 html_parse_mode=constants.ParseMode.HTML,
@@ -2394,12 +2395,11 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                                 block, executor=AgentExecutor
                             )
                             current_turn().observe_operation({'success': True})
-                            file_notice = await send_written_agent_file(
+                            file_notice = await present_written_agent_file(
                                 written_file,
                                 protocol="file:base64",
                                 context=context,
                                 chat_id=update.effective_chat.id,
-                                max_file_size=AgentExecutor.MAX_FILE_SIZE,
                                 safe_send_message=safe_send_message,
                                 safe_text=safe_text,
                                 html_parse_mode=constants.ParseMode.HTML,
@@ -2464,6 +2464,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             origin=AgentTurnOrigin.ask(),
                             form_bot=context.bot.original,
                             native_session=native_session,
+                            reply_group_id=current_turn().reply_group_id,
                         )
                         if native_session is not None and native_session.mode == 'toolcall':
                             native_session.remaining = list(protocol_blocks[protocol_index + 1:])
@@ -2959,6 +2960,7 @@ async def resume_from_ask(ask_id: str) -> str:
         'answer_message': answer_message,
         'queue_submit': True,
         'native_session': pending.native_session,
+        'reply_group_id': pending.reply_group_id,
     }
     await process_conversation(
         update,
@@ -3014,6 +3016,7 @@ async def cancel_ask(ask_id: str) -> str:
         'turn_history_snapshot': pending.turn_history_snapshot,
         'answer_message': answer_message,
         'native_session': pending.native_session,
+        'reply_group_id': pending.reply_group_id,
     }
     await process_conversation(
         update, context, notice,

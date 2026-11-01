@@ -351,7 +351,7 @@ import {syncAskForm} from './ask-form.js';
             // 折叠交互（CSS blockquote[expandable] + bindContentClicks 里的点击切换）。
           } else if (a.name === "class") {
             var classes = a.value.split(/\s+/).filter(function (name) {
-              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note)$/.test(name);
+              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note|file-write-result)$/.test(name);
             });
             if (classes.length) c.setAttribute("class", classes.join(" "));
             else c.removeAttribute("class");
@@ -513,25 +513,27 @@ import {syncAskForm} from './ask-form.js';
 
   function syncTurnAuthors(root){
     if(!root)return;
-    let seenReply=false,turnId=null,runId=null,conversationId=null,previous=null;
+    let seenReply=false,turnId=null,runId=null,groupId=null,conversationId=null,previous=null;
     for(const row of root.children){
       row.classList.remove('followed-by-output','attached-output','followed-by-round','round-followup');
       if(!row.classList.contains('msg-row')||row.classList.contains('presentation-hidden'))continue;
       const cid=row.dataset.presentationConversationId||null,id=row.dataset.turnId||null,run=row.dataset.runId||null;
-      if(cid&&conversationId&&cid!==conversationId){seenReply=false;turnId=null;runId=null;previous=null;}
-      const sameTurn=!!id&&id===turnId,sameRun=!!run&&run===runId;
-      const changed=!sameTurn&&!sameRun&&((id&&turnId&&id!==turnId)||(run&&runId&&run!==runId));
+      const group=row.dataset.replyGroupId||null;
+      if(cid&&conversationId&&cid!==conversationId){seenReply=false;turnId=null;runId=null;groupId=null;previous=null;}
+      const sameTurn=!!id&&id===turnId,sameRun=!!run&&run===runId,sameGroup=!!group&&group===groupId;
+      const changed=!sameTurn&&!sameRun&&!sameGroup&&((id&&turnId&&id!==turnId)||(run&&runId&&run!==runId)||(group&&groupId&&group!==groupId));
       if(changed)previous=null;
       if(cid)conversationId=cid;
       if(row.classList.contains('user')){
         // A queued message or form answer can belong to the same logical turn.
         // Old records without turn IDs fall back to user-message boundaries.
-        if(!sameTurn&&!sameRun)seenReply=false;
-        turnId=id;runId=run;
+        if(!sameTurn&&!sameRun&&!sameGroup){seenReply=false;groupId=null;}
+        turnId=id;runId=run;if(group)groupId=group;
       }else if(row.classList.contains('ai')){
-        if(changed){seenReply=false;turnId=null;runId=null;}
+        if(changed){seenReply=false;turnId=null;runId=null;groupId=null;}
         if(id)turnId=id;
         if(run)runId=run;
+        if(group)groupId=group;
         row.classList.toggle('turn-continuation',seenReply);
         seenReply=true;
       }
@@ -1526,6 +1528,7 @@ import {syncAskForm} from './ask-form.js';
     entry.webDisplay=frame.web_display;
     if(frame.turn_id)entry.row.dataset.turnId=String(frame.turn_id);
     if(frame.run_id)entry.row.dataset.runId=String(frame.run_id);
+    if(frame.reply_group_id)entry.row.dataset.replyGroupId=String(frame.reply_group_id);
     if(frame.conversation_id)entry.row.dataset.presentationConversationId=frame.conversation_id;
     if(frame.record_id!=null&&!frame.ui_message_id){entry.durable=true;entry.row.dataset.recordId=String(frame.record_id);}
     applyAiGeneration(entry, frame.timestamp??frame.ts, frame.ai_generation);
@@ -3796,6 +3799,7 @@ import {syncAskForm} from './ask-form.js';
       const entry=makeBubble(role,message.content,null,message.parse_mode,null,message.msg_type,message.timestamp,message.web_display,message.ai_generation,target,message.message_policy);
       if(message.turn_id)entry.row.dataset.turnId=String(message.turn_id);
       if(message.run_id)entry.row.dataset.runId=String(message.run_id);
+      if(message.reply_group_id)entry.row.dataset.replyGroupId=String(message.reply_group_id);
       if(message.conversation_id)entry.row.dataset.presentationConversationId=message.conversation_id;
       if(message.media?.length)setInlineMedia(entry,message.media);
       if(message.ask_form)syncAskForm(entry,message.ask_form);

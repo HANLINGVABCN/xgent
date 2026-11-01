@@ -173,7 +173,7 @@ class DataParts:
                 for row in conn.execute(query):
                     yield {"type": "row", "table": table, "values": [encode(value) for value in row]}
 
-    def capture(self, directory, categories):
+    def capture(self, directory, categories, *, include_environment=True):
         categories = [key for key in categories if key in PART_CATEGORIES]
         if not categories:
             return []
@@ -185,7 +185,8 @@ class DataParts:
             raise ValueError("分类环境文件不能是符号链接")
         # Use one environment snapshot across credential/AI/application parts.
         previous_snapshot = self._env_snapshot
-        self._env_snapshot = (env_path.is_file(), env_path.read_text(encoding="utf-8-sig") if env_path.is_file() else "")
+        self._env_snapshot = ((env_path.is_file(), env_path.read_text(encoding="utf-8-sig") if env_path.is_file() else "")
+                              if include_environment else (False, ""))
         try:
             for category in categories:
                 target = directory / (category + ".jsonl")

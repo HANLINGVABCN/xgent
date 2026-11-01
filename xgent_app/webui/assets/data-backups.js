@@ -2,8 +2,8 @@ import {el,button,field,select,check,wb,message,bytes,requestId} from './compone
 
 const FORMAT_DEFAULTS=[
   {id:'zip',label:'ZIP · 通用',description:'通用兼容，均衡压缩'},
-  {id:'tar.gz',label:'TAR.GZ · 最快模式',description:'低压缩级别，优先速度'},
-  {id:'tar.xz',label:'TAR.XZ · 最小模式',description:'更高压缩率，优先体积'}
+  {id:'tar.zst',label:'Zstd · 快速',description:'快速流式压缩，优先速度'},
+  {id:'tar.xz',label:'XZ · 高压缩',description:'高压缩级别，优先体积，耗时更长'}
 ];
 const PHASES={pending:'等待开始',snapshotting:'正在创建数据库快照',packing:'正在压缩',retrying:'文件发生变化，正在重试',verifying:'正在扫描并校验内容',verified:'扫描与校验通过',backing_up:'正在保存导入前自动备份',activating:'正在替换数据并清除旧内容',restarting:'正在切换并重启',starting:'正在启动服务',completed:'已完成',cancelled:'已取消扫描'};
 const store=(key,value)=>{try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key);}catch{}};
@@ -26,7 +26,7 @@ export async function dataBackupCards({page,card,state={},dirtyForm=()=>{}}){
   const categories=estimate.groups||[];
   const chosen=new Set(rules.selected_groups||estimate.recommended_groups||categories.filter(item=>item.selected).map(item=>item.id));
   const selectedParts=()=>[...new Set(categories.filter(item=>chosen.has(item.id)).flatMap(item=>item.categories))];
-  let format=rules.archive_format||'zip',exportBusy=false,activating=false,deleting=false;
+  let format=rules.archive_format==='tar.gz'?'tar.zst':rules.archive_format||'zip',exportBusy=false,activating=false,deleting=false;
   let estimateSerial=0,estimateTimer=null,estimateAbort=null,selectionSerial=0;
   let exportTimer=null,importTimer=null,importId=null,selectedName=null,currentSource='';
   const deleteNames=new Set();
@@ -80,7 +80,7 @@ export async function dataBackupCards({page,card,state={},dirtyForm=()=>{}}){
   const listBox=el('div',{class:'wb-backup-list'}),listFeedback=el('div');
   const importProgress=el('div',{class:'wb-data-progress',role:'status','aria-live':'polite'}),previewBox=el('div',{class:'wb-import-preview'});
   const sourceText=el('p',{class:'wb-import-source'});
-  const file=el('input',{type:'file',accept:'.zip,.tar.gz,.tar.xz,application/zip,application/gzip,application/x-xz','aria-label':'上传压缩包以扫描内容'});
+  const file=el('input',{type:'file',accept:'.zip,.tar.zst,.tar.gz,.tar.xz,application/zip,application/zstd,application/gzip,application/x-xz','aria-label':'上传压缩包以扫描内容'});
   const dropzone=el('div',{class:'wb-backup-dropzone'},el('strong',{},'上传压缩包'),el('p',{},'拖放 ZIP、TAR.GZ、TAR.XZ，或选择文件。选择后立即上传并扫描，不会直接导入。'),file);
   file.onchange=()=>{if(file.files[0])uploadFile(file.files[0]);};
   dropzone.ondragover=event=>{event.preventDefault();if(!activating)dropzone.classList.add('dragover');};
@@ -170,7 +170,7 @@ export async function dataBackupCards({page,card,state={},dirtyForm=()=>{}}){
   }
   async function uploadFile(uploaded){
     const serial=await beginSelection(uploaded.name);if(serial==null)return;
-    if(!/\.(zip|tar\.gz|tar\.xz)$/i.test(uploaded.name)){importProgress.replaceChildren(message('请选择 ZIP、TAR.GZ 或 TAR.XZ 压缩包。'));return;}
+    if(!/\.(zip|tar\.zst|tar\.gz|tar\.xz)$/i.test(uploaded.name)){importProgress.replaceChildren(message('请选择 ZIP、Zstd、XZ 或旧 TAR.GZ 压缩包。'));return;}
     const data=new FormData();data.append('file',uploaded);data.append('text','scan-instance-backup');data.append('idempotency_key',requestId());
     const xhr=new XMLHttpRequest();xhr.open('POST','/api/workbench/data/import');
     xhr.upload.onprogress=event=>{if(serial!==selectionSerial||!event.lengthComputable)return;importProgress.replaceChildren(el('p',{},'正在上传 · '+Math.floor(event.loaded/event.total*100)+'%'),el('progress',{max:event.total,value:event.loaded}));};

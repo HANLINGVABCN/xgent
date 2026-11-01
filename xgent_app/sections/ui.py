@@ -312,10 +312,10 @@ def build_text_stitch_pending_text(pending: PendingTextConversation) -> str:
         "继续发送文字或非图片文件会追加到本次内容；全部发送完后点“完成，发送给AI”。"
     )
 
-def get_more_settings_menu():
+def get_more_settings_menu(page=1):
     stream_style_label = get_stream_style_label()
 
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("🎚️ 参数", callback_data="menu_timeout_settings"),
          InlineKeyboardButton(f"🧠 思考:{_fmt_thinking_level()}", callback_data="menu_thinking_level")],
         [InlineKeyboardButton(f"🌊 流式:{stream_style_label}", callback_data="toggle_stream_style"),
@@ -326,12 +326,23 @@ def get_more_settings_menu():
         [InlineKeyboardButton(f"📎 工具结果留存:{'🟢 开' if normalize_bool(UserDataManager.get('readx_persist_context', False), False) else '🔴 关'}", callback_data="toggle_readx_persist_context")],
         [InlineKeyboardButton("ℹ️ 状态", callback_data="cmd_info"),
          InlineKeyboardButton("🧩 Skill 管理", callback_data="menu_skills")],
-        [InlineKeyboardButton("📤 导出", callback_data="cmd_export_all"),
-         InlineKeyboardButton("⬆️ 更新", callback_data="cmd_update")],
+        [InlineKeyboardButton("📤 导出数据", callback_data="menu_backup_export"),
+         InlineKeyboardButton("📥 导入数据", callback_data="menu_backup_import")],
+        [InlineKeyboardButton("⬆️ 更新", callback_data="cmd_update")],
         [InlineKeyboardButton("压缩上下文", callback_data="cmd_compress")],
-        [InlineKeyboardButton("🔄 重启", callback_data="cmd_restart"),
-         InlineKeyboardButton("🔙 返回", callback_data="act_main_menu")]
-    ])
+        [InlineKeyboardButton("🔄 重启", callback_data="cmd_restart")]
+    ]
+    scope = current_scope(required=False)
+    if scope is not None and scope.origin in {'web', 'cli'}:
+        # Web has its full backup page; preserve the original native memory export.
+        rows[6] = [InlineKeyboardButton('📤 导出对话记忆', callback_data='cmd_export_all')]
+    if page == 2:
+        return InlineKeyboardMarkup(rows[6:] + [
+            [InlineKeyboardButton('◀ 上一页 · 2/2', callback_data='menu_more_settings')],
+            [InlineKeyboardButton('🔙 返回', callback_data='act_main_menu')]])
+    return InlineKeyboardMarkup(rows[:6] + [
+        [InlineKeyboardButton('下一页 · 1/2 ▶', callback_data='menu_more_settings:2')],
+        [InlineKeyboardButton('🔙 返回', callback_data='act_main_menu')]])
 
 
 def get_skills_menu():

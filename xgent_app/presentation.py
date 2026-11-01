@@ -13,6 +13,7 @@ import copy
 import json
 import re
 import time
+import uuid
 from typing import Any
 
 from .protocols import ProtocolParser
@@ -227,6 +228,7 @@ class PresentationTurn:
     last_message: Any = None
     last_record_id: int | None = None
     operation_messages: dict = field(default_factory=dict)
+    reply_group_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def __post_init__(self):
         self.mode = FOLDED

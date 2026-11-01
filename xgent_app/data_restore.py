@@ -1,4 +1,4 @@
-"""Detached Linux restore coordinator. Invoked only after explicit Web confirm."""
+"""Detached Linux restore coordinator after an authorized Web or Bot import."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ def main(job_file, code_dir, data_dir):
         Path(data_dir).resolve(),
     )
     saved = json.loads(job_file.read_text(encoding="utf-8"))
+    preserve_environment = saved.get('preserve_environment') is True
     paths = DataPaths(code, root)
     bundles = DataBundles(paths)
     rollback = None
@@ -44,6 +45,8 @@ def main(job_file, code_dir, data_dir):
             raise RuntimeError("服务" + action + "失败，原数据仍保留")
 
     try:
+        manifest = json.loads((Path(saved['staging']) / 'restore-manifest.json').read_text(encoding='utf-8'))
+        preserve_environment = preserve_environment or manifest.get('include_environment') is False
         # Never stop the source server until the archive and SQLite have passed
         # every staging check. The HTTP result has already been acknowledged.
         time.sleep(1)
@@ -55,9 +58,10 @@ def main(job_file, code_dir, data_dir):
                 include_prompts=True,
                 name_prefix="pre-import",
                 _maintenance_locked=True,
+                include_environment=not preserve_environment,
             )
             state(pre_import_backup=pre_import, phase="activating")
-            result = bundles.activate(saved["staging"])
+            result = bundles.activate(saved["staging"], preserve_environment=preserve_environment)
             rollback = Path(result["rollback_dir"]) if result["rollback_dir"] else None
             state(rollback_dir=str(rollback) if rollback else None, phase="starting")
         started = time.time()

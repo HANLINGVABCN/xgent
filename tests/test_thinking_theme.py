@@ -50,3 +50,31 @@ def test_thinking_text_is_readable_in_each_theme(full_output_server, dark, mobil
                 assert contrast >= 4.5, (dark, name, contrast, values)
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize('dark', [False, True])
+def test_missing_file_has_compact_red_text_without_code_block(full_output_server, dark):
+    server, _, _, _ = full_output_server
+    playwright = pytest.importorskip('playwright.sync_api')
+    with playwright.sync_playwright() as p:
+        if not Path(p.chromium.executable_path).exists():
+            pytest.skip('Chromium unavailable')
+        browser, context, base = browser_session(server, p)
+        try:
+            page = context.new_page()
+            page.goto(base)
+            page.wait_for_function('!document.getElementById("btn-send").disabled')
+            page.evaluate('(dark)=>document.body.classList.toggle("dark",dark)', dark)
+            server.outbox.put({'type': 'record_snapshot', 'record_id': 998, 'id': 998,
+                'msg_type': 'agent_result', 'role': 'assistant', 'text': '', 'file_message': True,
+                'media': [{'kind': 'file', 'filename': 'update_public.py', 'error': '原件不存在或无法读取'}]})
+            error = page.locator('[data-record-id="998"] .media-error')
+            error.wait_for()
+            assert error.inner_text() == 'update_public.py\n原件不存在或无法读取'
+            assert error.evaluate('node=>getComputedStyle(node).fontSize') == '12px'
+            color = error.evaluate('node=>getComputedStyle(node).color')
+            channels = [int(n) for n in color.removeprefix('rgb(').removesuffix(')').split(',')]
+            assert channels[0] > channels[1] and channels[0] > channels[2], color
+            assert page.locator('[data-record-id="998"] pre').count() == 0
+        finally:
+            browser.close()

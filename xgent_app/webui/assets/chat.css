@@ -659,6 +659,7 @@
   .media-audio { display: block; width: 340px; max-width: 100%; margin: 4px 0; }
   .media-cap { font-size:calc(var(--web-ui-font-size,13px) * 1.03846); color: var(--text-2); padding: 2px 6px 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .media-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+  .bubble .media-error { font:12px/17px var(--mono); color:var(--danger); }
 
   .media-dl {
     position: absolute; right: 12px; top: 12px; z-index: 2;
@@ -1125,3 +1126,4 @@
 .bubble.has-media .fc-details{display:none}
 .bubble.user.has-media .fc-details{display:initial}
 .bubble.has-media .message-media{margin-bottom:0}
+.bubble .file-write-result{font:12px/17px var(--mono);color:var(--text-2);overflow-wrap:anywhere}

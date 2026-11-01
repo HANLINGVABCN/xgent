@@ -4,6 +4,10 @@
 
 Telegram 和 CLI 继续作为完整接入端，与 Web 共用模型、记忆、工具执行和表单服务。可以单独部署 Web，也可以同时使用多个客户端。
 
+`file-x`／`write_file` 和 Base64 写入只写盘并显示简短结果，文件下载由显式 `sendfile-x`／`send_file` 交付，不再为每次写入自动发送文件卡片。Web 文件缺失提示使用 12px 红字，字号与命令一致。
+
+Web 备份提供 ZIP（通用）、Zstd（快速）和 XZ（高压缩）三种模式，旧 TAR.GZ 仍可读取。Bot“更多设置 → 第二页”增加导出数据、导入数据：原生选择压缩模式或已有备份，默认全部实例数据但排除整份 `.env`，导入保留本机 Bot Token 和用户 ID。两端使用同一份本地备份服务，可分别独立运行。详见 [备份模式与 Bot 导入导出](docs/bot-backups.md)。
+
 修复 Web 生图向 Telegram 话题投递时的 SDK 参数错误，图片投递 ID 关联到实际生成记录。网页撤回同步删除 Bot 原消息及后续回复、输出、媒体和表单，按会话校验关联；分支复制的历史不继承来源消息的删除权。思考展开内容使用独立主题文字色，白天与夜间均可读。详见 [同步修复说明](docs/web-telegram-sync.md)。
 
 Web 安全页可手动添加验证器两步验证：扫码或录入密钥后验证六位动态码，启用后密码登录需第二步；提供一次性恢复码及本地恢复入口。电报授权和 Telegram 免密登录不加二次验证，Cloudflare 邮箱验证保留。详见 [Web 2FA 使用说明](docs/web-two-factor.md)。
@@ -53,9 +57,8 @@ Web 新增默认收起的思考块：两种流式展示最新行，结束后只�
 > **本项目不提供任何沙箱、容器或强制安全隔离。** 除命令黑名单外，Agent 模式的执行行为没有任何拦截机制：模型生成的命令将以运行账号的完整权限直接作用于服务器，可访问的文件、可执行的操作均由该账号的权限边界决定。命令黑名单仅为字符串匹配，可被规避，不应视为安全边界。部署前请务必阅读[安全说明](#安全说明)，并使用独立的低权限账号运行。
 
 > [!NOTE]
-> 本仓库 `HANLINGVABCN/xgent` 为私人项目，从已验证的 XGent 基线保留历史与许可证。
-> 安装前需使用有权限的 GitHub 账号认证；在线更新默认读取本私仓，GitHub Token 只用于仓库访问。
-> 现用仓库为 `HANLINGVABCN/xgent` 和 `HANLINGVABCN/xgent-test`；更新菜单的测试源读取后者，两者均为私有。
+> 主仓库 `HANLINGVABCN/xgent` 已公开，源码历史与许可证保留；克隆和默认更新无需 GitHub 认证。
+> `HANLINGVABCN/xgent-test` 为私有测试仓库；读取测试更新源时需要有权限的 GitHub Token。
 > 旧发布与测试仓库已改为私有并加上 `pending-delete-` 前缀，简介标为“待删除”；历史保留，后续改动发布到现用仓库。
 
 ## 本次改进：统一单行预览与紧凑回复尾注
@@ -208,10 +211,10 @@ XGent 由三个可以自由组合的组件构成，`install.sh` 装完环境后�
 
 ### 一键命令
 
-以下命令会在当前目录克隆私人项目；先安装 GitHub CLI，并用有仓库权限的账号登录。也可使用已配置认证的普通 `git clone`。
+以下命令在当前目录克隆公开主仓库：
 
 ```bash
-gh auth login && gh repo clone HANLINGVABCN/xgent && cd xgent && chmod +x install.sh && ./install.sh
+git clone https://github.com/HANLINGVABCN/xgent.git && cd xgent && chmod +x install.sh && ./install.sh
 ```
 
 安装脚本会先让你选**保活方式**（系统级 systemd / PM2 / nohup / 前台，只在首次安装时问一次），
@@ -241,8 +244,7 @@ gh auth login && gh repo clone HANLINGVABCN/xgent && cd xgent && chmod +x instal
 
 ```bash
 cd /opt
-gh auth login
-gh repo clone HANLINGVABCN/xgent
+git clone https://github.com/HANLINGVABCN/xgent.git
 cd xgent
 chmod +x install.sh
 ./install.sh
@@ -255,15 +257,15 @@ BOT_TOKEN=你的 Telegram Bot Token
 AUTHORIZED_USER_ID=你的 Telegram 用户 ID
 ```
 
-私人仓库的 `/update` 和安装脚本在线更新需要配置：
+默认更新源是公开主仓库，无需 Token。使用私有测试源时配置：
 
 ```env
 # Fine-grained token 只需要该仓库 Contents: Read-only。
 UPDATE_GITHUB_TOKEN=你的 GitHub Token
-UPDATE_ZIP_URL=https://api.github.com/repos/HANLINGVABCN/xgent/zipball/main
+UPDATE_ZIP_URL=https://api.github.com/repos/HANLINGVABCN/xgent-test/zipball/main
 ```
 
-`UPDATE_ZIP_URL` 可省略，默认使用上面的私人仓库地址。私有仓库没有配置 Token 时，GitHub 会返回 404/403，在线更新将失败。
+`UPDATE_ZIP_URL` 可省略，默认使用公开 `xgent` 主仓库。私有测试仓库没有配置 Token 时，GitHub 会返回 404/403。
 
 ## 第一次使用
 

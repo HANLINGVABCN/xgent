@@ -119,7 +119,7 @@ def test_inventory_and_sample_estimates_follow_selection(bundles):
     assert estimate["size"] == output.stat().st_size
     assert estimate["file_count"] == 1
     assert not estimate["includes_secrets"]
-    assert set(item["id"] for item in estimate["formats"]) == set(FORMATS)
+    assert set(item["id"] for item in estimate["formats"]) == {key for key, value in FORMATS.items() if not value.get('legacy')}
     for item in estimate["formats"]:
         assert item["is_estimate"] and item["estimated_size"] > 0
         assert item["estimated_seconds"] > 0 and item["sample_bytes"] <= 1024 * 1024

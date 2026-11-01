@@ -339,6 +339,16 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
     if isinstance(metadata.get('native_calls'), list) and metadata['native_calls']:
         presentation = {**presentation, 'native_calls': metadata['native_calls'], 'agent_call_mode': 'toolcall'}
     kind, raw = record.get('msg_type'), str(record.get('content') or '')
+    write = metadata.get('file_write')
+    if kind == 'agent_result' and isinstance(write, dict) and isinstance(write.get('text'), str):
+        text = write['text']
+        segments = [{'kind': 'html', 'text': '<span class="file-write-result">' + _html.escape(text) + '</span>'}]
+        footer = footer_html(presentation)
+        if footer:
+            segments.append({'kind': 'html', 'text': footer, 'footer': True})
+        message.update(content=text, parse_mode=None,
+                       web_display={'version': 1, 'segments': segments, 'presentation_mode': 'folded'})
+        return
     delivery = metadata.get('file_delivery')
     if kind == 'agent_result' and isinstance(delivery, dict) and isinstance(delivery.get('caption'), str):
         caption = delivery['caption']
@@ -445,7 +455,7 @@ def build_history_message(
     except (ValueError, TypeError):
         metadata = {}
         message["media_error"] = "\u5386\u53f2\u9644\u4ef6\u5143\u6570\u636e\u635f\u574f"
-    if kind == 'agent_result' and 'file_delivery' not in metadata:
+    if kind == 'agent_result' and 'file_delivery' not in metadata and 'file_write' not in metadata:
         delivery = delivered_file_display(content)
         if delivery:
             metadata = {**metadata, 'file_delivery': delivery}
@@ -458,6 +468,8 @@ def build_history_message(
     live = metadata.get('web_live')
     if metadata.get('run_id') or metadata.get('queue_run_id'):
         message['run_id']=metadata.get('run_id') or metadata['queue_run_id']
+    if isinstance(metadata.get('reply_group_id'), str):
+        message['reply_group_id'] = metadata['reply_group_id']
     if isinstance(metadata.get('queue_id'), str):
         message['queue_id'] = metadata['queue_id']
     if (isinstance(live, dict) and isinstance(live.get('epoch'), str)
@@ -511,6 +523,8 @@ def build_history_message(
         for segment in (message.get('web_display') or {}).get('segments', []):
             segment['text'] = re.sub(notice, '', segment.get('text', '')).strip()
     if kind not in _FILE_TYPES and not metadata.get('server_uploads'):
+        return message
+    if kind == 'agent_result' and metadata.get('file_write'):
         return message
     if (metadata.get("attachment_purpose") == "configuration"
             or kind in {"user_file", "user_photo"} and content.startswith(_CONFIG_PREFIXES)):

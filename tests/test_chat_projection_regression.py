@@ -24,6 +24,14 @@ def test_tool_only_media_file_form_workflow_preserves_display_and_waiting_state(
     assert len([m for m in workflow_case['history'] if m.get('file_message')]) == 2
 
 
+@pytest.mark.parametrize('mode', ['toolcall', 'fence'])
+@pytest.mark.parametrize('style', ['nonstream', 'foreground', 'background'])
+def test_text_and_binary_writes_do_not_send_files_in_either_mode(tmp_path, mode, style):
+    result = run_in_app('import asyncio\nfrom tests.chat_projection_probe import write_without_upload\n' +
+                        f'print(json.dumps(asyncio.run(write_without_upload(bot, {str(tmp_path)!r}, {mode!r}, {style!r}))))')
+    assert result['written_exactly'] and result['no_upload']
+
+
 def test_replaying_previous_reply_does_not_stop_current_generation():
     turn = SimpleNamespace()
     bot = PresentationBot(SimpleNamespace(), turn)
@@ -135,7 +143,8 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             page.wait_for_selector('.web-ask-form')
             live = page.locator('#log').inner_text()
             assert 'local media fixture' in live
-            assert '📄 已写入服务器并发送: toolcall_all_test.txt' in live
+            assert '✅ 已写入' in live
+            assert page.locator('.file-write-result').count() == 1
             assert page.locator('.fc-name', has_text='fixture.png').count() == 1
             assert page.locator('.msg-row.ai .bubble-header:visible').count() <= 1
             assert page.locator('.fc-name').first.evaluate('node=>getComputedStyle(node).fontSize') == '11px'
@@ -147,7 +156,8 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             page.wait_for_selector('.file-card')
             page.wait_for_function('Array.from(document.querySelectorAll("#log img")).every(image=>image.complete)')
             before = page.locator('#log').inner_text()
-            assert '📄 已写入服务器并发送: toolcall_all_test.txt' in before
+            assert '✅ 已写入' in before
+            assert page.locator('.file-write-result').count() == 1
             assert page.locator('.fc-name', has_text='fixture.png').count() == 1
             assert page.locator('.msg-row.ai .bubble-header:visible').count() <= 1
             page.reload()
@@ -155,5 +165,37 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             page.wait_for_function('Array.from(document.querySelectorAll("#log img")).every(image=>image.complete)')
             assert page.locator('#log').inner_text() == before
             assert page.locator('.msg-row.ai .bubble-header:visible').count() <= 1
+        finally:
+            browser.close()
+
+
+def test_form_continuation_keeps_author_group_across_runs_and_new_user_starts_a_new_group(full_output_server):
+    server, _, _, _ = full_output_server
+    playwright = pytest.importorskip('playwright.sync_api')
+    async def history(limit):
+        return [
+            {'id': 801, 'msg_type': 'ai_reply', 'role': 'assistant', 'content': '表单之前',
+             'run_id': 'first-run', 'reply_group_id': 'form-group', 'timestamp': 1},
+            {'id': 802, 'msg_type': 'ai_reply', 'role': 'assistant', 'content': '表单之后',
+             'run_id': 'resumed-run', 'reply_group_id': 'form-group', 'timestamp': 2},
+            {'id': 803, 'msg_type': 'user_text', 'role': 'user', 'content': '另一个问题', 'timestamp': 3},
+            {'id': 804, 'msg_type': 'ai_reply', 'role': 'assistant', 'content': '新回复',
+             'run_id': 'next-run', 'reply_group_id': 'next-group', 'timestamp': 4},
+        ]
+    server.config.read_history = history
+    with playwright.sync_playwright() as p:
+        if not Path(p.chromium.executable_path).exists():
+            pytest.skip('Chromium unavailable')
+        browser, context, base = browser_session(server, p)
+        try:
+            page = context.new_page()
+            page.goto(base)
+            page.locator('[data-record-id="804"]').wait_for()
+            assert page.locator('.msg-row.ai .bubble-header:visible').count() == 2
+            assert 'turn-continuation' in page.locator('[data-record-id="802"]').get_attribute('class')
+            assert 'turn-continuation' not in page.locator('[data-record-id="804"]').get_attribute('class')
+            page.reload()
+            page.locator('[data-record-id="804"]').wait_for()
+            assert page.locator('.msg-row.ai .bubble-header:visible').count() == 2
         finally:
             browser.close()

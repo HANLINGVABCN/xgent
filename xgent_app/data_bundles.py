@@ -1,7 +1,7 @@
 """Verified streaming backups and in-project state restoration.
 
 This module deliberately has no Telegram/model dependencies. CLI and Web call
-the same service. Archives contain state only, and failed validation never
+the same service; Bot uses it without starting Web. Archives contain state only, and failed validation never
 touches the active checkout.
 """
 
@@ -323,6 +323,7 @@ class DataBundles:
         categories=None,
         archive_format="zip",
         include_prompts=False,
+        include_environment=True,
     ):
         # Shared with the live application's lease, exclusive only against
         # another export. Never acquire the AI turn lock or database writer.
@@ -342,6 +343,7 @@ class DataBundles:
                         categories=categories,
                         archive_format=archive_format,
                         include_prompts=include_prompts,
+                        include_environment=include_environment,
                     )
                 except (BundleChanged, FileNotFoundError):
                     if attempt == 2:
@@ -353,6 +355,7 @@ class DataBundles:
     def _export_once(
         self, destination=None, *, outputs=False, progress=lambda **state: None,
         overwrite=False, name_prefix="manual", categories=None, archive_format="zip", include_prompts=False,
+        include_environment=True,
     ):
         try:
             selected = normalize_categories(categories, outputs)
@@ -360,6 +363,8 @@ class DataBundles:
         except ValueError as exc:
             raise BundleError(str(exc)) from exc
         scoped = categories is not None
+        if not include_environment and 'env' in selected:
+            selected.remove('env')
         if include_prompts and scoped:
             raise BundleError("分类备份请直接选择提示词类型")
         if scoped:
@@ -383,7 +388,9 @@ class DataBundles:
                 or target.resolve().is_relative_to(self.paths.code.resolve())):
             raise BundleError("备份目标已存在，或位于项目目录内部")
         temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".part")
-        entries = list(self.files(outputs, categories=categories))
+        entries = list(self.files(outputs, categories=selected if not include_environment else categories))
+        if not include_environment:
+            entries = [(name, path) for name, path in entries if name != '.env']
         if include_prompts:
             entries += list(self.files(categories=["prompts"]))
             selected.append("prompts")
@@ -397,11 +404,12 @@ class DataBundles:
         if mapping.is_file():
             roots += json.loads(mapping.read_text(encoding="utf-8")).get("previous_roots", [])
         manifest = {
-            "format": "xgent-instance", "version": 2 if scoped else 1,
+            "format": "xgent-instance", "version": 2 if scoped else (1 if include_environment else 3),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "include_command_outputs": "command_outputs" in selected,
             "includes_secrets": any(CATEGORY_MAP[key].get("sensitive") for key in selected),
             "archive_format": archive_format, "previous_roots": sorted(set(roots)), "files": {},
+            "include_environment": bool(include_environment),
         }
         if scoped:
             manifest["categories"] = selected
@@ -415,7 +423,8 @@ class DataBundles:
                     progress(phase="snapshotting", completed_bytes=0, total_bytes=total)
                     sqlite_snapshot(self.paths.database, database)
                 if scoped:
-                    entries += DataParts(self.paths.root, database).capture(Path(snapshot) / "backup_parts", selected)
+                    entries += DataParts(self.paths.root, database).capture(Path(snapshot) / "backup_parts", selected,
+                                                                           include_environment=include_environment)
                     total = sum(source.stat().st_size for _, source in entries)
                     if shutil.disk_usage(folder).free < total:
                         raise BundleError("磁盘空间不足，无法安全创建分类备份")
@@ -458,12 +467,16 @@ class DataBundles:
                     raise BundleError("备份含重复文件名")
                 manifest = json.loads(archive.read_manifest())
                 if (not isinstance(manifest, dict) or manifest.get("format") != "xgent-instance"
-                        or type(manifest.get("version")) is not int or manifest["version"] not in (1, 2)):
+                        or type(manifest.get("version")) is not int or manifest["version"] not in (1, 2, 3)):
                     raise BundleError("不支持的实例备份格式")
                 files = manifest.get("files")
-                if (not isinstance(files, dict) or (manifest["version"] == 1 and "xgent_memory.db" not in files)
+                if (not isinstance(files, dict) or (manifest["version"] in {1, 3} and "xgent_memory.db" not in files)
                         or set(names) != set(files) | {"manifest.json"}):
                     raise BundleError("备份目录清单不完整")
+                if ('include_environment' in manifest and type(manifest['include_environment']) is not bool
+                        or manifest.get('include_environment') is False and '.env' in files
+                        or manifest['version'] == 3 and manifest.get('include_environment') is not False):
+                    raise BundleError('备份环境文件标记无效')
                 selected = manifest_categories(manifest)
                 if manifest["version"] == 2:
                     for key in selected:
@@ -577,12 +590,12 @@ class DataBundles:
             shutil.rmtree(staging)
             raise
 
-    def activate(self, staging, *, categories=None):
+    def activate(self, staging, *, categories=None, preserve_environment=False):
         if self.paths.root.resolve() != self.paths.code.resolve():
             raise BundleError('单目录模式只允许恢复当前项目的数据')
         if categories is not None:
             self.select_import(staging, categories)
-        return self._activate_project(Path(staging).resolve())
+        return self._activate_project(Path(staging).resolve(), preserve_environment=preserve_environment)
 
     PROJECT_STATE = (
         ".env",
@@ -743,7 +756,7 @@ class DataBundles:
         if staging.exists():
             shutil.rmtree(staging)
 
-    def _activate_project(self, staging):
+    def _activate_project(self, staging, *, preserve_environment=False):
         """Replace declared categories; old v1 archives retain full restore."""
         root = self.paths.code.resolve()
         if staging.parent != root.parent or not staging.name.startswith(".xgent-restore-"):
@@ -769,6 +782,9 @@ class DataBundles:
                     names.append("prompts")
                 if "server_assets" not in manifest_categories(full_manifest):
                     names.remove("server_assets")
+        manifest_file = staging / 'restore-manifest.json'
+        if manifest_file.is_file() and json.loads(manifest_file.read_text(encoding='utf-8')).get('include_environment') is False:
+            preserve_environment = True
         partial_files = {key: staging / "backup_parts" / (key + ".jsonl")
                          for key in (selected or []) if key in PART_CATEGORIES}
         if partial_files:
@@ -791,7 +807,7 @@ class DataBundles:
                     os.replace(merged, staging / "xgent_memory.db")
                     names += ["xgent_memory.db", "xgent_memory.db-wal", "xgent_memory.db-shm", "xgent_memory.db-journal"]
                 env_parts = [key for key, value in summaries.items() if value["has_environment_data"]]
-                if env_parts:
+                if env_parts and not preserve_environment:
                     self._state_path(root, ".env")
                     original_env = self.paths.env.read_text(encoding="utf-8-sig") if self.paths.env.is_file() else ""
                     values = {}
@@ -806,6 +822,8 @@ class DataBundles:
             except (ValueError, sqlite3.Error) as exc:
                 raise BundleError("所选部分无法安全导入：" + str(exc)) from exc
         names = list(dict.fromkeys(names))
+        if preserve_environment:
+            names = [name for name in names if name != '.env']
         if selected:
             write_json(staging / "restore-info.json", {
                 "restored_at": datetime.now(timezone.utc).isoformat(), "categories": selected,

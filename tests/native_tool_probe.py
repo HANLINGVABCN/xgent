@@ -145,6 +145,10 @@ async def form_sequence(bot, root, fmt, cancel=False):
         rows = await h.db.get_display_history(100)
         assert not any(r['msg_type'] == 'runtime_error' for r in rows), rows
         assert any(r['content'] == 'AFTER_FORM' for r in rows)
+        from xgent_app.presentation import metadata_dict
+        reply_groups = {metadata_dict(row.get('metadata')).get('reply_group_id')
+                        for row in rows if row['msg_type'] == 'ai_reply'}
+        assert len(reply_groups) == 1 and None not in reply_groups, reply_groups
         return {'ordered': True, 'pinned': True, 'cancel': cancel}
 
 

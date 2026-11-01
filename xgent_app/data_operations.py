@@ -1,4 +1,4 @@
-"""Non-blocking Web maintenance jobs; never run a model or Telegram sync."""
+"""Shared non-blocking maintenance jobs; no model calls or message delivery."""
 
 from __future__ import annotations
 
@@ -128,7 +128,9 @@ class DataOperations:
             raise BundleError("备份可能包含 .env 原文及 Bot/API 密钥，请明确确认。")
         saved, created = self.create("export", data.get("request_id"))
         if created:
-            self.start(self._export(saved["id"], "command_outputs" in selected, categories, format))
+            self.start(self._export(saved["id"], "command_outputs" in selected, categories, format,
+                include_environment=data.get('include_environment') is not False,
+                include_prompts=data.get('include_prompts') is True))
         return {"ok": True, **saved}
 
     def backup_settings(self):
@@ -162,7 +164,7 @@ class DataOperations:
         return {"ok": True, **self.backup_settings(), "saved": settings}
 
     def _backup_file(self, name):
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.(?:zip|tar\.gz|tar\.xz)", str(name), re.IGNORECASE):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.(?:zip|tar\.zst|tar\.gz|tar\.xz)", str(name), re.IGNORECASE):
             raise BundleError("备份文件名无效")
         directory = self.paths.backups.resolve()
         candidate = directory / str(name)
@@ -215,7 +217,7 @@ class DataOperations:
                     with ArchiveReader(path) as archive:
                         manifest = json.loads(archive.read_manifest())
                     selected = manifest_categories(manifest)
-                    summary = {"valid_manifest": manifest.get("format") == "xgent-instance" and manifest.get("version") in (1, 2),
+                    summary = {"valid_manifest": manifest.get("format") == "xgent-instance" and manifest.get("version") in (1, 2, 3),
                                "include_command_outputs": bool(manifest.get("include_command_outputs")),
                                "file_count": len(manifest.get("files") or {}),
                                "manifest_created_at": manifest.get("created_at"),
@@ -248,7 +250,8 @@ class DataOperations:
                 deleted.append(path.name)
         return {"ok": True, "deleted": deleted, **self.list_backups()}
 
-    async def _export(self, identifier, outputs, categories=None, archive_format="zip"):
+    async def _export(self, identifier, outputs, categories=None, archive_format="zip", *,
+                      include_environment=True, include_prompts=False):
         try:
             last_write = [0.0]
 
@@ -262,7 +265,8 @@ class DataOperations:
 
             operation = asyncio.create_task(asyncio.to_thread(
                 self.bundles.export, outputs=outputs, progress=progress,
-                categories=categories, archive_format=archive_format))
+                categories=categories, archive_format=archive_format,
+                include_environment=include_environment, include_prompts=include_prompts))
             try:
                 result = await asyncio.shield(operation)
             except asyncio.CancelledError:
@@ -365,7 +369,8 @@ class DataOperations:
             self.bundles.select_import(saved["staging"], selected)
         with self.mutex:
             self.jobs.setdefault(saved["id"], saved)
-        self.update(saved["id"], state="activating", phase="restarting")
+        self.update(saved["id"], state="activating", phase="restarting",
+                    preserve_environment=data.get('preserve_environment') is True)
         options = {
             "start_new_session": True,
             "cwd": str(self.paths.code),
@@ -373,17 +378,13 @@ class DataOperations:
             "stderr": subprocess.DEVNULL,
             "stdin": subprocess.DEVNULL,
         }
-        subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "xgent_app.data_restore",
-                str(self.job_path(saved["id"])),
-                str(self.paths.code),
-                str(self.paths.root),
-            ],
-            **options,
-        )
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "xgent_app.data_restore", str(self.job_path(saved["id"])),
+                 str(self.paths.code), str(self.paths.root)], **options)
+        except OSError as exc:
+            self.update(saved['id'], state='failed', phase='failed', error=str(exc))
+            raise BundleError('恢复进程未能启动，原数据未被替换：' + str(exc)) from exc
         return {"ok": True, "id": saved["id"], "state": "activating", "reconnect": True}
 
     def download(self, identifier):

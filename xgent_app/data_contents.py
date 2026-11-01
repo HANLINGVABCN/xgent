@@ -145,6 +145,8 @@ def manifest_categories(manifest):
     selected = normalize_categories(outputs=manifest.get("include_command_outputs", False))
     if manifest.get("include_prompts") is True:
         selected.append("prompts")
+    if manifest.get('include_environment') is False and 'env' in selected:
+        selected.remove('env')
     if any(name == "server_assets" or name.startswith("server_assets/") for name in manifest.get("files", ())):
         selected.append("server_assets")
     return selected

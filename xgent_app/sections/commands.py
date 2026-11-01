@@ -391,11 +391,11 @@ async def send_update_source_menu(message: Any, *, new=False):
     card = await (message.reply_text if new else message.edit_text)(
         "⬆️ <b>选择更新来源</b>\n\n"
         "请选择这次要从哪里拉取最新代码：\n"
-        "1. XGent 私仓：从 <code>HANLINGVABCN/xgent</code> 拉取，需要 GitHub Token。\n"
+        "1. XGent 主仓库：从公开 <code>HANLINGVABCN/xgent</code> 拉取，无需 Token。\n"
         "2. 测试仓库：从 <code>HANLINGVABCN/xgent-test</code> 拉取，需要 GitHub Token。",
         parse_mode=constants.ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("1 XGent 私仓", callback_data="select_update_source_normal")],
+            [InlineKeyboardButton("1 XGent 主仓库（公开）", callback_data="select_update_source_normal")],
             [InlineKeyboardButton("2 XGent 测试仓库", callback_data="select_update_source_test")],
             [InlineKeyboardButton("取消", callback_data="menu_more_settings")]
         ])

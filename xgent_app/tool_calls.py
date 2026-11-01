@@ -72,9 +72,9 @@ _tool('fetch', '抓取网页。一次最多五个 HTTP/HTTPS URL；结果可能�
       {'urls': {'type': 'array', 'minItems': 1, 'maxItems': 5, 'items': {'type': 'string'}}}, ['urls'])
 _tool('media', '独立媒体模型生成或编辑图片。prompt 是完整任务，files 是可选参考文件的服务器绝对路径；媒体模型不接收聊天历史。',
       {'prompt': _text('完整生成或编辑任务'), 'files': {'type': 'array', 'items': {'type': 'string'}}}, ['prompt'])
-_tool('file', '新建或明确授权的整体重写；局部修改使用 edit_file。',
+_tool('file', '新建或明确授权的整体重写；局部修改使用 edit_file。只写盘不发送，向用户交付文件使用 send_file。',
       {'path': _text('目标文件路径'), 'content': _text('文件完整原文，保留所有空格与换行。')}, ['path', 'content'])
-_tool('file_base64', '将 Base64 数据写入文件；用于二进制，不能代替媒体生成接口。',
+_tool('file_base64', '将 Base64 数据写入文件；用于二进制，不能代替媒体生成接口。只写盘不发送，交付使用 send_file。',
       {'path': _text('目标文件路径'), 'base64_data': _text('完整 Base64 编码')}, ['path', 'base64_data'])
 _tool('edit', '唯一字符串原地替换，自动备份；匹配失败需重读，不用整体覆盖。',
       {'path': _text('已有文件路径'), 'old': _text('唯一旧串，保留原缩进与换行。'),

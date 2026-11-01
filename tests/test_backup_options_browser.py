@@ -20,7 +20,7 @@ def backup_api(page, import_keys=None):
     ]:
         by_id[key].update(size=size, file_count=len(files), files=files)
     formats = [{"id": "zip", "estimated_seconds": 1.2, "estimated_size": 1000},
-               {"id": "tar.gz", "estimated_seconds": 0.8, "estimated_size": 1200},
+               {"id": "tar.zst", "estimated_seconds": 0.8, "estimated_size": 1200},
                {"id": "tar.xz", "estimated_seconds": 2.5, "estimated_size": 640}]
     rules = {"enabled": True, "frequency": "6h", "mode": "accumulate", "max_backups": 7,
              "categories": list(RECOMMENDED_CATEGORIES), "archive_format": "zip", "include_command_outputs": False,
@@ -201,6 +201,19 @@ def test_immediate_compression_saves_current_categories_format_and_frequency(bro
     assert saved["frequency"] == "2h"
     assert saved["include_command_outputs"] is True
     assert page.get_by_role("button", name="立即压缩", exact=True).is_enabled()
+    page.close()
+
+
+def test_zstd_is_the_fast_option_and_is_saved_for_export(browser_context, workspace_url):
+    page = browser_context.new_page(); records = backup_api(page)
+    page.on('dialog', lambda dialog: dialog.accept())
+    open_backups(page, workspace_url['url'])
+    assert page.locator('input[name="archive_format"]').count() == 3
+    assert page.locator('input[name="archive_format"][value="tar.gz"]').count() == 0
+    page.locator('input[name="archive_format"][value="tar.zst"]').check()
+    page.get_by_role('button', name='立即压缩', exact=True).click()
+    page.get_by_role('link', name='下载压缩包', exact=True).wait_for()
+    assert next(data for resource, data in records if resource == 'export')['archive_format'] == 'tar.zst'
     page.close()
 
 

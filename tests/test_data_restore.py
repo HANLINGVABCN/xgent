@@ -17,6 +17,7 @@ class DataRestoreTests(unittest.TestCase):
             (code / "install.sh").write_text("#!/bin/bash\n", encoding="utf-8")
             staging = code.parent / ".xgent-restore-fixture"
             staging.mkdir()
+            (staging / 'restore-manifest.json').write_text(json.dumps({'version': 1}), encoding='utf-8')
             job = code / "job.json"
             job.write_text(json.dumps({"staging": str(staging)}), encoding="utf-8")
             calls = []
@@ -29,7 +30,8 @@ class DataRestoreTests(unittest.TestCase):
                     calls.append(("export", options))
                     return {"path": str(code.parent / "xgent-backups/pre-import.zip")}
 
-                def activate(self, incoming):
+                def activate(self, incoming, *, preserve_environment=False):
+                    assert preserve_environment is False
                     calls.append(("activate", str(incoming)))
                     rollback = code / ".install-state/restore-rollback/fixture"
                     rollback.mkdir(parents=True)

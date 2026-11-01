@@ -22,7 +22,7 @@ components. The first extracted components are:
 | `xgent_app/agent_results.py` | Normalize executor dictionaries into a common Agent result contract while preserving legacy fields; no execution, persistence, or Telegram sending |
 | `xgent_app/agent_dispatch.py` | Dispatch and normalize read, edit, grep, run, search, and fetch without Telegram or persistence concerns |
 | `xgent_app/agent_files.py` | Execute text and base64 file writes; base64 decoding/writing is moved off the event loop |
-| `xgent_app/agent_file_delivery.py` | Send files produced by `file`/`file:base64` and preserve their Telegram captions and size-limit notices |
+| `xgent_app/agent_file_delivery.py` | Present compact file-write results without uploading; explicit `sendfile` owns delivery |
 | `xgent_app/agent_sendfile.py` | Execute server-file delivery, including local Bot API hard-link/copy fallback, upload indicator, timeout, and cleanup |
 | `xgent_app/agent_shell.py` | Execute shell/stdin/session protocols and preserve stop-session behavior |
 | `xgent_app/agent_trigger.py` | Execute trigger protocols and normalize failure notices |

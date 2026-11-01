@@ -331,8 +331,11 @@ def prepare_compatible_import(source, paths):
                 include_host_config=False,
             ).export(Path(scratch) / "instance.zip", outputs=True)
             return _directory_roots(*DataBundles(paths).prepare_import(bundle["path"]))
-    if not source.is_file() or not zipfile.is_zipfile(source):
-        raise BundleError("请选择实例备份 ZIP 或已解压的数据目录")
+    if not source.is_file():
+        raise BundleError("请选择实例备份压缩包或已解压的数据目录")
+    if not zipfile.is_zipfile(source):
+        # Verified TAR/Zstd/XZ backups use the same safe manifest reader.
+        return _directory_roots(*DataBundles(paths).prepare_import(source))
     with zipfile.ZipFile(source) as archive:
         if "manifest.json" in archive.namelist():
             return DataBundles(paths).prepare_import(source)

@@ -134,8 +134,11 @@ def web_display_scope(display):
 def present_web_frame(frame):
     display = current_web_display()
     result = frame
+    turn = current_turn()
+    if turn and frame.get('type') in {'message', 'edit', 'edit_markup', 'document', 'photo', 'notice'}:
+        result = {**result, 'reply_group_id': turn.reply_group_id}
     if display is not None and frame.get('type') in {'message', 'edit', 'delete', 'edit_markup'}:
-        result = {**frame, 'web_display': display, 'msg_type': frame.get('msg_type') or 'ai_reply'}
+        result = {**result, 'web_display': display, 'msg_type': frame.get('msg_type') or 'ai_reply'}
     hint = current_message_presentation()
     if hint and frame.get('type') in {'message', 'edit', 'edit_markup'}:
         result = {**result, 'msg_type': hint['kind'], 'presentation_mode': normalize_mode(hint.get('mode'))}
@@ -151,7 +154,8 @@ def present_web_frame(frame):
             pending = PENDING_ASKS.get(hint['ask_id'])
             if pending:
                 result['ask_form'] = pending.web_snapshot()
-        if hint['kind'] == 'agent_result' and turn and turn.active_operation and turn.active_operation['kind'] != 'ask':
+        if (hint['kind'] == 'agent_result' and hint.get('purpose', 'tool_result') == 'tool_result'
+                and turn and turn.active_operation and turn.active_operation['kind'] != 'ask'):
             result['web_display'] = build_operation_display(turn.active_operation, turn.mode)
     return result
 
