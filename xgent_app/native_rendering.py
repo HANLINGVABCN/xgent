@@ -18,7 +18,7 @@ def rich_calls(text, calls, *, details=''):
     namespace = _section_ns()
     legacy = namespace['markdown_to_telegram_html'](str(text)) if namespace and text else html.escape(str(text or ''))
     for call in calls:
-        block = tool_calls.operation(call)
+        block = tool_calls.display_operation(call)
         if block['type'] == 'over':
             continue
         name = 'file-x' if block['type'] == 'file_base64' else block['type'] + '-x'
@@ -37,7 +37,7 @@ def rich_calls(text, calls, *, details=''):
 def segments(text, calls, operations=()):
     values = [{'kind': 'markdown', 'text': str(text)}] if text else []
     for call in calls:
-        block = tool_calls.operation(call)
+        block = tool_calls.display_operation(call)
         if block['type'] == 'over':
             continue
         matched = next((op for op in operations if op.get('native_call_id') == call['id']), None)

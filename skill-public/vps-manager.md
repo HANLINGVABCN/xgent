@@ -15,9 +15,9 @@ VPS 多服务器管理技能：通过 SSH 管理多台远程服务器资产。
 - push --name <别名> --local <本地路径> --remote <远程路径>：SCP 上传文件到远程
 - pull --name <别名> --remote <远程路径> --local <本地路径>：SCP 从远程下载文件
 - info --name <别名>：查看服务器完整配置详情（密码脱敏显示）
-- ssh-cmd --name <别名>：输出可直接用于 shell-x 的 SSH 连接命令
+- ssh-cmd --name <别名>：输出可直接用于交互终端工具的 SSH 连接命令
 
-交互式 SSH 排查：先 exec ssh-cmd 获取连接命令，再用 shell-x 启动该命令建立交互会话，然后通过 stdin-x 操作。
+交互式 SSH 排查：先 exec ssh-cmd 获取连接命令，再用当前模式的终端启动工具建立会话，然后通过终端输入工具操作。
 密码认证方式需要宿主机安装 sshpass：apt install sshpass -y。
 首次使用前运行初始化检查：python3 skill-public/script/vps-manager/vps_tool.py init。
 ```

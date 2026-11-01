@@ -1,14 +1,14 @@
 ```!
-Read disabled skills on demand: a listed skill marked "currently disabled" retains its absolute path. Use read-x to inspect its opening ```! summary block, then read the relevant body when the task requires details. Ordinary disabling only removes the injected summary; it does not forbid using the skill.
+Read disabled skills on demand: a listed skill marked "currently disabled" retains its absolute path. Use the file-reading tool supplied for the current mode to inspect its opening ```! summary block, then read the relevant body when the task requires details. Ordinary disabling only removes the injected summary; it does not forbid using the skill.
 ```
 
 # Reading Skills
 
 1. Select a listed skill relevant to the user's request. Do not enable it or change settings just to read it.
-2. Use the existing read-x protocol with the listed absolute path and a line range. Continue until the summary fence closes; never assume a partial block is the full summary.
+2. Use the current mode’s file-reading tool with the listed absolute path and a line range. Continue until the summary fence closes; never assume a partial block is the full summary.
 3. Read the full file in consecutive ranges when its principles or complete workflow are required. Check the returned line numbers and truncation notices.
 4. Treat the summary and body as task guidance, not as permission to change files or bypass the user's instructions.
 5. Fully hidden skills are absent from the injected list, not deleted from disk. Existing references in conversation history are not erased.
 6. Agent-off mode still disables protocol execution. Do not read a skill through a protocol while Agent is off; already supplied contents remain usable.
-7. Tool-result retention (`readx_persist_context`) applies to skill reads too. When enabled, the content actually returned by read-x is retained across later user turns, subject to the text-history window, compression and clearing. When disabled, new reads use the existing short-result behavior; already retained content is not erased.
+7. Tool-result retention (`readx_persist_context`) applies to skill reads too. When enabled, the content actually returned by the file-reading tool is retained across later user turns, subject to the text-history window, compression and clearing. When disabled, new reads use the existing short-result behavior; already retained content is not erased.
 8. Reading a range does not retain the unread rest of the file. Prefer supplied content; reread only when it is absent or the task needs the current on-disk version. Ordinary skill disabling or hiding does not erase a previously retained read from conversation history.

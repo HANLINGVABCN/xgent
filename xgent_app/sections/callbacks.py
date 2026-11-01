@@ -1442,7 +1442,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 [InlineKeyboardButton("🔙 返回", callback_data="menu_prompts")]
             ])
             await query.message.edit_text(
-                f"🤖 <b>Agent模式提示词</b>\n"
+                f"🤖 <b>正则围栏模式提示词</b>\n"
                 f"<i>文件: {safe_text(PromptFileManager.get_path('agent_prompt_addon'))}</i>\n"
                 f"<i>(请直接编辑文件后点击重载)</i>\n\n<pre>{preview}</pre>",
                 reply_markup=kb,
@@ -1451,7 +1451,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         elif data == "reload_agent_prompt":
             PromptFileManager.reload_all()
-            await query.answer("✅ Agent提示词已从文件重载！", show_alert=True)
+            await query.answer("✅ 正则围栏提示词已从文件重载！", show_alert=True)
             # 重新显示
             curr = PromptFileManager.get('agent_prompt_addon')
             preview = safe_text(curr)[:500] + "..." if len(curr) > 500 else safe_text(curr)
@@ -1460,7 +1460,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 [InlineKeyboardButton("🔙 返回", callback_data="menu_prompts")]
             ])
             await query.message.edit_text(
-                f"🤖 <b>Agent模式提示词 (已重载)</b>\n"
+                f"🤖 <b>正则围栏模式提示词 (已重载)</b>\n"
                 f"<i>文件: {safe_text(PromptFileManager.get_path('agent_prompt_addon'))}</i>\n\n<pre>{preview}</pre>",
                 reply_markup=kb,
                 parse_mode=constants.ParseMode.HTML

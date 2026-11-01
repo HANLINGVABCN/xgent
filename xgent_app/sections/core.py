@@ -1375,7 +1375,7 @@ class PromptFileManager:
         'compression_prompt': '上下文压缩提示词',
         'assistant_prompt': '助手提示词',
         'global_prompt_addon': '全局追加提示词',
-        'agent_prompt_addon': 'Agent 模式提示词',
+        'agent_prompt_addon': '正则围栏模式提示词',
         'agent_toolcall_addon': 'Tool call 模式提示词',
         'agent_disabled_addon': 'Agent 关闭提示词',
         'idle_message_prompt': '空闲提醒提示词',
@@ -1404,9 +1404,19 @@ class PromptFileManager:
                         if key == 'compression_prompt':
                             from xgent_app.compression import DEFAULT_COMPRESSION_PROMPT
                             f.write(DEFAULT_COMPRESSION_PROMPT + '\n')
+                        elif key == 'agent_toolcall_addon':
+                            from xgent_app.prompt_defaults import DEFAULT_TOOLCALL_PROMPT
+                            f.write(DEFAULT_TOOLCALL_PROMPT)
                     logger.warning(f"提示词文件不存在，已创建: {filename}")
                 except FileExistsError:
                     pass
+            elif key in {'agent_toolcall_addon', 'global_prompt_addon'}:
+                try:
+                    from xgent_app.prompt_defaults import migrate_shipped_prompt
+                    if migrate_shipped_prompt(filepath, key):
+                        logger.info('已更新原版提示词 %s 并保留旧文件备份；用户修改的文件不变。', filename)
+                except Exception as exc:
+                    logger.warning('默认提示词更新失败，原文件保留: %s', exc)
             elif key == 'compression_prompt':
                 try:
                     from xgent_app.compression import migrate_default_compression_prompt

@@ -94,11 +94,15 @@ async def main():
     assert all(file in disabled for file in files) and 'SUMMARY-' not in disabled
     assert disabled.count('\u5f53\u524d\u6280\u80fd\u5df2\u5173\u95ed') == 3
     ns['PromptFileManager'].set('agent_disabled_addon', 'AGENT-DISABLED-END')
+    await ns['_web_write_setting']('agent_call_mode','fence')
     assert 'read-x' in ns['get_agent_runtime_prompt'](True)
-    assert ns['get_agent_runtime_prompt'](False).endswith('AGENT-DISABLED-END')
+    disabled_agent = ns['get_agent_runtime_prompt'](False)
+    assert 'AGENT-DISABLED-END' in disabled_agent and '【函数参数】' not in disabled_agent
+    await ns['_web_write_setting']('agent_call_mode','toolcall')
+    assert 'read_file' in ns['get_agent_runtime_prompt'](True)
     await ns['_web_write_setting']('hidden_skills', files)
     assert ns['build_skill_prompt_section']() == ''
-    assert 'read-x' in ns['get_agent_runtime_prompt'](True)
+    assert 'read_file' in ns['get_agent_runtime_prompt'](True)
     values = (await ns['_web_read_settings']())['values']
     assert values['hidden_skills'] == sorted(files)
     await ns['UserDataManager']._load_from_db()

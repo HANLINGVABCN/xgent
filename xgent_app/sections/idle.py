@@ -65,9 +65,8 @@ async def _check_and_send_idle_message(context: ContextTypes.DEFAULT_TYPE):
             db, None, BotConfig.AUTHORIZED_USER_ID, await db.get_attachment_generation(),
             prov_name, model, record_prefix="[空闲提醒] ",
         )
-        agent_mode = UserDataManager.get('agent_mode', False)
         idle_prompt = (
-            build_conversation_system_prompt(agent_mode) +
+            build_conversation_system_prompt(False, notification_only=True) +
             format_prompt_template('idle_message_prompt', hours_passed=int(hours_passed))
         )
 

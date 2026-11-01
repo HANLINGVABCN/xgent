@@ -757,6 +757,10 @@ def get_prompt_detail_menu(key: str):
     return InlineKeyboardMarkup(buttons)
 
 def get_prompt_edit_note(key: str) -> str:
+    if key == 'agent_prompt_addon':
+        return '仅用于正则围栏模式。Tool call 模式不会读取或拼接这份内容。'
+    if key == 'agent_toolcall_addon':
+        return '仅用于 Tool call 模式，独立保存执行说明；不会拼接正则围栏提示词。'
     if key == 'unauthorized_reply_messages':
         return (
             "未授权用户回复语录支持多条。\n"

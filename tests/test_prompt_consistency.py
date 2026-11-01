@@ -112,8 +112,9 @@ class PromptConsistencyTests(unittest.TestCase):
             self.assertIn(channel, global_prompt)
         self.assertNotIn("运行环境：Telegram 私人机器人", global_prompt)
         memory = text("skill-public/memory.md")
-        for clause in ("file-x", "BEGIN/END", "Agent 关闭时不得", "压缩请求不额外注入"):
+        for clause in ("当前模式的文件创建工具", "真实路径", "Agent 关闭时不得", "压缩请求不额外注入"):
             self.assertIn(clause, memory)
+        self.assertNotIn('BEGIN/END 标记', memory)
 
     def test_ask_secrets_require_validation_and_safe_child_process_parameters(self):
         source = text('prompts/agent_addon.txt')

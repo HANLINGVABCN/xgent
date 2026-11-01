@@ -7,14 +7,16 @@
 ## 执行与兼容
 
 - OpenAI Chat Completions、OpenAI 兼容接口、Gemini／Vertex、Claude 的非流式、前台和后台流式均接收原生调用。HTTP 地址、API Key、代理、连接池与用量记录继续沿用现有配置。
-- 原有 `run-x`、`shell-x`、`stdin-x`、`shellkill-x`、`read-x`、`grep-x`、`intel-x`、`search-x`、`fetch-x`、`edit-x`、`file-x`、Base64 文件写入、`sendfile-x`、`media-x`、`ask-x`、`over-x` 均有对应函数。工具定义里的名字使用 API 允许的 `run_x` 等形式；界面继续显示原协议名。
+- Tool call 工具入口独立命名：执行命令 `exec_command(command)`，交互终端 `start_terminal`／`terminal_input`／`close_terminal`，文件读取、修改、写入、二进制写入、交付使用 `read_file`／`edit_file`／`write_file`／`write_binary`／`send_file`，检索与代码分析使用 `search_files`／`inspect_code`，联网使用 `search_web`／`fetch_urls`，生图、表单和收尾使用 `generate_media`／`ask_user`／`finish_task`。工具定义与提示词不再用旧协议函数名；后台执行器继续复用，界面的既有协议标识保留。
 - Tool call 接收完整参数并按 schema 校验后才执行，同批工具保持顺序。命令、文件内容及编辑旧／新串保留原始空格、缩进和换行。一次响应中所有调用先完成校验，错误或截断参数不执行。
 - 每个回合只使用选中的执行入口。Tool call 不执行正文中的围栏；围栏模式不执行原生调用。完成调用按运行、响应、调用 ID 对应结果，重复事件不重执行。
 - `ask-x` 仍在 Telegram 内填写或在原浏览器内嵌表单填写。表单后的调用暂停；提交后补齐该调用结果再继续后面的工具。取消后剩余调用记为未执行，交回模型收尾。用户密钥仍只交给现有私密存储，模型取得变量名。
 - `over-x` 沿用原有适用范围和成功要求，省略的仅是下一次模型请求。执行事实及调用关系仍保存；包含表单的同批响应不会因提交表单而重新获得免回传资格。
 - Agent 开关独立决定是否允许工具。模型明确拒绝 `tools` 等能力时提示手动切换围栏；不自动切换，不把超时、限流当成接口不支持。
 
-`prompts/toolcall_addon.txt` 为可单独编辑的 Tool call 提示词，沿用原版 Agent 的执行规则；原 `agent_addon.txt` 继续用于围栏模式。使用原版围栏提示词时，Tool call 选择对应新文件；用户自定义的 Agent 提示词保留并与当前模式说明一起提供，不自动删改。用户人设和权限不变。
+`prompts/toolcall_addon.txt` 只用于 Tool call，`agent_addon.txt` 只用于正则围栏，菜单分别标为“Tool call 模式提示词”和“正则围栏模式提示词”。两份文件独立编辑，任何旧文件修改都不会使它混入另一模式。用户人设、全局说明、记忆与技能索引仍正常组合；通用技能和附件提示使用当前模式的实际工具名。Tool call 文件为空或无法读取时明确报错，不退回旧围栏说明。
+
+启动时仅更新内容与上一版默认模板完全一致的 Tool call／全局说明，更新前保留 `.before-mode-split-*.bak` 原文件备份；用户修改过的文件不覆盖，也不猜测其中哪些句子应迁移。新版默认全局说明按当前会话隔离描述历史，空闲提醒明确此次没有执行工具且不改变 Agent 开关，Agent 关闭时不要求修改、读取或发送服务器文件。旧函数名称只用于读取已有结构化历史，不接受为新的执行请求；无需数据库迁移。
 
 ## 历史与展示
 

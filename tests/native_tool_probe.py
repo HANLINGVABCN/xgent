@@ -94,14 +94,14 @@ class NativeHarness(Harness):
                               content=''.join('data: ' + json.dumps(e) + '\n\n' for e in events) + 'data: [DONE]\n\n')
 
 
-def call(name='run_x', cid='call-a', **arguments):
+def call(name='exec_command', cid='call-a', **arguments):
     return {'name': name, 'id': cid, 'arguments': arguments}
 
 
 async def exercise(bot, root, fmt, style):
     command = "printf 'one\\ntwo'\n  echo 中文\n"
     async with NativeHarness(bot, root, fmt, style) as h:
-        h.responses = [([call(body=command)], ''), ([], 'FINAL_ANSWER')]
+        h.responses = [([call(command=command)], ''), ([], 'FINAL_ANSWER')]
         await h.turn('inspect machine')
         assert h.executed == [command], h.executed
         assert len(h.requests) == 2, h.requests
@@ -124,8 +124,8 @@ async def exercise(bot, root, fmt, style):
 async def form_sequence(bot, root, fmt, cancel=False):
     async with NativeHarness(bot, root, fmt, 'nonstream') as h:
         questions = [{'label': 'Q1', 'type': 'text', 'prompt': 'confirm label'}]
-        h.responses = [([call(cid='before', body='before'), call('ask_x', 'form', questions=questions),
-                         call(cid='after', body='after')], 'ASK_STAGE'), ([], 'AFTER_FORM')]
+        h.responses = [([call(cid='before', command='before'), call('ask_user', 'form', questions=questions),
+                         call(cid='after', command='after')], 'ASK_STAGE'), ([], 'AFTER_FORM')]
         await h.turn('form workflow')
         assert h.executed == ['before'] and len(h.requests) == 1
         pending = next(iter(bot.PENDING_ASKS._store.values()))
@@ -151,7 +151,7 @@ async def form_sequence(bot, root, fmt, cancel=False):
 async def over_and_fence(bot, root, mode):
     async with NativeHarness(bot, root, 'openai', 'nonstream') as h:
         if mode == 'over':
-            h.responses = [([call(body='save'), call('over_x', 'finish', body='See actual output.')], '')]
+            h.responses = [([call(command='save'), call('finish_task', 'finish', message='See actual output.')], '')]
             await h.turn('save and end')
             assert len(h.requests) == 1 and h.executed == ['save']
             history = await h.db.get_conversation_messages(100)
@@ -176,7 +176,7 @@ async def stop_between_calls(bot, root):
             stop_event.set()
             return {'success': False, 'stopped': True, 'return_code': -1, 'output': 'PARTIAL_OUTPUT'}
         with patch.object(bot.AgentExecutor, 'run_command', side_effect=stopped):
-            h.responses = [([call(cid='first', body='first'), call(cid='second', body='second')], '')]
+            h.responses = [([call(cid='first', command='first'), call(cid='second', command='second')], '')]
             await h.turn('stop workflow')
         assert h.executed == ['first'] and len(h.requests) == 1
         rows = await h.db.get_display_history(100)
@@ -194,18 +194,18 @@ async def native_file_bytes(bot, root):
     async with NativeHarness(bot, root, 'openai', 'nonstream') as h:
         path = h.root / 'raw.txt'
         original = '  leading\r\n中文\n\ttrailing  \n'
-        block = operation(call('file_x', path=str(path), content=original))
+        block = operation(call('write_file', path=str(path), content=original))
         await write_text_protocol_file(block, executor=bot.AgentExecutor)
         assert path.read_bytes() == original.encode('utf-8')
         changed = 'REPLACED\r\n'
-        block = operation(call('edit_x', path=str(path), old='中文\n', new=changed))
+        block = operation(call('edit_file', path=str(path), old='中文\n', new=changed))
         result = await dispatch_standard_protocol(block, executor=bot.AgentExecutor, provider_api_format='openai',
             stop_event_factory=bot.asyncio.Event, logger=bot.logger)
         assert result['success'] and path.read_bytes() == original.replace('中文\n', changed).encode('utf-8')
         binary = h.root / 'binary.bin'
         raw = b'\x00\xff\x01binary\x00'
-        await write_base64_protocol_file(operation(call('file_base64_x', path=str(binary),
-            content=base64.b64encode(raw).decode())), executor=bot.AgentExecutor)
+        await write_base64_protocol_file(operation(call('write_binary', path=str(binary),
+            base64_data=base64.b64encode(raw).decode())), executor=bot.AgentExecutor)
         assert binary.read_bytes() == raw
         return {'file_bytes': True, 'edit_bytes': True, 'binary_bytes': True}
 
@@ -218,7 +218,7 @@ async def compare_modes(bot, root):
         async with NativeHarness(bot, Path(root) / mode, 'openai', 'nonstream') as h:
             await bot.UserDataManager.save_config('agent_call_mode', mode)
             command = 'inspect-memory'
-            h.responses = [([call(body=command)], '') if mode == 'toolcall' else
+            h.responses = [([call(command=command)], '') if mode == 'toolcall' else
                 ([], '```run-x\n<<BEGIN_run_compare\n' + command + '\n<<END_run_compare\n```'),
                 ([], 'SAME_FINAL_ANSWER')]
             began = time.monotonic()
@@ -235,10 +235,10 @@ async def compare_modes(bot, root):
 
 async def form_then_new_over(bot, root):
     async with NativeHarness(bot, root, 'openai', 'nonstream') as h:
-        h.responses = [([call('ask_x', 'ask', questions=[{'label': 'Q1', 'type': 'text', 'prompt': 'Value?'}]),
-                         call(cid='after-ask', body='after-ask')], 'FORM'),
-                        ([call(cid='new-round', body='new-round'),
-                          call('over_x', 'finish', body='See actual results.')], 'LAST_REPLY')]
+        h.responses = [([call('ask_user', 'ask', questions=[{'label': 'Q1', 'type': 'text', 'prompt': 'Value?'}]),
+                         call(cid='after-ask', command='after-ask')], 'FORM'),
+                        ([call(cid='new-round', command='new-round'),
+                          call('finish_task', 'finish', message='See actual results.')], 'LAST_REPLY')]
         await h.turn('ask then finish')
         pending = next(iter(bot.PENDING_ASKS._store.values()))
         pending.ensure_entry('0')['custom'] = 'CONFIRMED'

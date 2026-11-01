@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import json
 import re
 import uuid
@@ -19,7 +18,6 @@ from .attachments import AttachmentContextError
 
 MODES = ('toolcall', 'fence')
 LABELS = {'toolcall': 'Tool call', 'fence': '正则围栏'}
-_DEFAULT_FENCE_SHA = '5d9b20d366ebab8291a4a7d709b460fdfa6b35192d83e92beb792017e718c2d0'
 _session = ContextVar('agent_call_session', default=None)
 _response = ContextVar('native_call_response', default=None)
 
@@ -30,16 +28,6 @@ def normalize_mode(value):
     return value
 
 
-def select_prompt(fence_prompt, tool_prompt):
-    """Use the separately editable native prompt without erasing custom rules."""
-    normalized = fence_prompt.replace('\r\n', '\n')
-    if hashlib.sha256(normalized.encode('utf-8')).hexdigest() == _DEFAULT_FENCE_SHA:
-        return tool_prompt or fence_prompt
-    if not fence_prompt:
-        return tool_prompt
-    return fence_prompt + '\n【保留的自定义 Agent 规则；工具语法以当前模式为准】\n' + tool_prompt
-
-
 def _schema(properties, required):
     return {'type': 'object', 'properties': properties, 'required': required, 'additionalProperties': False}
 
@@ -48,34 +36,46 @@ def _text(description):
     return {'type': 'string', 'description': description}
 
 
+# Public native names describe capabilities; legacy protocol labels remain a UI concern.
+TOOL_NAMES = {
+    'run': 'exec_command', 'shell': 'start_terminal', 'stdin': 'terminal_input', 'shellkill': 'close_terminal',
+    'read': 'read_file', 'grep': 'search_files', 'intel': 'inspect_code', 'search': 'search_web', 'fetch': 'fetch_urls',
+    'sendfile': 'send_file', 'media': 'generate_media', 'over': 'finish_task',
+    'file': 'write_file', 'file_base64': 'write_binary', 'edit': 'edit_file', 'ask': 'ask_user',
+}
+SCALAR_FIELDS = {'run': 'command', 'shell': 'command', 'read': 'path', 'grep': 'query', 'intel': 'request',
+                 'search': 'query', 'sendfile': 'path', 'over': 'message', 'stdin': 'input'}
 TOOLS = {}
 
 
 def _tool(kind, description, properties, required):
-    TOOLS[kind + '_x'] = {'kind': kind, 'description': description, 'parameters': _schema(properties, required)}
+    TOOLS[TOOL_NAMES[kind]] = {'kind': kind, 'description': description, 'parameters': _schema(properties, required)}
 
 
 for _kind, _description in {
-    'run': '执行一次性非交互命令，等待真实结果。',
-    'shell': '启动持续交互终端并返回终端会话 ID。',
-    'read': '读取文件或原生图片/二进制。正文为路径，可用路径:10-20等范围。',
-    'grep': '检索文件。正文使用现有 pattern、path:、glob:、-i、-n:、-m: 参数。',
-    'intel': '代码分析。正文为 summary/map/context/callers 等子命令和参数。',
-    'search': '联网搜索。正文为查询及现有搜索选项。',
-    'fetch': '抓取网页。正文为目标 URL 与现有抓取选项。',
-    'sendfile': '向用户交付已有服务器文件。正文为完整路径。',
-    'media': '使用独立媒体模型生成或编辑图片。正文保留文件、prompt:等媒体指令。',
-    'over': '免回传收尾。仅已有 run/edit/shellkill/file 全部成功时省略再问模型。正文写中性收尾语。',
+    'run': '执行一次性非交互命令，等待真实结果。command 是要执行的完整命令。',
+    'shell': '启动持续交互终端并返回终端会话 ID。command 是启动命令。',
+    'read': '读取文件或原生图片/二进制。path 是实际路径，可用路径:10-20等范围。',
+    'grep': '检索文件。query 首行是字面量 pattern；可加 -r 正则、path:、glob:、-i 忽略大小写、-n: 前后上下文行数、-m: 命中上限。',
+    'intel': '代码分析。request 为 summary/map/context/callers 等子命令和参数。',
+    'search': '联网搜索。query 首行是查询；可另写 max: 1-20、depth: basic/advanced、site: 域名（可重复）、-raw 附正文。',
+    'sendfile': '向用户交付已有服务器文件。path 是文件完整路径。',
+    'over': '免回传收尾。仅同批执行命令、编辑/写入文件、关闭终端全部成功时省略再问模型。message 写中性收尾语。',
 }.items():
-    _tool(_kind, _description, {'body': _text('完整原文；保留换行、缩进及空格。')}, ['body'])
-for _kind in ('stdin', 'shellkill'):
-    _tool(_kind, '输入或关闭已存在的交互终端；会话 ID 必须来自真实返回。',
-          {'session_id': _text('终端会话 ID'), 'body': _text('完整输入；stdin 可含 wait:、按键与粘贴语法。')},
-          ['session_id', 'body'])
-_tool('file', '新建或明确授权的整体重写；局部修改使用 edit_x。',
+    field = SCALAR_FIELDS[_kind]
+    _tool(_kind, _description, {field: _text('完整参数；保留换行、缩进及空格，不包围栏。')}, [field])
+_tool('stdin', '输入已存在的交互终端；input 支持 line: 文本行、keys: 按键、paste: 多行粘贴及 wait: 秒数。会话 ID 来自真实结果。',
+      {'session_id': _text('终端会话 ID'), 'input': _text('完整输入和等待参数，保留换行。')}, ['session_id', 'input'])
+_tool('shellkill', '关闭已存在的交互终端。会话 ID 必须来自真实返回。',
+      {'session_id': _text('终端会话 ID')}, ['session_id'])
+_tool('fetch', '抓取网页。一次最多五个 HTTP/HTTPS URL；结果可能截断并注明，不代表已读取网页全部内容。',
+      {'urls': {'type': 'array', 'minItems': 1, 'maxItems': 5, 'items': {'type': 'string'}}}, ['urls'])
+_tool('media', '独立媒体模型生成或编辑图片。prompt 是完整任务，files 是可选参考文件的服务器绝对路径；媒体模型不接收聊天历史。',
+      {'prompt': _text('完整生成或编辑任务'), 'files': {'type': 'array', 'items': {'type': 'string'}}}, ['prompt'])
+_tool('file', '新建或明确授权的整体重写；局部修改使用 edit_file。',
       {'path': _text('目标文件路径'), 'content': _text('文件完整原文，保留所有空格与换行。')}, ['path', 'content'])
 _tool('file_base64', '将 Base64 数据写入文件；用于二进制，不能代替媒体生成接口。',
-      {'path': _text('目标文件路径'), 'content': _text('完整 Base64 编码')}, ['path', 'content'])
+      {'path': _text('目标文件路径'), 'base64_data': _text('完整 Base64 编码')}, ['path', 'base64_data'])
 _tool('edit', '唯一字符串原地替换，自动备份；匹配失败需重读，不用整体覆盖。',
       {'path': _text('已有文件路径'), 'old': _text('唯一旧串，保留原缩进与换行。'),
        'new': _text('替换后的原文，保留所有空格与换行。')}, ['path', 'old', 'new'])
@@ -110,24 +110,43 @@ def validate_arguments(name, arguments):
     if errors:
         # Schema diagnostics must not print values, which may be sensitive.
         raise AttachmentContextError(f'工具 {name} 参数格式错误，位置 {list(errors[0].path)}；未执行。')
-    if name == 'ask_x':
+    if name == 'ask_user':
         for question in arguments['questions']:
             if question['type'] in {'single', 'multi'} and not question.get('options'):
                 raise AttachmentContextError('表单选择题缺少选项；未执行。')
             if question['type'] == 'secret' and not re.fullmatch(r'[A-Z_][A-Z0-9_]*', question.get('variable', '')):
                 raise AttachmentContextError('表单密钥变量名无效；未执行。')
+    if name == 'fetch_urls':
+        from urllib.parse import urlsplit
+        for url in arguments['urls']:
+            parsed = urlsplit(url)
+            if '\n' in url or '\r' in url or parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+                raise AttachmentContextError('网页地址无效；未执行。')
+    if name == 'generate_media':
+        from .media_inputs import validate_media_path, MediaInputError
+        for path in arguments.get('files', []):
+            try:
+                if '\n' in path or '\r' in path:
+                    raise MediaInputError('参考路径包含换行')
+                validate_media_path(path)
+            except MediaInputError as exc:
+                raise AttachmentContextError('媒体参考文件必须是合法的服务器绝对路径；未执行。') from exc
 
 
 def operation(call):
     name, args = call['name'], call['arguments']
     validate_arguments(name, args)
     kind = TOOLS[name]['kind']
-    block = {'type': kind, 'path': '', 'body': args.get('body', ''), 'native_call_id': call['id'],
+    block = {'type': kind, 'path': '', 'body': args.get(SCALAR_FIELDS.get(kind), ''), 'native_call_id': call['id'],
              'native_response_id': call.get('response_id')}
     if kind in {'stdin', 'shellkill'}:
         block['path'] = args['session_id']
     elif kind in {'file', 'file_base64'}:
-        block.update(path=args['path'], body=args['content'])
+        block.update(path=args['path'], body=args['content'] if kind == 'file' else args['base64_data'])
+    elif kind == 'fetch':
+        block['body'] = '\n'.join(args['urls'])
+    elif kind == 'media':
+        block['body'] = ''.join('file: ' + path + '\n' for path in args.get('files', [])) + 'prompt: ' + args['prompt']
     elif kind == 'edit':
         nonce = uuid.uuid4().hex[:12]
         while f'<<OLD_{nonce}' in args['old'] or f'<<NEW_{nonce}' in args['old']:
@@ -142,6 +161,56 @@ def operation(call):
         ) for index, q in enumerate(args['questions'])])
         block['body'] = '\n'.join(q['prompt'] for q in args['questions'])
     return block
+
+
+
+# Fixed conversion for already-saved records only. Provider input is validated
+# against TOOLS before rendering or dispatch; these retired names are not offered.
+_LEGACY_NAMES = {kind + '_x': kind for kind in TOOL_NAMES}
+
+
+def normalize_history_call(call):
+    kind = _LEGACY_NAMES.get(call.get('name'))
+    if kind is None:
+        return call
+    args = call.get('arguments') or {}
+    if kind in SCALAR_FIELDS:
+        converted = {SCALAR_FIELDS[kind]: args.get('body', '')}
+        if kind == 'stdin':
+            converted['session_id'] = args.get('session_id', '')
+    elif kind == 'shellkill':
+        converted = {'session_id': args.get('session_id', '')}
+    elif kind == 'fetch':
+        from .agent_search import parse_fetch_body
+        converted = {'urls': parse_fetch_body(args.get('body', ''))}
+    elif kind == 'media':
+        from .media_inputs import parse_media_request
+        try:
+            request = parse_media_request(args.get('body', ''))
+            converted = {'prompt': request.prompt, 'files': list(request.files)}
+        except ValueError:
+            converted = {'prompt': args.get('body', ''), 'files': []}
+    elif kind == 'file_base64':
+        converted = {'path': args.get('path', ''), 'base64_data': args.get('content', '')}
+    else:
+        converted = dict(args)
+    return {**call, 'name': TOOL_NAMES[kind], 'arguments': converted}
+
+
+def display_operation(call):
+    kind = _LEGACY_NAMES.get(call.get('name'))
+    if kind is not None:
+        args = call.get('arguments') or {}
+        body = args.get('body', '')
+        if kind in {'file', 'file_base64'}:
+            body = args.get('content', '')
+        elif kind == 'edit':
+            body = 'OLD\n' + args.get('old', '') + '\nNEW\n' + args.get('new', '')
+        elif kind == 'ask':
+            body = '\n'.join(q.get('prompt', '') for q in args.get('questions', []))
+        return {'type': kind, 'path': args.get('session_id', args.get('path', '')), 'body': body,
+                'native_call_id': call.get('id'), 'native_response_id': call.get('response_id')}
+    return operation(normalize_history_call(call))
 
 
 class ModelReply(str):
@@ -379,6 +448,7 @@ def note_finish(reason=None, finished=None):
 
 
 def _plain_call(call):
+    call = normalize_history_call(call)
     return '[已发生的工具调用] ' + call['name'] + '\n' + json.dumps(call['arguments'], ensure_ascii=False)
 
 
