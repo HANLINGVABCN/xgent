@@ -1121,3 +1121,7 @@
 .message-media.generated-gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:4px}
 .generated-gallery .media-item.media-photo{width:100%}
 .generated-path{display:block;width:100%;max-width:100%;font:11px/15px var(--mono);color:var(--text-3);padding:2px 0;background:none;border:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;text-align:left}
+.bubble.has-media .fc-name,.bubble.has-media .media-filename,.bubble.has-media .file-delivery-note{font:11px/15px var(--mono);color:var(--text-3);margin:2px 0;overflow-wrap:anywhere}
+.bubble.has-media .fc-details{display:none}
+.bubble.user.has-media .fc-details{display:initial}
+.bubble.has-media .message-media{margin-bottom:0}

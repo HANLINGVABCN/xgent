@@ -25,10 +25,10 @@ _GENERATED = re.compile(
     re.MULTILINE,
 )
 _DELIVERED = re.compile(
-    r"^\[(?:sendfile|file(?::base64)?)\u7ed3\u679c\] "
+    r"^\[(?P<protocol>sendfile|file(?::base64)?)\u7ed3\u679c\] "
     r"\u5df2(?:\u53d1\u9001\u670d\u52a1\u5668\u6587\u4ef6\u7ed9\u7528\u6237|"
     r"\u5199\u5165\u670d\u52a1\u5668\u6587\u4ef6|加入 Telegram 发送队列): "
-    r"(?P<path>.+) \(\d+ bytes(?:, [^)\r\n]+)?\)(?: \[\u672c\u5730API\u76f4\u53d1(?:；网络恢复后自动补发)?\])?$"
+    r"(?P<path>.+) \((?P<size>\d+) bytes(?:, [^)\r\n]+)?\)(?: (?P<local_api>\[\u672c\u5730API\u76f4\u53d1(?:；网络恢复后自动补发)?\]))?$"
 )
 _EXPORT = re.compile(
     r"\u670d\u52a1\u5668\u6587\u4ef6\u8def\u5f84\uff1a(?P<path>.+?)"
@@ -78,6 +78,21 @@ def delivered_file_reference(notice: str) -> list[dict[str, Any]]:
     if not match or not Path(match["path"]).is_absolute():
         return []
     return [display_media_reference(match["path"])]
+
+
+def delivered_file_display(notice: str) -> dict | None:
+    """Restore the fixed captions of trusted standard file results saved before caption metadata."""
+    match = _DELIVERED.fullmatch(notice)
+    refs = delivered_file_reference(notice)
+    if not match or not refs:
+        return None
+    filename = refs[0]['name']
+    if match['protocol'] == 'sendfile':
+        caption = f"📄 {filename} ({match['size']} bytes)" + (' [本地API直发]' if match['local_api'] else '')
+    else:
+        caption = '📄 已写入服务器并发送' + (' (base64)' if match['protocol'] == 'file:base64' else '') + ': ' + filename
+    kind = media_kind(refs[0]['mime_type'])
+    return {'path': refs[0]['path'], 'caption': caption, 'kind': 'file' if kind == 'photo' else kind}
 
 
 def _within(path: str, root: Path) -> Path:
@@ -321,7 +336,19 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
     from .web_display import build_web_display, build_operation_display
     ns = namespace if namespace is not None else _section_ns()
     presentation = metadata_dict(metadata.get('presentation'))
+    if isinstance(metadata.get('native_calls'), list) and metadata['native_calls']:
+        presentation = {**presentation, 'native_calls': metadata['native_calls'], 'agent_call_mode': 'toolcall'}
     kind, raw = record.get('msg_type'), str(record.get('content') or '')
+    delivery = metadata.get('file_delivery')
+    if kind == 'agent_result' and isinstance(delivery, dict) and isinstance(delivery.get('caption'), str):
+        caption = delivery['caption']
+        segments = [{'kind': 'html', 'text': '<span class="file-delivery-note">' + _html.escape(caption).replace('\n', '<br>') + '</span>'}]
+        footer = footer_html(presentation)
+        if footer:
+            segments.append({'kind': 'html', 'text': footer, 'footer': True})
+        message.update(content=caption, parse_mode=None, file_message=True,
+                       web_display={'version': 1, 'segments': segments, 'presentation_mode': 'folded'})
+        return
     if isinstance(metadata.get('ask_form'),dict):
         from .agent_ask import PENDING_ASKS
         snapshot = metadata['ask_form']
@@ -418,6 +445,10 @@ def build_history_message(
     except (ValueError, TypeError):
         metadata = {}
         message["media_error"] = "\u5386\u53f2\u9644\u4ef6\u5143\u6570\u636e\u635f\u574f"
+    if kind == 'agent_result' and 'file_delivery' not in metadata:
+        delivery = delivered_file_display(content)
+        if delivery:
+            metadata = {**metadata, 'file_delivery': delivery}
     from .message_policy import record_policy
     policy = record_policy(record)
     message['message_policy'] = policy.to_dict()
@@ -526,6 +557,11 @@ def build_history_message(
     seen = set()
     for ref, attachment in groups:
         item = _describe_media(ref, storage, attachment=attachment)
+        if isinstance(ref, dict) and ref.get('delivery_kind') in {'file', 'photo', 'video', 'audio'}:
+            item['kind'] = ref['delivery_kind']
+        elif (kind == 'agent_result' and isinstance(metadata.get('file_delivery'), dict)
+              and metadata['file_delivery'].get('kind') in {'file', 'photo', 'video', 'audio'}):
+            item['kind'] = metadata['file_delivery']['kind']
         if item.get("path") and item["path"] in seen:
             continue
         if item.get("path"):

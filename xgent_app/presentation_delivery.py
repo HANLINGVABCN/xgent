@@ -22,6 +22,7 @@ class PresentationMessage:
         self.telegram_suppressed = False
         self.telegram_owner_id = None
         self.telegram_native = None
+        self.reply_markup = getattr(message, 'reply_markup', None)
 
     def __getattr__(self, name):
         return getattr(self.original, name)
@@ -208,12 +209,14 @@ class PresentationBot:
             message.telegram_parse_mode = display.get('parse_mode', parse_mode)
 
     def complete_telegram_reply(self, facts):
+        owners = set()
         for mid in facts.get('message_ids') or []:
             message = self.messages.get(mid)
             if message is not None:
                 message.telegram_complete = True
+                owners.add(message.telegram_owner_id or mid)
         generation = self._telegram_generation
-        if generation:
+        if generation and generation.get('owner_id') in owners:
             from .stop_targets import end_phase
             end_phase(generation['run_id'], generation['ref'])
 
@@ -492,10 +495,21 @@ class PresentationBot:
         return result
 
     async def _send_media(self, method, *args, **kwargs):
+        from .web_bridge import _local_path_from_send_arg
+        value = kwargs.get('document' if method == 'send_document' else 'photo', args[1] if len(args) > 1 else None)
+        path = _local_path_from_send_arg(value)
         original = await getattr(self.original, method)(*args, **kwargs)
         message = PresentationMessage(self, original, str(kwargs.get('caption') or ''), kwargs.get('parse_mode'), 'media_reply')
         message.media = True
         message.reply_markup = kwargs.get('reply_markup')
+        if path:
+            from .web_history import media_kind
+            import mimetypes
+            kind = media_kind(mimetypes.guess_type(path)[0] or 'application/octet-stream')
+            if method == 'send_document' and kind == 'photo':
+                kind = 'file'
+            message.file_delivery = {'path': path, 'caption': str(kwargs.get('caption') or ''),
+                                     'kind': kind}
         self.messages[message.message_id] = message
         self.turn.last_message = message
         return original

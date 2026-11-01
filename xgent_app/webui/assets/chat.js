@@ -351,7 +351,7 @@ import {syncAskForm} from './ask-form.js';
             // 折叠交互（CSS blockquote[expandable] + bindContentClicks 里的点击切换）。
           } else if (a.name === "class") {
             var classes = a.value.split(/\s+/).filter(function (name) {
-              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap)$/.test(name);
+              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note)$/.test(name);
             });
             if (classes.length) c.setAttribute("class", classes.join(" "));
             else c.removeAttribute("class");
@@ -513,22 +513,25 @@ import {syncAskForm} from './ask-form.js';
 
   function syncTurnAuthors(root){
     if(!root)return;
-    let seenReply=false,turnId=null,conversationId=null,previous=null;
+    let seenReply=false,turnId=null,runId=null,conversationId=null,previous=null;
     for(const row of root.children){
       row.classList.remove('followed-by-output','attached-output','followed-by-round','round-followup');
       if(!row.classList.contains('msg-row')||row.classList.contains('presentation-hidden'))continue;
-      const cid=row.dataset.presentationConversationId||null,id=row.dataset.turnId||row.dataset.runId||null;
-      if(cid&&conversationId&&cid!==conversationId){seenReply=false;turnId=null;previous=null;}
-      if(id&&turnId&&id!==turnId)previous=null;
+      const cid=row.dataset.presentationConversationId||null,id=row.dataset.turnId||null,run=row.dataset.runId||null;
+      if(cid&&conversationId&&cid!==conversationId){seenReply=false;turnId=null;runId=null;previous=null;}
+      const sameTurn=!!id&&id===turnId,sameRun=!!run&&run===runId;
+      const changed=!sameTurn&&!sameRun&&((id&&turnId&&id!==turnId)||(run&&runId&&run!==runId));
+      if(changed)previous=null;
       if(cid)conversationId=cid;
       if(row.classList.contains('user')){
         // A queued message or form answer can belong to the same logical turn.
         // Old records without turn IDs fall back to user-message boundaries.
-        if(!id||id!==turnId)seenReply=false;
-        turnId=id;
+        if(!sameTurn&&!sameRun)seenReply=false;
+        turnId=id;runId=run;
       }else if(row.classList.contains('ai')){
-        if(id&&turnId&&id!==turnId)seenReply=false;
+        if(changed){seenReply=false;turnId=null;runId=null;}
         if(id)turnId=id;
+        if(run)runId=run;
         row.classList.toggle('turn-continuation',seenReply);
         seenReply=true;
       }
@@ -1306,7 +1309,12 @@ import {syncAskForm} from './ask-form.js';
       var content=previousItems.find(node=>!retainedItems.has(node)&&canReuseMediaContent(node,item));
       if(content)updateMediaContent(content,item);
       else content=makeMediaContent(item);
-      if(entry.role!=='user'&&item.path){
+      if(entry.role!=='user'&&item.path&&item.kind!=='file'){
+        if(item.kind==='photo'){
+          let name=content.querySelector('.media-filename');
+          if(!name){name=document.createElement('div');name.className='media-filename';content.appendChild(name);}
+          name.textContent=item.filename||'';
+        }
         let path=content.querySelector('.generated-path');
         if(!path){path=document.createElement('button');path.type='button';path.className='generated-path';content.appendChild(path);}
         path.textContent=item.path;path.title=item.path;path.onclick=()=>copyText(item.path).then(()=>toast('已复制路径'));
@@ -1340,6 +1348,7 @@ import {syncAskForm} from './ask-form.js';
   function makeMediaBubble(kind, filename, caption, downloadUrl, messageId, side, timestamp, error, descriptor) {
     var entry = makeBubble(side || "ai", caption || "", messageId, null, null, null, timestamp);
     entry.bubble.classList.add("media-bubble");
+    entry.body.classList.add('file-delivery-note');
     setInlineMedia(entry, [{...descriptor, kind: kind, filename: filename, download_url: downloadUrl, error: error }]);
     return entry;
   }
@@ -1488,6 +1497,15 @@ import {syncAskForm} from './ask-form.js';
       if (byMessageId[previousId] !== entry) removeEntry(byMessageId[previousId]);
     });
     if (!entry && frame.type === "edit" && id == null) entry = lastStreamEntry;
+    if((frame.msg_type??entry?.messageType)==='runtime_error'&&typeof frame.web_display?.plain_text!=='string'){
+      let plain=String(frame.text||'');
+      if(String(frame.parse_mode||'').toLowerCase().includes('html')&&/^\s*<pre>([\s\S]*)<\/pre>\s*$/.test(plain)){
+        const wrapper=document.createElement('template');wrapper.innerHTML=plain;
+        plain=wrapper.content.textContent;
+      }
+      frame={...frame,web_display:{version:1,plain_text:plain,
+        segments:[{kind:'html',text:escapeHtml(plain).replace(/\n/g,'<br>')}]}};
+    }
     var newRole = classifyMessageText(role, frame.text, frame.msg_type??entry?.messageType, frame.message_policy??entry?.messagePolicy);
     var displayKey=JSON.stringify(frame.web_display||null);
     if(entry)entry.webDisplay=frame.web_display;
@@ -1891,6 +1909,7 @@ import {syncAskForm} from './ask-form.js';
       var nextMedia = oldMedia && oldMedia.row.nextSibling;
       removeEntry(oldMedia);
       var mediaKind = frame.type === "photo" ? "photo" : mediaKindFromName(frame.filename);
+      if(frame.type==='document'&&mediaKind==='photo')mediaKind='file';
       var mediaEntry = makeMediaBubble(mediaKind, frame.filename, frame.caption, frame.download_url, frame.message_id, "ai", frame.timestamp || frame.ts);
       if (nextMedia && nextMedia.parentNode === log) log.insertBefore(mediaEntry.row, nextMedia);
     } else if (frame.type === "chat_action") {
@@ -2393,7 +2412,7 @@ import {syncAskForm} from './ask-form.js';
     syncThinking(entry,message.thinking);
     var previousMedia=entry.mediaEntries||[];
     entry.mediaEntries = [];
-    if (role === 'user' || message.media_group_id || message.msg_type === "ai_reply" || message.msg_type === "media_reply") {
+    if (role === 'user' || message.file_message || message.media_group_id || message.msg_type === "ai_reply" || message.msg_type === "media_reply") {
       previousMedia.forEach(removeEntry);
       setInlineMedia(entry, (message.media || []).map(item=>({...item,conversation_id:message.conversation_id||selectedConversationId})));
     } else {

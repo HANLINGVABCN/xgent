@@ -36,6 +36,17 @@ async def persist_agent_result(
     metadata = dict(display_metadata or {})
     media = delivered_file_reference(notice)
     if media:
+        from .presentation import current_turn
+        from pathlib import Path
+        turn = current_turn()
+        message = turn.last_message if turn else None
+        delivery = getattr(message, 'file_delivery', None)
+        if delivery and Path(delivery['path']).resolve() == Path(media[0]['path']).resolve():
+            metadata['file_delivery'] = dict(delivery)
+            media[0]['delivery_kind'] = delivery['kind']
+            outbox = getattr(message.bot, 'outbox', None)
+            if outbox is not None:
+                metadata['web_live'] = {'epoch': outbox.snapshot()['epoch'], 'message_ids': [message.message_id]}
         metadata["display_media"] = media
     row_id = await recorder.record(
         msg_type=message_type,

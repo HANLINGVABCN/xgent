@@ -133,7 +133,10 @@ def test_identical_edit_preserves_expanded_block_and_error_layout(full_output_se
             server.outbox.put({'type':'edit','message_id':991,'text':canonical,'parse_mode':'HTML'})
             text='⚠️ **upstream** <bad>\nsecond line'
             server.outbox.put({'type':'turn_error','text':text,'record_id':999})
-            page.get_by_text(text,exact=True).wait_for()
+            error_body=page.locator('[data-record-id="999"] .body')
+            error_body.wait_for()
+            assert error_body.inner_text()==text
+            assert error_body.locator('pre').count()==0
             assert page.evaluate('window.__sameBody.isConnected')
             live=page.locator('.msg-row').last.locator('.body').inner_html()
             import html

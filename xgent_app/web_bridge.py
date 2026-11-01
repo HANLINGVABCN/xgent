@@ -440,11 +440,12 @@ class WebSubscription:
 class WebMessage:
     """假的 telegram Message：记录 message_id，支持后续编辑。"""
 
-    def __init__(self, bot: "WebBot", message_id: int, chat_id: int, text: str = ""):
+    def __init__(self, bot: "WebBot", message_id: int, chat_id: int, text: str = "", reply_markup: Any = None):
         self.bot = bot
         self.message_id = message_id
         self.chat_id = chat_id
         self.text = text
+        self.reply_markup = reply_markup
         # 对话核心里有 `update.message or update.callback_query.message` 的写法
         self.chat = type("WebChat", (), {"id": chat_id})()
 
@@ -452,14 +453,18 @@ class WebMessage:
         return await self.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
 
     async def edit_text(self, text: str, **kwargs: Any) -> "WebMessage":
-        return await self.bot.edit_message_text(
+        result = await self.bot.edit_message_text(
             chat_id=self.chat_id, message_id=self.message_id, text=text, **kwargs
         )
+        self.text, self.reply_markup = result.text, result.reply_markup
+        return result
 
     async def edit_reply_markup(self, reply_markup: Any = None, **kwargs: Any) -> bool:
-        return await self.bot.edit_message_reply_markup(
+        result = await self.bot.edit_message_reply_markup(
             chat_id=self.chat_id, message_id=self.message_id, reply_markup=reply_markup, **kwargs
         )
+        self.reply_markup = reply_markup
+        return result
 
     async def delete(self) -> bool:
         return await self.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
@@ -651,7 +656,7 @@ class WebBot:
             parse_mode=str(parse_mode) if parse_mode else None,
             reply_markup=_markup_to_frame(reply_markup),
         )
-        return WebMessage(self, message_id, chat_id, str(text))
+        return WebMessage(self, message_id, chat_id, str(text), reply_markup)
 
     async def edit_message_text(self, text: str, chat_id: Optional[int] = None,
                                 message_id: Optional[int] = None, reply_markup: Any = None,
@@ -663,7 +668,7 @@ class WebBot:
             parse_mode=str(parse_mode) if parse_mode else None,
             reply_markup=_markup_to_frame(reply_markup),
         )
-        return WebMessage(self, int(message_id or 0), int(chat_id or self.chat_id), str(text))
+        return WebMessage(self, int(message_id or 0), int(chat_id or self.chat_id), str(text), reply_markup)
 
     async def edit_message_reply_markup(self, chat_id: Optional[int] = None,
                                         message_id: Optional[int] = None,
@@ -1227,7 +1232,7 @@ class MirrorBot:
             "reply_markup": _markup_to_frame(reply_markup),
             "kwargs": self._passthrough(kwargs),
         }, transient={"reply_markup": reply_markup})
-        return WebMessage(self, message_id, target, str(text))
+        return WebMessage(self, message_id, target, str(text), reply_markup)
 
     async def edit_message_text(self, text: str, chat_id: Optional[int] = None,
                                 message_id: Optional[int] = None, reply_markup: Any = None,
@@ -1246,7 +1251,7 @@ class MirrorBot:
             "native_id": native,
             "kwargs": self._passthrough(kwargs),
         }, transient={"reply_markup": reply_markup})
-        return WebMessage(self, int(message_id or 0), target, str(text))
+        return WebMessage(self, int(message_id or 0), target, str(text), reply_markup)
 
     async def edit_message_reply_markup(self, chat_id: Optional[int] = None,
                                         message_id: Optional[int] = None,
