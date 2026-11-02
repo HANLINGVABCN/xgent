@@ -1688,6 +1688,24 @@ class BotMemoryDB(ConversationStore):
         self._config_cache.update(values)
         return values
 
+    async def ensure_web_response_mode(self):
+        from xgent_app.response_modes import web_mode
+        async with self._write() as conn:
+            cursor = await conn.execute("SELECT key,value FROM config WHERE key IN ('web_response_mode','stream_mode','stream_style')")
+            config = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
+            await cursor.close()
+            selected = web_mode(config)
+            await conn.execute('INSERT OR IGNORE INTO config(key,value) VALUES (?,?)',
+                               ('web_response_mode', json.dumps(selected)))
+        self._config_cache['web_response_mode'] = selected
+        return selected
+
+    async def set_web_response_mode(self, mode):
+        from xgent_app.response_modes import normalize_web_mode
+        selected = normalize_web_mode(mode)
+        await self.set_config('web_response_mode', selected)
+        return selected
+
     async def set_skill_state(self, path: str, state: str) -> Dict[str, List[str]]:
         if state not in {'enabled', 'disabled', 'hidden'}:
             raise ValueError('无效的技能状态')
@@ -2193,6 +2211,7 @@ class UserDataManager:
             'agent_call_mode': await cls._require_db().get_config('agent_call_mode', 'fence'),
             'agent_confirm': await cls._require_db().get_config('agent_confirm', False),
             'stream_mode': normalize_bool(await cls._require_db().get_config('stream_mode', True), True),
+            'web_response_mode': await cls._require_db().ensure_web_response_mode(),
             # 流式风格：'foreground'（前台流式，实时推送）/ 'background'（后台流式，累积后一次发）
             # 仅当 stream_mode=True 时有意义；默认 'foreground' 保持与旧版行为一致。
             'stream_style': normalize_stream_style(

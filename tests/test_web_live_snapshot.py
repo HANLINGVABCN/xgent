@@ -179,7 +179,7 @@ async def main():
         async with Harness(bot,folder) as h:
             for stream,style in ((False,'foreground'),(True,'foreground'),(True,'background')):
                 await h.db.clear_all_conversation_memory()
-                bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('stream_style',style)
+                bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream');bot.UserDataManager.set('stream_style',style)
                 started=asyncio.Event();release=asyncio.Event()
                 async def complete(*args,**kwargs):
                     started.set();await release.wait();return 'final body',None
@@ -191,8 +191,7 @@ async def main():
                         await asyncio.wait_for(started.wait(),2)
                         snapshot=h.outbox.snapshot()
                         assert len(snapshot['frames'])==1,snapshot
-                        expected = ('非流式输出中...' if not stream else
-                                    '后台流式输出中...' if style == 'background' else '前台流式输出中...')
+                        expected = '非流式输出中...' if not stream else '前台流式输出中...'
                         assert snapshot['frames'][0]['text'] == expected, snapshot
                         mid=snapshot['frames'][0]['message_id']
                         assert h.outbox.snapshot()['frames'][0]['message_id']==mid

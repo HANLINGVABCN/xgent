@@ -73,9 +73,9 @@ def test_mobile_generation_panel_switch_and_resize(browser_context,workspace_url
     page.wait_for_function('(old)=>document.getElementById("composer-agent").getAttribute("aria-pressed")===String(!old)',arg=original)
     assert page.locator('#composer-options-popover').is_hidden()
     trigger.click()
-    assert page.locator('#composer-options-popover .composer-option').count()==5
+    assert page.locator('#composer-options-popover .composer-option').count()==4
     assert page.get_by_role('radio',name='前台流式',exact=True).is_visible()
-    assert page.get_by_role('radio',name='后台流式',exact=True).is_visible()
+    assert page.get_by_role('radio',name='后台流式',exact=True).count()==0
     assert page.get_by_role('radio',name='非流式',exact=True).is_visible()
     assert page.get_by_role('switch',name='呈现模式',exact=True).count()==0
     page.keyboard.press('Escape')
@@ -103,12 +103,12 @@ def test_failed_change_stays_in_composer_and_preserves_value(browser_context,wor
 
 
 @pytest.mark.parametrize('width',[1440,390,320])
-def test_three_generation_choices_save_enablement_and_style_together(browser_context,workspace_url,width):
+def test_web_generation_choices_preserve_independent_bot_setting(browser_context,workspace_url,width):
     page=browser_context.new_page();page.set_viewport_size({'width':width,'height':844});ready(page,workspace_url['url'])
     page.wait_for_function('!document.getElementById("composer-model").disabled')
     page.locator('#input').fill('保留草稿')
-    for value,label,enabled,style in [('background','后台流式',True,'background'),
-                                      ('nonstream','非流式',False,'foreground'),
+    bot_mode=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']['telegram_response_mode']
+    for value,label,enabled,style in [('nonstream','非流式',False,'foreground'),
                                       ('foreground','前台流式',True,'foreground')]:
         page.get_by_role('button',name='生成选项',exact=True).click()
         assert page.get_by_role('radiogroup',name='回复方式').is_visible()
@@ -118,6 +118,7 @@ def test_three_generation_choices_save_enablement_and_style_together(browser_con
         page.locator('#composer-options-popover').wait_for(state='hidden')
         data=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']
         assert (data['response_mode'],data['stream_mode'],data['stream_style'])==(value,enabled,style)
+        assert data['telegram_response_mode']==bot_mode
         assert page.locator('#input').input_value()=='保留草稿'
         page.get_by_role('button',name='生成选项',exact=True).click()
         assert page.get_by_role('radio',name=label,exact=True).get_attribute('aria-checked')=='true'

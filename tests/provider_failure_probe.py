@@ -48,7 +48,7 @@ async def exercise(bot, root):
                 bot.UserDataManager.get('providers')['p']['api_format'] = fmt
                 for stream, style in ((False, 'foreground'), (True, 'foreground'), (True, 'background')):
                     await h.db.clear_all_conversation_memory()
-                    bot.UserDataManager.set('stream_mode', stream)
+                    bot.UserDataManager.set('stream_mode', stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
                     bot.UserDataManager.set('stream_style', style)
                     native.messages.clear()
                     h.refused = True
@@ -87,7 +87,7 @@ async def exercise(bot, root):
                     assert all(mid in native.messages for mid in saved), native.messages
                     results[f'{fmt}/{stream}/{style}'] = True
             bot.UserDataManager.get('providers')['p']['api_format'] = 'openai_compatible'
-            bot.UserDataManager.set('stream_mode', False)
+            bot.UserDataManager.set('stream_mode', False);bot.UserDataManager.set('web_response_mode', 'nonstream')
             await h.db.clear_all_conversation_memory()
             native.messages.clear()
             h.refused = True
@@ -114,7 +114,7 @@ async def exercise(bot, root):
             for stream, style in ((False, 'foreground'), (True, 'foreground'), (True, 'background')):
                 await h.db.clear_all_conversation_memory()
                 native.messages.clear()
-                bot.UserDataManager.set('stream_mode', stream)
+                bot.UserDataManager.set('stream_mode', stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
                 bot.UserDataManager.set('stream_style', style)
                 await h.turn('HTTP error')
                 assert await bot.telegram_channel().wait_idle(5)

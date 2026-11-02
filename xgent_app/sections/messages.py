@@ -1914,6 +1914,18 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
             return
     prov_name, prov_data = get_current_provider()
     native_session = native_tools.current_session()
+    from xgent_app.response_modes import response_policy
+    from xgent_app.conversations import current_scope
+    if native_session.response_policy is None:
+        native_session.response_policy = response_policy({
+            'stream_mode': UserDataManager.get('stream_mode', True),
+            'stream_style': UserDataManager.get('stream_style', 'foreground'),
+            'web_response_mode': UserDataManager.get('web_response_mode')},
+            current_scope().origin if current_scope().origin != 'legacy' else getattr(update, 'xgent_origin', 'legacy'))
+    policy = native_session.response_policy
+    stream_mode = policy.generation_mode != 'nonstream'
+    if current_turn() is not None:
+        current_turn().response_policy = policy
     if native_session is not None:
         prov_name, prov_data = native_session.provider_name, native_session.provider_config
     # 防御性回退：模型取值优先读会话绑定（chat_sessions.model），若某条
@@ -1994,26 +2006,15 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
         response = native_tools.ModelReply('', native_session.reply)
         generated_reply.recorded = True
     elif stream_mode:
-        # stream_style: 'foreground'（前台流式，实时推送）/ 'background'（后台流式，累积后一次发）
-        stream_style = normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
-        if stream_style == STREAM_STYLE_BACKGROUND:
-            response = await send_background_streaming_response(
-                update, context,
-                prov_name, prov_data, model,
-                system_prompt, history,
-                stopped_partial_sink=stop_partial,
-                token_text_sink=token_text,
-                generated_reply=generated_reply,
-            )
-        else:
-            response = await send_streaming_response(
-                update, context,
-                prov_name, prov_data, model,
-                system_prompt, history,
-                stopped_partial_sink=stop_partial,
-                token_text_sink=token_text,
-                generated_reply=generated_reply,
-            )
+        # Stream once to the Web; Telegram selects its independent projection.
+        response = await send_streaming_response(
+            update, context,
+            prov_name, prov_data, model,
+            system_prompt, history,
+            stopped_partial_sink=stop_partial,
+            token_text_sink=token_text,
+            generated_reply=generated_reply,
+        )
     else:
         response = await send_non_streaming_response(
             update, context,
@@ -2816,25 +2817,14 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                 db, cid, update.effective_chat.id, attachment_generation, prov_name, model,
             )
             if stream_mode:
-                stream_style = normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
-                if stream_style == STREAM_STYLE_BACKGROUND:
-                    response = await send_background_streaming_response(
-                        update, context,
-                        prov_name, prov_data, model,
-                        system_prompt, next_history,
-                        stopped_partial_sink=stop_partial,
-                        token_text_sink=token_text,
-                        generated_reply=generated_reply,
-                    )
-                else:
-                    response = await send_streaming_response(
-                        update, context,
-                        prov_name, prov_data, model,
-                        system_prompt, next_history,
-                        stopped_partial_sink=stop_partial,
-                        token_text_sink=token_text,
-                        generated_reply=generated_reply,
-                    )
+                response = await send_streaming_response(
+                    update, context,
+                    prov_name, prov_data, model,
+                    system_prompt, next_history,
+                    stopped_partial_sink=stop_partial,
+                    token_text_sink=token_text,
+                    generated_reply=generated_reply,
+                )
             else:
                 response = await send_non_streaming_response(
                     update, context,

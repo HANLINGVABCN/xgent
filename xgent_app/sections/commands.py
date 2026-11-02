@@ -1017,6 +1017,13 @@ async def cmd_toggle_stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_authorized_user_middleware(update, context):
         return
     await UserDataManager.init()
+    from xgent_app.conversations import current_scope
+    if current_scope(required=False) is not None and current_scope().origin == 'web':
+        selected = 'nonstream' if UserDataManager.get('web_response_mode', 'foreground') == 'foreground' else 'foreground'
+        await (await BotMemoryDB.get_instance()).set_web_response_mode(selected)
+        UserDataManager.set('web_response_mode', selected)
+        await update.message.reply_text('🌊 网页回复方式：' + ('前台流式' if selected == 'foreground' else '非流式'))
+        return
     new_mode = not normalize_bool(UserDataManager.get('stream_mode', True), True)
     await UserDataManager.save_config('stream_mode', new_mode)
     await GlobalRecorder.record_system_op(

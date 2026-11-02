@@ -25,7 +25,7 @@ async def main():
           async with Harness(bot,folder) as h:
             await bot.UserDataManager.save_config('presentation_mode',mode)
             bot.UserDataManager.set('agent_mode',True)
-            bot.UserDataManager.set('stream_mode',stream)
+            bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
             bot.UserDataManager.set('stream_style',style)
             replies=['好的，主人，\n```run-x\n<<BEGIN_PRESENT123456\nuptime\n<<END_PRESENT123456\n```\n主人稍等马上。',
                      '主人，当前负载为 0.15、0.20、0.18。']
@@ -111,7 +111,7 @@ def test_completed_turn_removes_every_stop_button_and_preserves_token_kind(turns
 def test_generation_styles_and_round_line_remain_distinct_in_every_iteration(turns):
     for case in turns:
         _,stream,style=case['name'].split('/')
-        label='非流式输出中...' if stream=='False' else '后台流式输出中...' if style=='background' else '前台流式输出中...'
+        label='非流式输出中...' if stream=='False' else '前台流式输出中...'
         placeholders=[frame for frame in case['frames'] if frame.get('text')==label and frame['type']=='message']
         assert len(placeholders)==2,case['name']
         assert all(frame.get('msg_type')=='ai_reply' for frame in placeholders),case['name']

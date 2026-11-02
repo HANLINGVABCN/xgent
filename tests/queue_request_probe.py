@@ -232,7 +232,7 @@ async def natural_end(bot, root):
     results = {}
     for style in ('nonstream', 'foreground', 'background'):
         async with Harness(bot, Path(root) / style) as h:
-            bot.UserDataManager.set('stream_mode', style != 'nonstream')
+            bot.UserDataManager.set('stream_mode', style != 'nonstream');bot.UserDataManager.set('web_response_mode', 'foreground' if style != 'nonstream' else 'nonstream')
             bot.UserDataManager.set('stream_style', style if style != 'nonstream' else 'foreground')
             bot.UserDataManager.set('global_depth', 1)
             saved = []

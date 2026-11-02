@@ -352,7 +352,7 @@ from xgent_app.web_appearance import FONT_SETTINGS, read_appearance, write_appea
 
 WEB_EDITABLE_SETTINGS = {
     *FONT_SETTINGS,
-    'thinking_level', 'stream_mode', 'response_mode', 'agent_mode', 'agent_call_mode', 'text_stitch_mode',
+    'thinking_level', 'stream_mode', 'response_mode', 'web_response_mode', 'telegram_response_mode', 'agent_mode', 'agent_call_mode', 'text_stitch_mode',
     'global_depth', 'agent_max_iterations', 'stream_timeout', 'chat_model',
     'disabled_skills', 'hidden_skills', 'skill_state', 'agent_command_timeout', 'idle_message_interval',
     'smart_match_threshold',
@@ -910,10 +910,12 @@ async def _web_read_settings() -> Dict[str, Any]:
         'values': {
             **appearance['values'],
             'thinking_level': normalize_thinking_level(UserDataManager.get('thinking_level')),
-            'stream_mode': normalize_bool(UserDataManager.get('stream_mode', True), True),
-            'stream_style': normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE)),
-            'response_mode': (normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
-                              if normalize_bool(UserDataManager.get('stream_mode', True), True) else 'nonstream'),
+            'stream_mode': UserDataManager.get('web_response_mode', 'foreground') == 'foreground',
+            'stream_style': 'foreground',
+            'response_mode': UserDataManager.get('web_response_mode', 'foreground'),
+            'web_response_mode': UserDataManager.get('web_response_mode', 'foreground'),
+            'telegram_response_mode': (normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
+                                      if normalize_bool(UserDataManager.get('stream_mode', True), True) else 'nonstream'),
             'presentation_mode': normalize_mode(UserDataManager.get('presentation_mode', 'folded')),
             'hide_protocol_blocks': True,
             'agent_mode': bool(UserDataManager.get('agent_mode', False)),
@@ -942,8 +944,10 @@ async def _web_read_settings() -> Dict[str, Any]:
         'options': {
             'agent_call_mode': [{'value': 'toolcall', 'label': 'Tool call'}, {'value': 'fence', 'label': '正则围栏'}],
             'response_mode': [{'value': 'foreground', 'label': '前台流式'},
-                              {'value': 'background', 'label': '后台流式'},
                               {'value': 'nonstream', 'label': '非流式'}],
+            'telegram_response_mode': [{'value': 'foreground', 'label': '前台流式'},
+                                       {'value': 'background', 'label': '后台流式'},
+                                       {'value': 'nonstream', 'label': '非流式'}],
             'thinking_level': [
                 {'value': level, 'label': THINKING_LEVEL_LABELS[level]}
                 for level in THINKING_LEVEL_ORDER
@@ -995,7 +999,12 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
         UserDataManager.set(key, level)
         await UserDataManager.save_config(key, level)
         ModelClient._thinking_unsupported.clear()
-    elif key == 'response_mode':
+    elif key in {'response_mode', 'web_response_mode'}:
+        if key == 'response_mode' and value == 'background':
+            value = 'foreground'  # Older Web clients: stream locally, preserve Bot settings.
+        selected = await (await BotMemoryDB.get_instance()).set_web_response_mode(value)
+        UserDataManager.set('web_response_mode', selected)
+    elif key == 'telegram_response_mode':
         values = await (await BotMemoryDB.get_instance()).set_response_mode(value)
         for setting, selected in values.items():
             UserDataManager.set(setting, selected)
@@ -1004,7 +1013,11 @@ async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
         mode = normalize_call_mode(value)
         await UserDataManager.save_config(key, mode)
         UserDataManager.set(key, mode)
-    elif key in {'stream_mode', 'agent_mode'}:
+    elif key == 'stream_mode':
+        selected = 'foreground' if normalize_bool(value, False) else 'nonstream'
+        await (await BotMemoryDB.get_instance()).set_web_response_mode(selected)
+        UserDataManager.set('web_response_mode', selected)
+    elif key == 'agent_mode':
         flag = normalize_bool(value, False)
         UserDataManager.set(key, flag)
         await UserDataManager.save_config(key, flag)

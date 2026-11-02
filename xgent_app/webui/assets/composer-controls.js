@@ -11,8 +11,8 @@ const options=el('button',{id:'composer-generation-options',type:'button',class:
 host.replaceChildren(agent,thinking,model,options);
 const labels={off:'关闭',none:'关闭',auto:'自动思考',low:'简短思考',medium:'标准思考',high:'深入思考',xhigh:'很高',ultra:'超高',max:'最高'};
 function values(){return settings?.values||{};}
-const responseModes=[{value:'foreground',label:'前台流式'},{value:'background',label:'后台流式'},{value:'nonstream',label:'非流式'}];
-function responseMode(){return values().response_mode||(!values().stream_mode?'nonstream':values().stream_style==='background'?'background':'foreground');}
+const responseModes=[{value:'foreground',label:'前台流式'},{value:'nonstream',label:'非流式'}];
+function responseMode(){return values().web_response_mode||values().response_mode||(!values().stream_mode?'nonstream':'foreground');}
 function choices(key){const source=key==='chat_model'?(settings?.options?.chat_model||[]):(settings?.options?.thinking_level||['auto','low','medium','high']);return source.map(value=>typeof value==='object'?{value:String(value.value),label:key==='thinking_level'?(labels[value.value]||String(value.label??value.value)):String(value.label??value.value)}:{value:String(value),label:labels[value]||String(value)});}
 function label(key){const selected=choices(key).find(option=>option.value===String(values()[key]??''));return selected?.label||(key==='chat_model'?'选择模型':'自动思考');}
 function setChoice(node,key){const text=label(key);node.querySelector('.composer-choice-label').textContent=text;node.title=text;node.dataset.value=String(values()[key]??'');}

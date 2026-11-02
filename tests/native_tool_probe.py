@@ -20,6 +20,7 @@ class NativeHarness(Harness):
         await self.db.save_provider('p', URL, 'test-key', [MODEL], api_format=self.fmt)
         await self.bot.UserDataManager.reload_providers()
         for name, value in [('agent_mode', True), ('agent_call_mode', 'toolcall'), ('global_depth', 30),
+                            ('web_response_mode', 'nonstream' if self.style == 'nonstream' else 'foreground'),
                             ('stream_mode', self.style != 'nonstream'),
                             ('stream_style', 'background' if self.style == 'background' else 'foreground')]:
             await self.bot.UserDataManager.save_config(name, value)

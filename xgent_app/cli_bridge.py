@@ -621,6 +621,16 @@ class CliBot:
         编辑那一刻从"◇ 命令 + 灰底"翻成"◆ XGent 双横线块"，中途换皮。
         """
         kind = _render_kind_for(text)
+        from .presentation import current_turn, current_message_presentation
+        turn = current_turn()
+        response = getattr(turn, 'response_policy', None)
+        hint = current_message_presentation() or {}
+        preview = hint.get('telegram_content') or {}
+        if response is not None and response.telegram_mode == 'background' and hint.get('kind') == 'ai_reply':
+            if preview and preview.get('complete') is False:
+                text, parse_mode = f"后台流式 · 已生成 {len(str(preview.get('raw') or ''))} 字…", None
+            elif hint.get('purpose') == 'generation':
+                text, parse_mode = '后台流式输出中…', None
         from .message_policy import current_policy
         policy = current_policy()
         if policy is not None and not policy.allows('cli'):

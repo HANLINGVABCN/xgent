@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import asyncio
 import inspect
 import time
 import weakref
@@ -20,6 +21,24 @@ NATIVE_KINDS = frozenset({OP_NATIVE_CONTROL, OP_NATIVE_DRAFT, OP_NATIVE_RENDER,
 
 _states = weakref.WeakKeyDictionary()
 _fallback_states = {}
+PREVIEW_INTERVAL_SECONDS = 2.0
+PROGRESS_INTERVAL_SECONDS = 3.0
+
+
+async def _preview_ready(state, op, interval):
+    deadlines = state.setdefault('preview_deadlines', {})
+    now = time.monotonic()
+    delay = deadlines.get(op.chat_id, 0.0) - now
+    if delay > 0:
+        await asyncio.sleep(delay)
+    from .stop_targets import active_target
+    spec = op.payload['telegram_native']
+    run_id = (op.conversation_context or {}).get('run_id')
+    if (op.superseded or spec.get('ref') and not active_target(run_id, spec['ref'])
+            or time.time() - op.created_at > 30):
+        return False
+    deadlines[op.chat_id] = time.monotonic() + interval
+    return True
 
 
 def request_capable(bot):
@@ -191,13 +210,24 @@ async def deliver_native(bot, op, native_id, markup, extra):
         await _delete_control(bot, op.chat_id, entry, extra)
         return None
     if op.kind == OP_NATIVE_CONTROL:
-        data = {'chat_id': op.chat_id, 'text': str(op.payload.get('text') or '生成中…'),
-                'reply_markup': keyboard, **delivery}
+        mode = spec.get('mode')
+        raw = str(spec.get('raw') or '')
+        text = ('已生成 ' + str(len(raw)) + ' 字…') if mode == 'background' and raw else '等待模型回复…' if mode == 'nonstream' else '生成中…'
+        from .web_bridge import markup_from_frame
+        controls = markup_from_frame(spec.get('control_markup'))
+        control_keyboard = controls.to_dict() if controls else keyboard
+        signature = (text, control_keyboard)
+        if entry.get('control_signature') == signature:
+            return None
+        if entry['control_id'] and not await _preview_ready(state, op, PROGRESS_INTERVAL_SECONDS):
+            return None
+        data = {'chat_id': op.chat_id, 'text': text, 'reply_markup': control_keyboard, **delivery}
         if entry['control_id']:
             await _ignore_same_edit(bot, 'editMessageText', {**data, 'message_id': entry['control_id']}, extra)
         else:
             sent = await _post(bot, 'sendMessage', data, extra)
             entry['control_id'] = sent['message_id']
+        entry['control_signature'] = signature
         return None  # A status ID is never the formal reply ID.
     if op.kind == OP_NATIVE_MARKUP:
         ids = entry['ids'] or ([native_id] if native_id else [])
@@ -215,6 +245,8 @@ async def deliver_native(bot, op, native_id, markup, extra):
         return None
     rich_html = list(spec.get('html') or [' '])
     if op.kind == OP_NATIVE_DRAFT:
+        if not await _preview_ready(state, op, PREVIEW_INTERVAL_SECONDS):
+            return None
         if entry['control_id'] is None:
             from .web_bridge import markup_from_frame
             controls = markup_from_frame(spec.get('control_markup'))

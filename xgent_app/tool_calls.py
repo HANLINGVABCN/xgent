@@ -499,6 +499,7 @@ class ToolSession:
         self.trace_writer = None
         self.conversation_id = None
         self.current_outcome = {}
+        self.response_policy = None
 
     def trace(self, event, **fields):
         if not callable(self.trace_writer):

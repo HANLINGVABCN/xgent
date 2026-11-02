@@ -64,6 +64,13 @@ class OpTransientError(Exception):
     """
 
 
+class OpRateLimited(OpTransientError):
+    """An explicit retry time is a transport cooldown, not a disconnection."""
+    def __init__(self, message, retry_after):
+        super().__init__(message)
+        self.retry_after = max(0.0, float(retry_after))
+
+
 # 一条操作累计投递失败这么多次仍然不成功，就进死信。次数跨进程重启持久
 # （落在待发库的 attempts 列），否则每次重启都从零算起、毒药永远清不掉。
 MAX_OP_ATTEMPTS = 3
@@ -364,6 +371,7 @@ class ChannelWorker:
         self._deferred_rows = 0
         self._failures = 0
         self._last_error: Optional[str] = None
+        self._rate_until = 0.0
 
     # --- 生命周期 ---
 
@@ -475,6 +483,9 @@ class ChannelWorker:
 
     async def _run(self) -> None:
         while not self._closing:
+            if self._rate_until > time.monotonic():
+                await asyncio.sleep(min(1.0, self._rate_until - time.monotonic()))
+                continue
             op = self._pop()
             if op is None:
                 if self._deferred_rows and self._is_configured() and self._breaker.allow():
@@ -505,6 +516,9 @@ class ChannelWorker:
     # --- 投递 ---
 
     async def _handle(self, op: Op) -> None:
+        if self._rate_until > time.monotonic():
+            await self._defer(op)
+            return
         if op.superseded:
             await self._forget(op)
             return
@@ -578,6 +592,10 @@ class ChannelWorker:
         except Exception as exc:  # noqa: BLE001
             self._failures += 1
             self._last_error = str(exc)[:200]
+            if isinstance(exc, OpRateLimited):
+                self._rate_until = time.monotonic() + exc.retry_after
+                await self._defer(op)
+                return
             if is_transient_error(exc):
                 self._breaker.record_failure()
                 logger.warning("通道 %s 投递 %s 失败（转入待发）: %s",
@@ -692,6 +710,8 @@ class ChannelWorker:
         中间态编辑会被归并（见 collapse_ops 的说明），可见的最终状态与原样重放
         逐字相同。
         """
+        if self._rate_until > time.monotonic():
+            return
         if self._store is None or self._draining:
             self._deferred_rows = 0 if self._store is None else self._deferred_rows
             return
@@ -727,7 +747,7 @@ class ChannelWorker:
                 if op.muted:
                     await self._forget(op)
                     continue
-                if self._closing or not self._breaker.allow():
+                if self._closing or self._rate_until > time.monotonic() or not self._breaker.allow():
                     break
                 if int(op.attempts or 0) >= MAX_OP_ATTEMPTS:
                     # 上次进程留下的、早已到上限的行（比如升级前积压的）。
@@ -758,6 +778,9 @@ class ChannelWorker:
                     await self._forget(op)
                     continue
                 except Exception as exc:  # noqa: BLE001
+                    if isinstance(exc, OpRateLimited):
+                        self._rate_until = time.monotonic() + exc.retry_after
+                        break
                     self._failures += 1
                     self._last_error = str(exc)[:200]
                     if is_transient_error(exc):
@@ -906,6 +929,7 @@ class ChannelWorker:
 
     def stats(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
+            'rate_limited_seconds': round(max(0.0, self._rate_until - time.monotonic()), 2),
             "queued": self._queue_len(),
             "delivered": self._delivered,
             "dropped": self._dropped,
@@ -986,6 +1010,7 @@ __all__ = [
     "CircuitBreaker",
     "MAX_OP_ATTEMPTS",
     "Op",
+    "OpRateLimited",
     "OP_CHAT_ACTION",
     "OP_DELETE",
     "OP_DOCUMENT",

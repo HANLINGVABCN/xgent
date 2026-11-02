@@ -6,7 +6,7 @@
 
 ## 执行与兼容
 
-- OpenAI Chat Completions、OpenAI 兼容接口、Gemini／Vertex、Claude 的非流式、前台和后台流式均接收原生调用。HTTP 地址、API Key、代理、连接池与用量记录继续沿用现有配置。
+- OpenAI Chat Completions、OpenAI 兼容接口、Gemini／Vertex、Claude 的流式和非流式均接收原生调用。网页只保留前台流式与非流式；Bot／CLI 的前台、后台与非流式设置独立保留，网页实时显示不受 Bot 后台选择影响。HTTP 地址、API Key、代理、连接池与用量记录继续沿用现有配置。
 - Tool call 工具入口独立命名：执行命令 `exec_command(command)`，交互终端 `start_terminal`／`terminal_input`／`close_terminal`，文件读取、修改、写入、二进制写入、交付使用 `read_file`／`edit_file`／`write_file`／`write_binary`／`send_file`，检索与代码分析使用 `search_files`／`inspect_code`，联网使用 `search_web`／`fetch_urls`，生图、表单和收尾使用 `generate_media`／`ask_user`／`finish_task`。工具定义与提示词不再用旧协议函数名；后台执行器继续复用，界面的既有协议标识保留。
 - Tool call 接收完整参数并按 schema 校验后才执行，同批工具保持顺序。命令、文件内容及编辑旧／新串保留原始空格、缩进和换行。一次响应中所有调用先完成校验，错误或截断参数不执行。
 - 流式参数按调用位置拼接，支持合法的分片函数名；同一位置的 ID／函数名冲突、无效索引、重复开始或结束后的参数分片会阻止整批调用。调用编号转换只发生在请求副本里，保留原始编号和参数；外来长编号、特殊字符及跨运行重复编号转换为目标接口兼容且相互匹配的调用／结果编号。
@@ -24,6 +24,10 @@ Tool call 的具体功能和参数由 API 工具清单说明，追加提示词�
 启动时仅更新内容与上一版默认模板完全一致的 Tool call／全局说明，更新前保留 `.before-mode-split-*.bak` 原文件备份；用户修改过的文件不覆盖，也不猜测其中哪些句子应迁移。新版默认全局说明按当前会话隔离描述历史，空闲提醒明确此次没有执行工具且不改变 Agent 开关，Agent 关闭时不要求修改、读取或发送服务器文件。旧函数名称只用于读取已有结构化历史，不接受为新的执行请求；无需数据库迁移。
 
 ## 历史与展示
+
+网页回复方式使用持久字段 `web_response_mode=foreground|nonstream`，Bot／CLI 沿用 `stream_mode` 与 `stream_style`。旧网页后台流式初始化为前台流式，非流式初始化为非流式，不覆盖 Bot 原选择；已有网页选择保留。网页设置接口的 `response_mode` 与旧 `stream_mode` 仅修改网页模式，另以 `telegram_response_mode` 修改 Bot 原设置。新回合固定模型请求方式与 Bot 投递方式，排队接入和表单恢复不因中途切换重新取值。
+
+同一轮生成共用一次模型请求；流式数据立即给网页，Bot 前台合并中间草稿，按聊天至少间隔 2 秒更新，后台只显示生成字数、至少间隔 3 秒更新，非流式只显示等待状态。正式正文及媒体按原队列投递和保存，不受预览节流丢弃。Telegram 返回 429 时保留 `retry_after`（支持秒数和 timedelta），仅暂停 Telegram 通道；不当成接口不支持或永久断线，不切换接口另发消息。过期、已结束阶段和断线期间的草稿不补发，正式回复可恢复投递。
 
 工具调用和结果在现有消息元数据中保存，原回复正文仍只有模型实际返回的正文。纯工具响应展示命令卡片，不生成空白正文；工具输出继续独立，Bot 的 50行／3200字符预览、状态点与存档路径保持原规则。最终回复的详情仍只附一次。
 

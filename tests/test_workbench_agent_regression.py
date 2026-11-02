@@ -107,7 +107,7 @@ from xgent_app.workbench import Workbench
 async def main():
     await ns['UserDataManager'].init()
     db = await ns['BotMemoryDB'].get_instance()
-    for key, value in {'smart_match_threshold': 0, 'stream_mode': False,
+    for key, value in {'smart_match_threshold': 0, 'stream_mode': False, 'web_response_mode': 'nonstream',
                        'presentation_mode': 'detailed', 'stats_auto_merge': False,
                        'disabled_skills': [], 'model_price_table': {}}.items():
         await db.set_config(key, value)

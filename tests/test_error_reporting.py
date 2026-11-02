@@ -42,7 +42,7 @@ async def main():
             bot.UserDataManager.set('global_depth', 50)
             for stream, style in ((False,'foreground'),(True,'foreground'),(True,'background')):
                 await h.db.clear_all_conversation_memory()
-                bot.UserDataManager.set('stream_mode', stream)
+                bot.UserDataManager.set('stream_mode', stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
                 bot.UserDataManager.set('stream_style', style)
                 h.error=(500, 'Post https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent: EOF')
                 h.drain_frames()
@@ -87,7 +87,7 @@ async def main():
               bot.UserDataManager.set('hide_protocol_blocks',hide)
               for stream,style in ((False,'foreground'),(True,'foreground'),(True,'background')):
                 await h.db.clear_all_conversation_memory()
-                bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('stream_style',style)
+                bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream');bot.UserDataManager.set('stream_style',style)
                 message='完整上下文请求失败，未获得有效回复，也没有自动减少附件：\n'+'\n'.join('VISIBLE-%03d TEST_SECRET_NEVER_SAVED'%i for i in range(80))
                 async def broken_stream(*args,**kwargs):
                     raise AttachmentContextError(message)

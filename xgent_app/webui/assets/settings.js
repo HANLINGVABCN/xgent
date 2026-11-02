@@ -4,7 +4,7 @@ import {twoFactorCard} from './two-factor.js';
 
 export async function settingsView({logout,boot,health,state,render,dialog,closeDialog,submit,dirtyForm,confirmAction,refreshBootstrap,setTheme,filter,heading,card,actions}) {
   const settings=boot.settings;
-  const page=el('div',{},heading('设置','业务设置与 Telegram、CLI 共享。字号保存到服务端并跨网页设备同步；主题与动效仅影响当前浏览器。',[button('退出登录',logout,'danger')]));
+  const page=el('div',{},heading('设置','网页与 Bot 回复方式分别保存；其他业务设置与 Telegram、CLI 共享。字号跨网页设备同步，主题与动效仅影响当前浏览器。',[button('退出登录',logout,'danger')]));
   const sections=[['appearance','外观'],['conversation','对话与记忆'],['agent','Agent'],['web','Web 与安全'],['data','数据与备份'],['health','系统状态']];
   const active=filter('section')||'appearance';
   page.append(el('div',{class:'wb-tabs',role:'tablist'},sections.map(([id,title])=>el('button',{role:'tab','aria-selected':id===active,class:id===active?'active':'',onclick:()=>{if(state.dirty&&!confirm('尚有未保存设置，放弃修改？'))return;state.dirty=false;if(active==='appearance'&&id!==active)window.XGentAppearance?.cancelPreview();filter('section',id);render();}},title))));
@@ -32,10 +32,10 @@ export async function settingsView({logout,boot,health,state,render,dialog,close
     grid.append(appearance,visual,card('快捷操作',el('dl',{},...[['Ctrl / ⌘ K','搜索命令'],['Ctrl / ⌘ F','搜索全部历史'],['Enter','桌面发送消息'],['Shift / Alt + Enter','换行'],['Esc','关闭详情或弹窗']].map(([k,v])=>el('div',{class:'wb-detail-row'},el('dt',{},k),el('dd',{},v)))),el('p',{class:'wb-note'},'触屏 Enter 始终换行。正在生成时仍可编辑草稿。')));
   }
   if(active==='conversation'||active==='agent'){
-    const conversation=[['stream_mode','流式输出','bool'],['thinking_level','思考深度','select'],['text_stitch_mode','文本拼接方式','select'],['global_depth','记忆深度','number'],['stream_timeout','流式超时（秒，0 为自动）','number']];
+    const conversation=[['response_mode','网页回复方式','select'],['telegram_response_mode','Bot 回复方式','select'],['thinking_level','思考深度','select'],['text_stitch_mode','文本拼接方式','select'],['global_depth','记忆深度','number'],['stream_timeout','流式超时（秒，0 为自动）','number']];
     const agent=[['agent_mode','Agent 模式','bool'],['agent_call_mode','工具调用方式','select'],['agent_max_iterations','最大迭代次数','number'],['agent_command_timeout','命令等待时间（秒）','number'],['smart_match_threshold','智能匹配阈值','number'],['idle_message_interval','空闲提示间隔（秒）','number']];
     const fields=active==='agent'?agent:conversation;const form=el('form');
-    const notes={"stream_mode":"开启后逐段显示回复，关闭后完整返回；不改变回复内容。","thinking_level":"选择模型思考深度；不同模型支持范围不同。","text_stitch_mode":"控制连续回复的拼接方式。","global_depth":"参与后续请求的历史深度，不会删除聊天记录。","stream_timeout":"等待模型回复的超时；0 使用自动策略。","agent_mode":"允许 Agent 按现有权限执行工具。","agent_call_mode":"Tool call／正则围栏；切换影响下一次新请求，运行中的回合保持原模式。","agent_max_iterations":"本轮请求允许的最多 Agent 迭代次数。","agent_command_timeout":"命令等待时间，单位为秒。","smart_match_threshold":"命令智能匹配阈值，范围 0–100%。","idle_message_interval":"空闲状态提示的间隔，单位为秒。"};
+    const notes={"response_mode":"网页选择前台流式或非流式，不改变 Bot 设置。","telegram_response_mode":"Bot 独立控制预览；前台限制刷新频率，后台只显示生成进度。限流不拖慢网页。","thinking_level":"选择模型思考深度；不同模型支持范围不同。","text_stitch_mode":"控制连续回复的拼接方式。","global_depth":"参与后续请求的历史深度，不会删除聊天记录。","stream_timeout":"等待模型回复的超时；0 使用自动策略。","agent_mode":"允许 Agent 按现有权限执行工具。","agent_call_mode":"Tool call／正则围栏；切换影响下一次新请求，运行中的回合保持原模式。","agent_max_iterations":"本轮请求允许的最多 Agent 迭代次数。","agent_command_timeout":"命令等待时间，单位为秒。","smart_match_threshold":"命令智能匹配阈值，范围 0–100%。","idle_message_interval":"空闲状态提示的间隔，单位为秒。"};
     for(const [key,label,type] of fields){const control=type==='bool'?check(label,key,settings.values[key]):type==='select'?select(label,key,settings.options[key],settings.values[key]):field(label,key,settings.values[key],type);const row=el('div',{class:'wb-setting-row'},control,el('p',{class:'wb-setting-note'},notes[key]));if(type==='number'){const input=control.querySelector('input');input.min=key==='global_depth'?'1':'0';input.step='1';if(key==='smart_match_threshold')input.max='100';}form.append(row);}
     const feedback=el('div');form.append(el('p',{class:'wb-note'},'保存后生效。执行中的命令不会因为修改参数而重新启动。'),feedback,el('button',{type:'submit',class:'wb-btn primary'},'保存设置'));dirtyForm(form);
     form.onsubmit=e=>{e.preventDefault();submit(form,async d=>{for(const [key,,type] of fields)await wb('settings',{data:{key,value:type==='number'?Number(d[key]):d[key]}});feedback.replaceChildren(message('设置已保存','success'));await refreshBootstrap();});};

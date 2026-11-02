@@ -131,6 +131,7 @@ class GeneratedHarness(Harness):
     def configure(self, fmt="openai", stream=False, style="foreground", agent=False):
         self.bot.UserDataManager.get("providers")["p"]["api_format"] = fmt
         for name, value in (
+            ('web_response_mode', 'foreground' if stream else 'nonstream'),
             ("stream_mode", stream), ("stream_style", style), ("agent_mode", agent),
             ("default_media_provider_key", "p"), ("default_media_model", MODEL),
         ):

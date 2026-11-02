@@ -22,7 +22,7 @@ async def main():
         with tempfile.TemporaryDirectory() as folder:
             async with Harness(bot,folder) as h:
                 bot.UserDataManager.set('agent_mode',True)
-                bot.UserDataManager.set('stream_mode',stream)
+                bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
                 bot.UserDataManager.set('stream_style',style)
                 replies=['第一轮，检查服务。\n```run-x\n<<BEGIN_SPACING123456\nprintf first\n<<END_SPACING123456\n```',
                          '第二轮，检查连接。\n```run-x\n<<BEGIN_SPACING234567\nprintf second\n<<END_SPACING234567\n```',

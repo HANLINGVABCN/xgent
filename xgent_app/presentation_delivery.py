@@ -92,6 +92,9 @@ class PresentationBot:
         from .stop_targets import begin_phase
         scope = current_scope(required=False)
         run_id = scope.run_id if scope else None
+        policy = getattr(self.turn, 'response_policy', None)
+        if policy is not None and mode != 'nonstream':
+            mode = policy.telegram_mode
         self._telegram_generation = {'ref': begin_phase(run_id, 'model'),
             'run_id': run_id, 'mode': mode, 'draft_id': secrets.randbits(63) or 1,
             'raw': '', 'owner_id': None}

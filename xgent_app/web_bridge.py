@@ -976,7 +976,9 @@ def classify_telegram_error(exc: BaseException) -> BaseException:
     TelegramError 的直接子类。
     """
     if isinstance(exc, _TgRetryAfter):
-        return OpTransientError(f"Telegram 限流: {exc}")
+        from .fanout import OpRateLimited
+        retry = exc.retry_after
+        return OpRateLimited(f"Telegram 限流: {exc}", retry.total_seconds() if hasattr(retry, 'total_seconds') else retry)
     if isinstance(exc, _TgTimedOut):
         return OpTransientError(f"Telegram 超时: {exc}")
     if isinstance(exc, _TgBadRequest):

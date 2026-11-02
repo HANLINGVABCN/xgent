@@ -205,7 +205,7 @@ async def stream_modes(bot, root):
         for mode in ('foreground', 'background', 'nonstream'):
             async with CompressionHarness(bot, Path(root) / (fmt + mode)) as h:
                 await bot.GlobalRecorder.record_user_message('RESTORE-ME')
-                bot.UserDataManager.set('stream_mode', mode != 'nonstream')
+                bot.UserDataManager.set('stream_mode', mode != 'nonstream');bot.UserDataManager.set('web_response_mode', 'foreground' if mode != 'nonstream' else 'nonstream')
                 bot.UserDataManager.set('stream_style', mode if mode != 'nonstream' else 'foreground')
                 await h.compress(fmt, 'SINGLE-ORDINARY-REPLY')
                 entry = await h.db.get_latest_compression()
@@ -345,7 +345,7 @@ async def stream_wire_termination(bot, root):
         for style in ('foreground', 'background'):
             for phase in ('complete', 'truncated', 'disconnected', 'malformed'):
                 async with CompressionHarness(bot, Path(root) / (fmt + style + phase)) as h:
-                    bot.UserDataManager.set('stream_mode', True)
+                    bot.UserDataManager.set('stream_mode', True);bot.UserDataManager.set('web_response_mode', 'foreground')
                     bot.UserDataManager.set('stream_style', style)
                     await bot.GlobalRecorder.record_user_message('WIRE-ORIGINAL')
                     if fmt in {'openai', 'openai_compatible'}:

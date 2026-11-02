@@ -24,7 +24,7 @@ async def main():
             for hide in (True,False):
                 for stream,style in ((False,'foreground'),(True,'foreground'),(True,'background')):
                     await bot.UserDataManager.save_config('hide_protocol_blocks',hide)
-                    bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('stream_style',style)
+                    bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream');bot.UserDataManager.set('stream_style',style)
                     raw='# 标题\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- [x] 检查完成\n\n'
                     raw+='```python\nprint("<safe> & 中文")\n```\n\n'
                     raw+='```run-x\n<<BEGIN_STABLE123456\n'+''.join(f'line {i}\n' for i in range(90))+'<<END_STABLE123456\n```\n\n'
