@@ -125,10 +125,7 @@ def usage_details(reply):
 
 
 def summary_line(summary):
-    text = f"共执行 {summary['rounds']} 轮，{summary['operations']} 个操作 · 总耗时{approximate_seconds(summary.get('elapsed_seconds'))}"
-    if summary.get('reason'):
-        text = str(summary['reason']) + '\n' + text
-    return text
+    return f"共执行 {summary['rounds']} 轮，{summary['operations']} 个操作 · 总耗时{approximate_seconds(summary.get('elapsed_seconds'))}"
 
 
 def footer_html(presentation, *, expanded=False):
@@ -229,6 +226,7 @@ class PresentationTurn:
     last_record_id: int | None = None
     operation_messages: dict = field(default_factory=dict)
     reply_group_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    terminal_status: str = 'completed'
 
     def __post_init__(self):
         self.mode = FOLDED
@@ -291,6 +289,8 @@ class PresentationTurn:
     def summary(self):
         return {'rounds': len(self.replies), 'operations': len(self.operations),
                 'elapsed_seconds': time.monotonic() - self.started_at, 'reason': self.reason,
+                'complete': not getattr(self, 'awaiting_input', False),
+                'status': 'waiting' if getattr(self, 'awaiting_input', False) else self.terminal_status,
                 'items': [{k: v for k, v in op.items() if k != 'started_at'} for op in self.operations]}
 
 

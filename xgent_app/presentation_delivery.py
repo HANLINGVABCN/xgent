@@ -335,17 +335,12 @@ class PresentationBot:
         return {'version': 1, 'record_id': row['id'], 'message_ids': [message.message_id,
                 *[extra.message_id for extra in message.telegram_extra_messages]], 'details': details}
 
-    def remember_notice(self, text):
-        if any(word in str(text) for word in ('停止', '失败', '超过', '超限')):
-            self.turn.reason = ('⏹️ 已停止。' if '停止' in str(text) else
-                                '⚠️ 已达到执行上限。' if any(word in str(text) for word in ('超过', '超限')) else
-                                '⚠️ 本次处理失败，已有结果已保留。')
-
     def _kind(self, text):
         explicit = current_message_presentation()
         if explicit:
             if explicit.get('kind') == 'runtime_error':
                 self.turn.reason = '⚠️ 本次处理失败，已有结果已保留。'
+                self.turn.terminal_status = 'failed'
             return explicit.get('kind', 'ai_reply')
         from .web_display import current_web_display
         if current_web_display() is not None:
@@ -365,7 +360,6 @@ class PresentationBot:
         if policy is not None and policy.purpose in {'chat', 'media', 'generation'}:
             return text
         if kind == 'agent_status':
-            self.remember_notice(text)
             if policy is not None and policy.transient:
                 return None
             caption = compact_agent_round_status(text)

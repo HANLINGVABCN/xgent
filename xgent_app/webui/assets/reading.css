@@ -49,7 +49,14 @@ body:not([data-page=chat]) #wb-conversation-title,body:not([data-page=chat]) #st
 .token-pill { color:var(--text-2); font-size:calc(var(--web-ui-font-size) * .9); line-height:1.5; padding:4px 8px; flex-wrap:wrap; }
 
 #scroll-bottom { position:absolute; bottom:12px; right:18px; }
-#source-navigation { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:4px 14px; padding:8px 12px; border:1px solid var(--wb-border); border-radius:8px; background:var(--wb-panel); font-size:.9em; }
+/* Reserve the 40px bottom arrow, its 18px inset and an 8px gap. */
+#source-navigation { display:grid; grid-template-columns:28px minmax(0,1fr); align-items:start; gap:6px; min-height:36px; margin:4px 66px 4px 14px; padding:4px 8px; border:1px solid var(--wb-border); border-radius:8px; background:var(--wb-panel); font:11px/17px var(--font); }
+#source-navigation .wb-source-close { position:static; inset:auto; display:grid; place-items:center; width:28px; height:28px; min-width:28px; min-height:28px; margin:0; padding:0; border:0; border-radius:4px; background:transparent; color:var(--wb-text); font:16px/1 var(--font); opacity:1; visibility:visible; transform:none; }
+#source-navigation .wb-source-close:hover,#source-navigation .wb-source-close:focus-visible { background:var(--wb-soft); }
+#source-navigation .wb-source-content { display:flex; flex-wrap:wrap; align-items:center; gap:3px 8px; min-width:0; min-height:28px; }
+#source-navigation .wb-source-label { min-width:0; overflow-wrap:anywhere; }
+#source-navigation .wb-source-return { flex:0 0 auto; }
+#source-navigation .wb-source-error { color:var(--wb-danger); }
 #source-navigation a { color:var(--wb-accent); } .source-target { outline:2px solid var(--wb-accent); outline-offset:6px; border-radius:8px; }
 /* Deep code surfaces are retained in both themes. */
 body,body.dark { --code-bg:#182334; --code-header:#101827; --code-fg:#eef3f9; --code-border:#334155; --code-line:#334155; }

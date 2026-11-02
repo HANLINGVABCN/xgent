@@ -1127,3 +1127,10 @@
 .bubble.user.has-media .fc-details{display:initial}
 .bubble.has-media .message-media{margin-bottom:0}
 .bubble .file-write-result{font:12px/17px var(--mono);color:var(--text-2);overflow-wrap:anywhere}
+.command-series-collapsed:not(.command-series-anchor),.duplicate-stop-notice{display:none!important}
+.command-series-anchor.command-series-collapsed>.bubble>:not(.bubble-header):not(.command-series-control){display:none!important}
+.command-series-control{position:relative;width:100%;margin:4px 0 8px;min-width:0}
+.command-series-toggle{width:100%;display:flex;align-items:center;gap:8px;text-align:left;padding:8px 10px;border:1px solid var(--line-2);border-radius:6px;background:transparent;color:var(--text-2);font:12px/17px var(--font);cursor:pointer}
+.command-series-toggle:hover{background:var(--surface-2)}
+.command-series-close{position:fixed;z-index:34;min-height:28px;padding:4px 6px;border:1px solid var(--line-2);border-radius:4px;background:var(--surface);color:var(--text-2);font:11px/17px var(--font);cursor:pointer}
+.command-series-control.series-open{height:0;margin:0}.stop-notice{font:12px/17px var(--font);color:var(--text-2)}

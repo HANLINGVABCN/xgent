@@ -19,6 +19,12 @@ PROTOCOL_NAMES = {kind: kind + '-x' for kind in LABELS}
 PROTOCOL_NAMES['file_base64'] = 'file-x'
 
 
+def web_footer_html(presentation):
+    # Execution totals live on the Web's command-series control. Other clients
+    # keep their original final detail block and the saved metrics are unchanged.
+    return footer_html({key: value for key, value in (presentation or {}).items() if key != 'summary'})
+
+
 def operation_state(operation):
     if operation.get('status') in {'stopped', 'cancelled', 'interrupted'} or operation.get('state') == 'stopped':
         return 'stopped'
@@ -80,7 +86,7 @@ def build_operation_display(operation, mode, presentation=None):
     body = operation.get('output') or operation.get('notice') or ('等待命令返回…' if operation_state(operation) == 'running' else '(无输出)')
     segments = [{'kind': 'html', 'text': web_block_html(body, state=operation_state(operation),
                  output_path=operation.get('output_path'), details=details)}]
-    footer = footer_html(presentation or {})
+    footer = web_footer_html(presentation or {})
     if footer:
         segments.append({'kind': 'html', 'text': footer, 'footer': True})
     return {'version': 1, 'segments': segments, 'presentation_mode': mode, 'operation_details': details}
@@ -99,11 +105,18 @@ def build_web_display(text: str, *, fold: bool = True, hide_unclosed: bool = Fal
         segments = web_ai_segments(text, hide_unclosed=hide_unclosed, presentation=presentation)
     else:
         segments = [{'kind': 'markdown', 'text': text}]
+    terminal = (presentation or {}).get('terminal_status') or ((presentation or {}).get('summary') or {}).get('status')
+    only = (presentation or {}).get('kind') == 'agent_status' or (presentation or {}).get('terminal_only') is True
+    if terminal == 'stopped' and not only:
+        segments.append({'kind': 'html', 'terminal_notice': True,
+                         'text': '<span class="stop-notice">⏹ 已停止，已有结果保留。</span>'})
     if presentation:
-        footer = footer_html(presentation)
+        footer = web_footer_html(presentation)
         if footer:
             segments.append({'kind': 'html', 'text': footer, 'footer': True})
     result = {'version': 1, 'segments': segments, 'presentation_mode': mode}
+    if terminal == 'stopped':
+        result['terminal_notice'] = {'state': 'stopped', 'only': only}
     if presentation and presentation.get('usage'):
         result['usage_details'] = usage_details(presentation)
     if presentation and presentation.get('summary'):
@@ -120,6 +133,11 @@ def build_web_display(text: str, *, fold: bool = True, hide_unclosed: bool = Fal
 
 def current_web_display():
     return _current.get()
+
+
+def stopped_web_display(text, *, reply_message_id=None, mode=None):
+    return build_web_display(text, reply_message_id=reply_message_id, mode=mode,
+                             presentation={'terminal_status': 'stopped'})
 
 
 @contextmanager
@@ -148,6 +166,9 @@ def present_web_frame(frame):
                 result['replace_message_ids'] = [frame['message_id']]
         if hint['kind'] == 'token_usage':
             result['hidden'] = True
+        if hint.get('terminal_status') == 'stopped':
+            result['web_display'] = build_web_display(str(frame.get('text') or ''),
+                presentation={'terminal_status': 'stopped', 'terminal_only': hint['kind'] == 'agent_status'})
         turn = current_turn()
         if hint.get('ask_id'):
             from .agent_ask import PENDING_ASKS
@@ -193,13 +214,11 @@ def web_stream_display(*, final=False, stopped=False):
         async def wrapped(renderer, *args, **kwargs):
             text = ''.join(renderer.response_parts)
             raw = text
-            if stopped:
-                text += ('\n\n⏹️ 已停止，保留以上已生成内容。' if text.strip() else
-                         '⏹️ 已停止，还没有生成可保留的内容。')
             display = build_web_display(text, fold=renderer._hide_blocks,
                                         hide_unclosed=not final,
                                         reply_message_id=renderer.message_ids[0],
-                                        mode=getattr(renderer, '_presentation_mode', 'folded'))
+                                        mode=getattr(renderer, '_presentation_mode', 'folded'),
+                                        presentation={'terminal_status': 'stopped'} if stopped else None)
             hint = dict(current_message_presentation() or {})
             hint.update(kind='ai_reply', telegram_content={'raw': raw, 'complete': final,
                 'owner_id': renderer.message_ids[0], 'stopped': stopped})

@@ -94,24 +94,30 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('wb-dialog').ope
 window.addEventListener('beforeunload',e=>{if(state.dirty||state.detailDirty){e.preventDefault();e.returnValue='';}});
 let sourceVisit='',sourceNavigationSequence=0;
 let sourceCleanup=()=>{};
-function clearSourceReader(){
+function clearSourceReader(keepBanner=false){
   sourceCleanup();sourceCleanup=()=>{};
   $('source-reader')?.remove();document.body.classList.remove('source-readonly');$('log').hidden=false;
-  $('source-navigation').hidden=true;$('source-reader-title')?.remove();
+  if(!keepBanner)$('source-navigation').hidden=true;$('source-reader-title')?.remove();
 }
 async function followSource(){
   const params=new URLSearchParams(location.hash.split('?')[1]||''),cid=params.get('conversation'),anchor=params.get('message');
   if(!cid){clearSourceReader();sourceVisit='';return;}
   const signature=cid+'|'+(anchor||'');if(sourceVisit===signature)return;sourceVisit=signature;
   const sequence=++sourceNavigationSequence,stillHere=()=>sequence===sourceNavigationSequence&&state.route==='chat'&&sourceVisit===signature;
-  const banner=$('source-navigation');banner.hidden=false;banner.replaceChildren(el('span',{},'正在定位来源消息…'));
+  const banner=$('source-navigation');
+  const close=el('button',{type:'button',class:'wb-source-close','aria-label':'关闭来源定位提示',title:'关闭',onclick:()=>{
+    sourceVisit='';sourceNavigationSequence++;history.replaceState(null,'','#/chat');
+    clearSourceReader();window.XGentChat?.dismissLocation();
+  }},'×');
+  const showBanner=(...children)=>{banner.hidden=false;banner.replaceChildren(close,el('div',{class:'wb-source-content'},...children));};
+  showBanner(el('span',{class:'wb-source-label'},'正在定位来源消息…'));
   try{
     await window.XGentConversations.refresh();if(!stillHere())return;
     const owner=window.XGentConversations.items.find(c=>c.id===cid);if(!owner)throw new Error('来源对话已不存在');
-    const back=el('a',{href:'#/'+(state.sourceReturn||'tasks')},'返回'+(pages.find(p=>p[0]===state.sourceReturn)?.[1]||'工作台'));
+    const back=el('a',{class:'wb-source-return',href:'#/'+(state.sourceReturn||'tasks')},'返回'+(pages.find(p=>p[0]===state.sourceReturn)?.[1]||'工作台'));
     if(owner.archived){
       const result=await wb('history'+query({conversation_id:cid,anchor,limit:50}));if(!stillHere())return;
-      clearSourceReader();document.body.classList.add('source-readonly');$('log').hidden=true;
+      clearSourceReader(true);document.body.classList.add('source-readonly');$('log').hidden=true;
       const name=el('span',{id:'source-reader-title'},owner.name+' · 已归档');$('header').querySelector('.header-text').append(name);
       const reader=el('section',{id:'source-reader','aria-label':'来源对话（只读）'}),messages=el('div');reader.append(messages);$('wb-chat').append(reader);
       window.XGentChat.bindContent(messages);
@@ -157,17 +163,12 @@ async function followSource(){
       prime(false,before);prime(true,after);
       const target=Array.from(messages.children).find(row=>row.dataset.sourceMessage===anchor);if(target){target.classList.add('source-target');requestAnimationFrame(()=>target.scrollIntoView({block:'center'}));}
     }else{
-      clearSourceReader();state.navigatingSource=true;
+      clearSourceReader(true);state.navigatingSource=true;
       try{await window.XGentConversations.select(cid);}finally{state.navigatingSource=false;}
       if(!stillHere())return;await window.XGentChat.locate(anchor||null);if(!stillHere())return;
     }
-    const close=el('button',{type:'button',class:'wb-source-close','aria-label':'关闭来源定位提示',title:'关闭',onclick:()=>{
-      sourceVisit='';history.replaceState(null,'','#/chat');banner.hidden=true;
-      window.XGentChat.dismissLocation();
-      if(owner.archived)clearSourceReader();
-    }},'×');
-    banner.hidden=false;banner.replaceChildren(close,back,el('span',{},owner.name+(owner.archived?' · 已归档，只读':'')+(anchor?' · 已定位来源消息':' · 此记录没有对应消息位置')));
-  }catch(error){if(stillHere())banner.replaceChildren(message(error.message),el('a',{href:'#/'+(state.sourceReturn||'tasks')},'返回工作台'));}
+    showBanner(back,el('span',{class:'wb-source-label'},owner.name+(owner.archived?' · 已归档，只读':'')+(anchor?' · 已定位来源消息':' · 此记录没有对应消息位置')));
+  }catch(error){if(stillHere())showBanner(el('span',{class:'wb-source-label wb-source-error'},error.message),el('a',{class:'wb-source-return',href:'#/'+(state.sourceReturn||'tasks')},'返回工作台'));}
 }
 document.addEventListener('click',event=>{const link=event.target.closest('.wb-source-link');if(link&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&event.button===0){state.sourceReturn=state.route;sourceVisit='';}});
 

@@ -469,7 +469,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # --- 处理器 ---
 
     def _serve_workbench_asset(self, path: str) -> None:
-        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)

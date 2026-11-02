@@ -22,6 +22,7 @@ async def main():
                 card=(await menus(bot))[0]
                 uid=card['ui_message_id']
                 await click(bot,h,card,'menu_more_settings')
+                await click(bot,h,(await menus(bot))[0],'menu_more_settings:2')
                 await click(bot,h,(await menus(bot))[0],'cmd_update')
                 assert len(await menus(bot))==1
                 await click(bot,h,(await menus(bot))[0],'select_update_source_test')

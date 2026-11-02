@@ -333,17 +333,20 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
     """Use the live semantic renderers for dynamic history; snapshots are legacy fallback."""
     from .presentation import normalize_mode, ai_html, operation_html, footer_html, metadata_dict, current_turn
     from .agent_status import compact_agent_round_status
-    from .web_display import build_web_display, build_operation_display
+    from .web_display import build_web_display, build_operation_display, web_footer_html
     ns = namespace if namespace is not None else _section_ns()
     presentation = metadata_dict(metadata.get('presentation'))
     if isinstance(metadata.get('native_calls'), list) and metadata['native_calls']:
         presentation = {**presentation, 'native_calls': metadata['native_calls'], 'agent_call_mode': 'toolcall'}
     kind, raw = record.get('msg_type'), str(record.get('content') or '')
+    if isinstance(metadata.get('stopped_reply'), dict) and isinstance(metadata['stopped_reply'].get('partial'), str):
+        raw = metadata['stopped_reply']['partial']
+        presentation = {**presentation, 'terminal_status': 'stopped'}
     write = metadata.get('file_write')
     if kind == 'agent_result' and isinstance(write, dict) and isinstance(write.get('text'), str):
         text = write['text']
         segments = [{'kind': 'html', 'text': '<span class="file-write-result">' + _html.escape(text) + '</span>'}]
-        footer = footer_html(presentation)
+        footer = web_footer_html(presentation)
         if footer:
             segments.append({'kind': 'html', 'text': footer, 'footer': True})
         message.update(content=text, parse_mode=None,
@@ -353,7 +356,7 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
     if kind == 'agent_result' and isinstance(delivery, dict) and isinstance(delivery.get('caption'), str):
         caption = delivery['caption']
         segments = [{'kind': 'html', 'text': '<span class="file-delivery-note">' + _html.escape(caption).replace('\n', '<br>') + '</span>'}]
-        footer = footer_html(presentation)
+        footer = web_footer_html(presentation)
         if footer:
             segments.append({'kind': 'html', 'text': footer, 'footer': True})
         message.update(content=caption, parse_mode=None, file_message=True,
@@ -391,14 +394,14 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
     renderer = ns.get('markdown_to_telegram_html') if ns else None
     if kind in {'ai_reply', 'media_reply'} and renderer:
         content = ai_html(raw, mode, renderer)
-        footer = footer_html(presentation)
+        footer = web_footer_html(presentation)
         message.update(content=content + ('\n\n' + footer if footer else ''), parse_mode='HTML')
         message['web_display'] = build_web_display(raw, fold=True, mode=mode,
             presentation={**presentation, 'default_protocol_state': 'pending' if presentation.get('execution_schema') else 'unknown'})
     elif kind == 'agent_result' and isinstance(presentation.get('operation'), dict):
         operation = presentation['operation']
         content = operation_html(operation, detailed=mode == 'detailed')
-        footer = footer_html(presentation) if mode == 'folded' else ''
+        footer = web_footer_html(presentation) if mode == 'folded' else ''
         message.update(content=content + ('\n\n' + footer if footer else ''), parse_mode='HTML')
         details = '\n'.join(f'{label}：{operation[key]}' for key, label in (
             ('return_code', '返回码'), ('elapsed_seconds', '耗时（秒）'),
@@ -409,7 +412,7 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
             message['reply_markup'] = [[{'text': '完整输出', 'callback_data': f'present_output:{record["id"]}'}]]
     elif (kind == 'presentation_note' or kind == 'agent_status' and presentation.get('summary')) and renderer:
         message.update(content=renderer(raw), parse_mode='HTML')
-        footer = footer_html(presentation)
+        footer = web_footer_html(presentation)
         if footer:
             message['content'] += '\n\n' + footer
         message['web_display'] = build_web_display(raw, fold=True, mode=mode, presentation=presentation)
@@ -517,6 +520,18 @@ def build_history_message(
         }]]
     apply_history_presentation(message, record, metadata,
         namespace=presentation_namespace, mode_override=presentation_mode)
+    from .presentation import metadata_dict
+    summary = metadata_dict(metadata.get('presentation')).get('summary')
+    if isinstance(summary, dict):
+        message['reply_complete'] = summary.get('complete', True) is True
+        message['execution_summary'] = {'items': [{key: item.get(key) for key in
+            ('sequence', 'reply_record_id', 'elapsed_seconds')} for item in summary.get('items', [])
+            if isinstance(item, dict)]}
+    facts = metadata_dict(metadata.get('presentation'))
+    if kind == 'ai_reply':
+        message['execution_metrics'] = {'response_seconds': facts.get('elapsed_seconds'),
+            'operations': [{key: item.get(key) for key in ('sequence', 'elapsed_seconds')}
+                           for item in facts.get('operations', []) if isinstance(item, dict)]}
     if kind in {'ai_reply', 'media_reply'}:
         notice = r'【系统自动生成：本(?:图片|视频|音频|媒体).*?】'
         message['content'] = re.sub(notice, '', message['content']).strip()

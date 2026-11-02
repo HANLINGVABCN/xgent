@@ -1992,7 +1992,9 @@ async def send_background_streaming_response(update: Update, context: ContextTyp
                 "elapsed_seconds": time.monotonic() - generation_started_at,
             })
             try:
-                await rich_finalize_text_response(context, chat_id, msg, stop_text, TELEGRAM_MSG_LIMIT)
+                from xgent_app.web_display import stopped_web_display, web_display_scope
+                with web_display_scope(stopped_web_display(partial, reply_message_id=msg.message_id)):
+                    await rich_finalize_text_response(context, chat_id, msg, stop_text, TELEGRAM_MSG_LIMIT)
             except Exception as e:
                 logger.warning(f"后台流式停止消息发送失败: {e}")
                 try:
@@ -2329,7 +2331,9 @@ async def send_non_streaming_response(update: Update, context: ContextTypes.DEFA
                 response or "", stopped=True, partial=True,
             )
             try:
-                await safe_edit_text(msg, "⏹️ 已停止。", reply_markup=None)
+                from xgent_app.web_display import stopped_web_display, web_display_scope
+                with web_display_scope(stopped_web_display(partial, reply_message_id=msg.message_id)):
+                    await safe_edit_text(msg, "⏹️ 已停止。", reply_markup=None)
             except Exception:
                 pass
             if stopped_partial_sink is not None:

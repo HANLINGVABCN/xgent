@@ -77,7 +77,7 @@ def test_two_model_replies_one_operation_and_one_round_line(turns):
             messages=visible(case['shown'])
             assert [m['msg_type'] for m in messages]==['user_text','ai_reply','agent_result','agent_status','ai_reply'],case['name']
             assert messages[3]['content']=='Agent 第 1 轮 · 1 个操作',case['name']
-            assert '共执行 2 轮，1 个操作' in messages[-1]['content']
+            assert '共执行 2 轮，1 个操作' not in messages[-1]['content']
             assert '返回码' not in messages[2]['content']
             assert 'data-compact="1"' in messages[1]['content']
 
@@ -225,7 +225,7 @@ def test_browser_retired_mode_events_preserve_expansion_and_reject_stale_snapsho
             server.outbox.put(stale)
             page.wait_for_timeout(400)
             assert 'stale snapshot' not in page.locator('#log').inner_text()
-            assert '共执行 2 轮，1 个操作' in page.locator('#log').inner_text()
+            assert '共执行 2 轮，1 个操作' not in page.locator('#log').inner_text()
             page.screenshot(path=str(tmp_path/'folded-mobile.png'),full_page=True)
             assert not errors
         finally:browser.close()

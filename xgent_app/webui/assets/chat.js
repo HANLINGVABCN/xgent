@@ -1,4 +1,5 @@
 import {syncAskForm} from './ask-form.js';
+import {installCommandSeries} from './command-series.js';
 (function () {
   "use strict";
 
@@ -12,6 +13,7 @@ import {syncAskForm} from './ask-form.js';
   var log = document.getElementById("log");
   var input = document.getElementById("input");
   var selectedConversationId = null;
+  const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun});
   var conversationDrafts = Object.create(null);
   var conversationFiles = Object.create(null);
   function draftKey(cid) { return 'xgent-draft:' + (cid || selectedConversationId || 'global_memory'); }
@@ -351,7 +353,7 @@ import {syncAskForm} from './ask-form.js';
             // 折叠交互（CSS blockquote[expandable] + bindContentClicks 里的点击切换）。
           } else if (a.name === "class") {
             var classes = a.value.split(/\s+/).filter(function (name) {
-              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note|file-write-result)$/.test(name);
+              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note|file-write-result|stop-notice)$/.test(name);
             });
             if (classes.length) c.setAttribute("class", classes.join(" "));
             else c.removeAttribute("class");
@@ -851,6 +853,7 @@ import {syncAskForm} from './ask-form.js';
 
   function syncMessageChrome(entry){
     if(!entry?.body||entry.role==='token')return;
+    entry.row._chatEntry=entry;commandSeries.changed();
     entry.row.classList.toggle('agent-round-message',entry.role==='sys'&&entry.messageType==='agent_status'&&
       /^Agent 第 \d+ 轮(?: · \d+ 个操作)?$/.test(String(entry.rawText||'').trim()));
     if(!entry.footer){
@@ -1526,6 +1529,9 @@ import {syncAskForm} from './ask-form.js';
     entry.messageType=frame.msg_type??entry.messageType;
     entry.messagePolicy=frame.message_policy??entry.messagePolicy;
     entry.webDisplay=frame.web_display;
+    if(frame.reply_complete!==undefined)entry.replyComplete=frame.reply_complete;
+    if(frame.execution_metrics)entry.executionMetrics=frame.execution_metrics;
+    if(frame.execution_summary)entry.executionSummary=frame.execution_summary;
     if(frame.turn_id)entry.row.dataset.turnId=String(frame.turn_id);
     if(frame.run_id)entry.row.dataset.runId=String(frame.run_id);
     if(frame.reply_group_id)entry.row.dataset.replyGroupId=String(frame.reply_group_id);
@@ -1582,6 +1588,7 @@ import {syncAskForm} from './ask-form.js';
     var frame={...message,type:'message',text:message.content??message.text,
       record_id:message.record_id??message.id,replace_message_ids:aliases};
     var entry=putTextFrame(role,frame);
+    if(message.type!=='record_snapshot')entry.loadedFromHistory=true;
     const hidden=!!message.hidden||!!entry.messagePolicy&&
       (entry.messagePolicy.version!==1||!entry.messagePolicy.audience?.includes('web'));
     entry.row.classList.toggle('presentation-hidden',hidden);
@@ -1854,6 +1861,7 @@ import {syncAskForm} from './ask-form.js';
       return;
     }
     if(completion)finishRun(frame);
+    if(completion)commandSeries.finished(frame);
     else if(frame.run_id&&!frame.ui_message_id&&['message','edit','chat_action','compression_state'].includes(frame.type)){
       rememberRun(frame);setBusy(!!currentRun());
     }
@@ -2172,7 +2180,7 @@ import {syncAskForm} from './ask-form.js';
     return "/api/workbench/history?limit=50" + (historyAnchor ? "&anchor=" + encodeURIComponent(historyAnchor) : "");
   }
   function boundMessages(prepend) {
-    var rows = Array.from(log.children);
+    var rows = Array.from(log.children).filter(row=>row.classList.contains('msg-row'));
     var removedFront=false,remaining=rows.length;
     while (remaining > 200 && rows.length) {
       var row = prepend ? rows.pop() : rows.shift();

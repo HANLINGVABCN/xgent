@@ -64,17 +64,18 @@ async def _sync_presentation_footer(context, row_id, reply):
     if row is None:
         return
     metadata = metadata_dict(row.get('metadata'))
+    display_raw = (metadata.get('stopped_reply') or {}).get('partial', row['content'])
     presentation = {k: v for k, v in facts.items() if k not in {'record_id', 'message_ids', 'base_fragment'}}
     presentation['revision'] = int((metadata.get('presentation') or {}).get('revision', 0)) + 1
     metadata['presentation'] = presentation
     footer = footer_html(presentation) if turn.folded else ''
-    content = _folded_display_html(row['content'])
+    content = _folded_display_html(display_raw)
     if presentation.get('native_calls'):
         from xgent_app.native_rendering import segments as native_segments
         content = '\n'.join(markdown_to_telegram_html(s['text']) if s['kind'] == 'markdown' else s['text']
                             for s in native_segments(row['content'], presentation['native_calls'], presentation.get('operations', [])))
     metadata['display'] = {'content': content + ('\n\n' + footer if footer else ''), 'parse_mode': 'HTML'}
-    metadata['web_display'] = build_web_display(row['content'], fold=True,
+    metadata['web_display'] = build_web_display(display_raw, fold=True,
         mode=turn.mode, presentation=presentation)
     ids = facts.get('message_ids') or []
     context.bot.complete_telegram_reply(facts)
@@ -88,7 +89,7 @@ async def _sync_presentation_footer(context, row_id, reply):
             base = facts['base_fragment'] = markdown_to_telegram_html(base)
         presentation['footer_base_html'] = base
         # One semantic Web reply, even if the Telegram transport needs another fragment.
-        display = build_web_display(row['content'], fold=True, mode=turn.mode,
+        display = build_web_display(display_raw, fold=True, mode=turn.mode,
             reply_message_id=ids[0], presentation=presentation)
         stop = bool(AgentExecutor.extract_protocol_blocks(row['content'])) and getattr(turn, 'agent_enabled', False) and not presentation.get('summary')
         with web_display_scope(display), message_presentation({'kind': 'ai_reply', 'mode': turn.mode,
@@ -151,6 +152,12 @@ async def _finish_presentation(context, turn):
     row = await db.get_display_message(facts['record_id'])
     if row is None:
         return
+    if turn.terminal_status == 'stopped':
+        metadata = metadata_dict(row.get('metadata'))
+        presentation = {**metadata_dict(metadata.get('presentation')), 'terminal_status': 'stopped'}
+        await db.patch_display_metadata(row['id'], {'presentation': presentation})
+        await publish_saved_reply(context, row['id'])
+        row = await db.get_display_message(row['id'])
     if not str(row['content']).strip() and not metadata_dict(row.get('metadata')).get('attachments'):
         # Pure tool decisions are input cards, not an invented empty AI answer.
         for candidate in reversed(turn.replies[:-1]):
@@ -215,8 +222,9 @@ async def _finish_shared_presentation(context, turn):
         base = message.base_text if 'html' in str(message.parse_mode).lower() else html.escape(message.base_text)
         display = base + '\n\n<i>' + html.escape(summary_line(presentation['summary'])) + '</i>'
         telegram_base = message.telegram_body if message.kind == 'agent_result' else base
+        preview = build_history_message({**row, 'metadata': metadata}, ArtifactManager.ROOT_DIR, AgentExecutor.WORK_DIR)
         with message_presentation({'kind': message.kind, 'mode': turn.mode,
-                'telegram_display': {'text': telegram_base, 'parse_mode': 'HTML'}}):
+                'telegram_display': {'text': telegram_base, 'parse_mode': 'HTML'}}), web_display_scope(preview.get('web_display')):
             await safe_edit_text(message, display, parse_mode=constants.ParseMode.HTML,
                                  reply_markup=message.reply_markup)
         metadata['display'] = {'content': display, 'parse_mode': 'HTML'}
@@ -1773,6 +1781,8 @@ async def _send_agent_iteration_limit_notice(
         origin=origin,
         max_iterations=max_iterations,
     )
+    if current_turn() is not None:
+        current_turn().terminal_status = 'limit'
     # 只发 Telegram 界面，不写入 AI 历史。
     with message_presentation({'kind': 'agent_status', 'mode': 'folded'}):
         await safe_send_message(context, chat_id, message)
@@ -1784,7 +1794,8 @@ async def _record_user_stopped_reply(db, cid, chat_id, partial_text: str, *, pro
     marker = "⏹️ 当前回复已被用户手动停止"
     partial = (partial_text or "").strip()
     content = f"{partial}\n\n{marker}" if partial else marker
-    await GlobalRecorder.record_ai_reply(content, chat_id, provider=provider, model=model)
+    await GlobalRecorder.record_ai_reply(content, chat_id, provider=provider, model=model,
+        metadata={'stopped_reply': {'partial': partial}})
     await db.add_chat_message(cid, 'assistant', content)
     return content
 
@@ -1839,12 +1850,14 @@ async def process_conversation(update: Update, context: ContextTypes.DEFAULT_TYP
                         )
                     except Exception as exc:
                         turn.reason = '⚠️ 本次处理失败，已有结果已保留。'
+                        turn.terminal_status = 'failed'
                         mark_outcome('failed')
                         await GlobalRecorder.record_error(exc, update.effective_chat.id, source='conversation')
                         raise
                     finally:
                         if is_stop_requested():
                             turn.reason = '⏹️ 已停止。'
+                            turn.terminal_status = 'stopped'
                         try:
                             await _finish_presentation(context, turn)
                         except (ConversationError, asyncio.CancelledError):
@@ -1855,7 +1868,10 @@ async def process_conversation(update: Update, context: ContextTypes.DEFAULT_TYP
                             await _clear_presentation_stops(context)
         finally:
             AgentExecutor._execution_context.reset(execution_token)
-            publish_conversation_event(context, {'type': 'generation_end'})
+            saved_turn = locals().get('turn')
+            publish_conversation_event(context, {'type': 'generation_end',
+                **({'reply_group_id': saved_turn.reply_group_id,
+                    'reply_complete': not getattr(saved_turn, 'awaiting_input', False)} if saved_turn else {})})
 
 
 @native_tools.process_scope
@@ -2092,14 +2108,9 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             ),
                             reply_markup=None,
                         )
-                await safe_send_message(
-                    context,
-                    update.effective_chat.id,
-                    (
-                        "⏹️ 已停止当前回合，后续 Agent 操作不会继续执行。\n"
-                        "已经产生的工具结果会保留在全局记忆里。"
-                    )
-                )
+                with message_presentation({'kind': 'agent_status', 'terminal_status': 'stopped'}):
+                    await safe_send_message(context, update.effective_chat.id,
+                        "⏹ 已停止，已有结果保留。")
                 break
             if native_session is not None and native_session.mode == 'toolcall':
                 protocol_blocks = native_session.remaining or [native_tools.operation(c) for c in getattr(response, 'capture', native_session.reply).calls]
@@ -2732,11 +2743,9 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
 
             if round_decision['status_text'] is not None:
                 with contextlib.suppress(Exception):
-                    await safe_edit_text(
-                        agent_stop_msg,
-                        round_decision['status_text'],
-                        reply_markup=None,
-                    )
+                    with message_presentation({'kind': 'agent_status',
+                            **({'terminal_status': 'stopped'} if is_stop_requested() else {})}):
+                        await safe_edit_text(agent_stop_msg, round_decision['status_text'], reply_markup=None)
                 if not round_decision['continue_loop']:
                     # 终态状态（停止/超限/失败）是这条消息最终呈现的文字，落库一份
                     with contextlib.suppress(Exception):

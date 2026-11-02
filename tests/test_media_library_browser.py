@@ -120,6 +120,7 @@ def test_library_uses_lightweight_covers_filename_first_and_full_media_only_afte
         assert len(original_requests) > 0
         page.get_by_role('button', name='关闭媒体预览', exact=True).click()
         photo_row.locator('.wb-source-link').click()
+        page.locator('#source-navigation .wb-source-label').filter(has_text='已定位来源消息').wait_for()
         page.get_by_role('button', name='关闭来源定位提示').wait_for()
         banner, close = page.locator('#source-navigation').bounding_box(), page.get_by_role('button', name='关闭来源定位提示').bounding_box()
         assert close['x'] - banner['x'] < 20 and close['y'] - banner['y'] < 15
