@@ -125,6 +125,13 @@ class QueueStore:
                 return previous
             if await one(conn, 'SELECT id FROM message_queue_requests WHERE id=?', (request_key,)):
                 raise ConversationChanged('此请求已作为管理输入接收，不会再次发给 AI。')
+            if request_key.startswith('conversation-job:'):
+                job = await one(conn, 'SELECT * FROM conversation_jobs WHERE id=?', (request_key.split(':', 1)[1],))
+                parent = await one(conn, 'SELECT generation,deleting FROM chat_sessions WHERE id=?',
+                                   (job['parent_conversation_id'],)) if job else None
+                if (not job or job['status'] == 'cancelled' or job['conversation_id'] != scope.conversation_id
+                        or not parent or parent['deleting']):
+                    raise ConversationChanged('后台任务的所属对话已改变，任务未入队。')
             session = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (scope.conversation_id,))
             if not session or session['deleting'] or session['archived'] or session['generation'] != scope.generation:
                 raise ConversationChanged('会话已变化，消息尚未入队。')
@@ -303,6 +310,9 @@ class QueueStore:
                 await conn.execute('INSERT INTO chat_messages(session_id,role,content,timestamp) VALUES(?,?,?,?)', (cid, 'user', item['text'], now))
                 await conn.execute("UPDATE message_queue SET status='claimed',reason='',run_id=?,record_id=?,revision=revision+1,updated_at=? WHERE id=?", (scope.run_id, record, now, item['id']))
                 item.update(record_id=record, run_id=scope.run_id, status='claimed', revision=item['revision'] + 1)
+                if item['request_key'].startswith('conversation-job:'):
+                    await conn.execute('UPDATE conversation_jobs SET current_run_id=?,updated_at=? WHERE id=?',
+                                       (scope.run_id, now, item['request_key'].split(':', 1)[1]))
             if batch:
                 title = ' '.join(batch[0]['text'].split())
                 title = title[:32] + ('…' if len(title) > 32 else '')

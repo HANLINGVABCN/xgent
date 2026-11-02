@@ -20,7 +20,7 @@ from typing import Any
 
 DEFAULT_CONVERSATION_ID = 'global_memory'
 DEFAULT_CONVERSATION_NAME = '默认会话'
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class ConversationError(ValueError):
@@ -260,6 +260,7 @@ class ConversationManager:
         self.maintenance = None
         self.topics = None
         self.terminal_enabled = False
+        self.job_admission_enabled = False
         self._terminal_id = None
         self._terminal_revision = 0
         self.code_root = Path(code_root).resolve() if code_root else None
@@ -390,9 +391,18 @@ class ConversationManager:
         incoming = input_route() if origin=='telegram' else None
         if incoming is not None:
             route = incoming
+        workspace = session.get('workspace_path')
+        owner = session.get('owner_conversation_id')
+        visited = {cid}
+        while not workspace and owner and owner not in visited:
+            visited.add(owner)
+            parent = await db.get_session(owner)
+            if not parent or parent.get('deleting'):
+                break
+            workspace, owner = parent.get('workspace_path'), parent.get('owner_conversation_id')
         return ConversationScope(cid, int(session['generation']), name=session.get('name') or '新对话',
                                  origin=origin, purpose=purpose, telegram_delivery=deliver if origin != 'legacy' else None,
-                                 workspace_path=session.get('workspace_path'),**route)
+                                 workspace_path=workspace,**route)
 
     @contextlib.asynccontextmanager
     async def operation(self, conversation_id=None, *, execution=False, wait=False,
@@ -641,6 +651,7 @@ class ConversationManager:
         task.add_done_callback(self._background.discard)
 
     async def close(self):
+        self.job_admission_enabled = False
         if self.text_queue is not None:
             self.text_queue._closed = True
         tasks = list(self._background)

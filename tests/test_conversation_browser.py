@@ -363,6 +363,8 @@ def test_list_and_row_menu_support_keyboard_navigation(conversation_page):
     page.keyboard.press('ArrowDown')
     assert page.get_by_role('menuitem', name='重命名', exact=True).evaluate('(element)=>document.activeElement===element')
     page.keyboard.press('ArrowDown')
+    assert page.get_by_role('menuitem', name='新建子对话', exact=True).evaluate('(element)=>document.activeElement===element')
+    page.keyboard.press('ArrowDown')
     assert page.get_by_role('menuitem', name='归档对话', exact=True).evaluate('(element)=>document.activeElement===element')
     page.keyboard.press('Escape')
     assert page.locator('#conversation-item-menu').is_hidden()

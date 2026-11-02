@@ -41,6 +41,12 @@ body.dark { --conv-hover: #262f39; --conv-selected: #303b47; }
 .conv-open:focus-visible { outline-offset: -2px; }
 .conv-row-title { display: block; min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.5; }
 .conv-more { margin-right: 4px; width: 27px; height: 28px; opacity: 0; }
+.conv-children-toggle { width: 22px; height: 22px; align-self: flex-end; margin-bottom: 4px; }
+.conv-child-chevron { display: block; font-size: 20px; line-height: 1; transition: transform .15s; }
+.conv-children-toggle[aria-expanded=true] .conv-child-chevron { transform: rotate(90deg); }
+.conv-child-badge { flex: 0 0 auto; color: var(--wb-muted); font-size: 10px; line-height: 1.5; }
+.conv-row.is-child { margin-left: calc(var(--conv-depth, 1) * 11px); }
+.conv-row.is-child .conv-open { padding-left: 8px; }
 .conv-row:hover .conv-more, .conv-row:focus-within .conv-more, .conv-row.is-current .conv-more, .conv-more[aria-expanded=true] { opacity: 1; }
 .conv-running-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--wb-accent); flex-shrink: 0; box-shadow: 0 0 0 3px var(--wb-tint); }
 .conv-list-empty { padding: 30px 12px; font-size:calc(var(--web-ui-font-size,13px) * 0.92308); line-height: 1.7; color: var(--wb-muted); }

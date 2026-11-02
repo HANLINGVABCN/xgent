@@ -363,6 +363,7 @@ class AgentShellSession:
             self.environment['XGENT_CHAT_ID'] = str(route['chat_id'])
         if scope:
             self.environment['XGENT_CONVERSATION_ID'] = scope.conversation_id
+            self.environment['XGENT_CONVERSATION_GENERATION'] = str(scope.generation)
         self.command = AgentExecutor.map_command_paths(command)
         self.started_at = time.time()
         self.started_monotonic = time.monotonic()
@@ -2593,6 +2594,10 @@ class SelfTriggerManager:
         task = await db.get_trigger_task(run['task_id'])
         if task is None:
             return
+        child_job = await db.conversation_job_for_trigger(task['id'])
+        if child_job is not None and not await db.conversation_job_valid(child_job):
+            await db.finish_trigger_run(run_id, delivered_at=time.time())
+            return
         if task['status'] == 'cancelled':
             return
         try:
@@ -2614,6 +2619,10 @@ class SelfTriggerManager:
             return
         task = await db.get_trigger_task(run['task_id'])
         if task is None:
+            return
+        child_job = await db.conversation_job_for_trigger(task['id'])
+        if child_job is not None and not await db.conversation_job_valid(child_job):
+            await db.finish_trigger_run(run_id, delivered_at=time.time())
             return
         if task['status'] == 'cancelled':
             await db.finish_trigger_run(run_id, delivered_at=time.time())

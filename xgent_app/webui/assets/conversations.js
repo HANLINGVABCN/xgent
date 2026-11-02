@@ -26,6 +26,9 @@ let view = 'recent', listSignature = '', menuTarget = null, menuTrigger = null;
 let groupView = 'ungrouped';
 let moveSubmenu = null, moveTrigger = null, moveHideTimer = null;
 const exporting = new Set();
+const expansionKey = 'xgent-conversation-children';
+const expandedChildren = new Set();
+try { for (const id of JSON.parse(localStorage.getItem(expansionKey) || '[]')) if (typeof id === 'string') expandedChildren.add(id); } catch {}
 let drawerOpen = false, drawerReturn = null, previousInert = null;
 let renameTarget = null, renameReturn = null, renameSaving = false;
 let feedbackTimer = null;
@@ -69,6 +72,18 @@ function groups() {
 function groupName(id) { return groups().find(group => group.id === id)?.name || '默认分组'; }
 function isArchived(item) { return item.archived === true || Number(item.archived) === 1; }
 function isBranch(item) { return Boolean(item?.parent_conversation_id || item?.branch_mode); }
+function saveExpandedChildren() {
+  try { localStorage.setItem(expansionKey, JSON.stringify([...expandedChildren])); } catch {}
+}
+function revealAncestors(id) {
+  const seen = new Set();
+  let parent = itemById(id)?.owner_conversation_id;
+  while (parent && !seen.has(parent)) {
+    seen.add(parent); expandedChildren.add(parent);
+    parent = itemById(parent)?.owner_conversation_id;
+  }
+  saveExpandedChildren();
+}
 function groupFor(item) {
   const now = new Date(), date = new Date(timestamp(item) * 1000);
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -121,6 +136,9 @@ function accept(next) {
   if (JSON.stringify(combined) === JSON.stringify(state)) return;
   state = {...combined, running: combined.runs ? combined.runs[combined.current_chat_id] || null : combined.running};
   itemIndex = new Map(state.items.map(item => [item.id, item]));
+  for (const id of expandedChildren) if (!itemIndex.has(id)) expandedChildren.delete(id);
+  saveExpandedChildren();
+  if (previous !== state.current_chat_id || !rows.size) revealAncestors(state.current_chat_id);
   render();
   window.dispatchEvent(new CustomEvent('xgent-conversation-state', {detail: state}));
   if (previous !== state.current_chat_id) {
@@ -184,6 +202,20 @@ async function createConversation() {
     requestAnimationFrame(() => $('input')?.focus({preventScroll: true}));
   } catch (error) { if (error.name !== 'AbortError') notify('新建失败：' + error.message, {error: true, retry: createConversation}); }
 }
+async function createChildConversation(id) {
+  const parent = itemById(id);
+  if (mutation || !parent || isArchived(parent) || !await prepareChat()) return;
+  closeMenu(false);
+  try {
+    view = 'recent'; search.value = ''; expandedChildren.add(id); saveExpandedChildren();
+    groupView = parent.group_id || 'ungrouped';
+    const requestId = crypto.randomUUID();
+    const result = await mutate('create_child', {id, generation: parent.generation, request_id: requestId});
+    if (!result) return;
+    setDrawer(false, false);
+    requestAnimationFrame(() => $('input')?.focus({preventScroll: true}));
+  } catch (error) { if (error.name !== 'AbortError') notify('新建子对话失败：' + error.message, {error: true, retry: refresh}); }
+}
 async function archiveConversation(id) {
   const item = itemById(id), wasCurrent = state.current_chat_id === id;
   if (!item || mutation) return;
@@ -232,10 +264,11 @@ function notify(text, options = {}) {
 function createRow(item) {
   const row = node('div', {class: 'conv-row', 'data-conversation-id': item.id});
   const branch = node('span', {class: 'conv-branch-badge', hidden: '', title: '分支对话'}, icon('branch'), node('span', {}, '分支'));
+  const childBadge = node('span', {class: 'conv-child-badge', hidden: ''}, '子');
   const name = node('span', {class: 'conv-row-title'});
   const bot = node('span', {class: 'conv-bot-badge', hidden: '', title: 'Telegram 当前使用此对话，不代表正在执行任务'}, 'Bot 当前');
   const dot = node('span', {class: 'conv-running-dot', 'aria-label': '正在生成', hidden: ''});
-  const open = button([branch, name, bot, dot], () => {
+  const open = button([branch, childBadge, name, bot, dot], () => {
     const current = itemById(item.id);
     if (current && isArchived(current)) restoreConversation(item.id, true);
     else selectConversation(item.id);
@@ -247,8 +280,13 @@ function createRow(item) {
     if (event.key === 'ArrowDown') { event.preventDefault(); openMenu(item.id, more); }
   });
   const restore = button(icon('restore'), () => restoreConversation(item.id), {class: 'conv-restore conv-icon-button', hidden: ''});
-  row.append(open, restore, more);
-  return {row, open, branch, name, more, dot, restore, bot};
+  const toggle = button(node('span', {class: 'conv-child-chevron', 'aria-hidden': 'true'}, '›'), () => {
+    if (expandedChildren.has(item.id)) expandedChildren.delete(item.id); else expandedChildren.add(item.id);
+    saveExpandedChildren(); renderList();
+  }, {class: 'conv-children-toggle conv-icon-button', hidden: '', 'data-focus': 'children:' + item.id,
+      'aria-controls': 'conversation-children-' + item.id, 'aria-expanded': 'false'});
+  row.append(open, restore, toggle, more);
+  return {row, open, branch, childBadge, name, more, dot, restore, bot, toggle};
 }
 function renderList() {
   if (search.value.trim()) {
@@ -266,17 +304,27 @@ function renderList() {
       return pinned || timestamp(b) - timestamp(a) || a.id.localeCompare(b.id);
     });
   const signature = JSON.stringify([view, groupView, query, groups().map(group=>[group.id,group.name]), state.current_chat_id, state.telegram_conversation_id, activeRuns(), mutation,
-    visible.map(item => [item.id, title(item), groupFor(item), item.group_id, item.pinned, item.parent_conversation_id, item.branch_mode])]);
+    [...expandedChildren], visible.map(item => [item.id, title(item), groupFor(item), item.group_id, item.pinned,
+      item.parent_conversation_id, item.branch_mode, item.owner_conversation_id])]);
   if (signature === listSignature) return;
   listSignature = signature;
   const oldScroll = scroll.scrollTop;
   const focused = list.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const children = [];
-  let group = '';
+  const visibleIds = new Set(visible.map(item => item.id)), descendants = new Map();
   for (const item of visible) {
-    const next = query ? '搜索结果 · ' + visible.length : view === 'archived' ? '已归档的对话' :
-      (item.pinned ? '置顶' : groupFor(item));
-    if (next !== group) { group = next; children.push(node('h3', {class: 'conv-date-group'}, group)); }
+    const owner = item.owner_conversation_id;
+    if (owner && owner !== item.id && visibleIds.has(owner)) {
+      if (!descendants.has(owner)) descendants.set(owner, []);
+      descendants.get(owner).push(item);
+    }
+  }
+  const visited = new Set();
+  let group = '';
+  function renderTree(item, depth = 0) {
+    if (visited.has(item.id)) return null;
+    visited.add(item.id);
+    const nested = descendants.get(item.id) || [];
     const entry = rows.get(item.id) || createRow(item);
     rows.set(item.id, entry);
     const current = item.id === state.current_chat_id;
@@ -284,9 +332,13 @@ function renderList() {
     entry.row.classList.toggle('is-current', current);
     entry.row.classList.toggle('is-archived', isArchived(item));
     entry.row.classList.toggle('is-branch', branched);
+    entry.row.classList.toggle('is-child', !!item.owner_conversation_id);
+    entry.row.style.setProperty('--conv-depth', String(Math.min(depth, 3)));
     entry.row.classList.toggle('is-pinned',!!item.pinned&&!query);
     entry.row.classList.toggle('is-pending', mutation?.name === 'switch' && mutation.id === item.id);
     entry.branch.hidden = !branched;
+    entry.childBadge.hidden = !item.owner_conversation_id;
+    entry.childBadge.title = '子对话 · 父对话：' + title(itemById(item.owner_conversation_id));
     if (branched) {
       const parent = item.parent_conversation_id ? itemById(item.parent_conversation_id) : null;
       const modeText = item.branch_mode === 'exact' ? '精确文件现场' : '仅上下文';
@@ -307,7 +359,24 @@ function renderList() {
     entry.more.title = '更多操作';
     entry.more.setAttribute('aria-label', '更多操作：' + title(item));
     entry.more.setAttribute('aria-expanded', String(menuTarget === item.id));
-    children.push(entry.row);
+    entry.toggle.hidden = !nested.length;
+    entry.toggle.setAttribute('aria-expanded', String(expandedChildren.has(item.id)));
+    entry.toggle.setAttribute('aria-label', (expandedChildren.has(item.id) ? '收起' : '展开') + '子对话：' + title(item));
+    entry.toggle.title = (expandedChildren.has(item.id) ? '收起' : '展开') + ' ' + nested.length + ' 个子对话';
+    if (!nested.length) return entry.row;
+    const childList = node('div', {class: 'conv-child-list', id: 'conversation-children-' + item.id,
+      role: 'group', 'aria-label': title(item) + '的子对话', hidden: expandedChildren.has(item.id) ? null : ''});
+    for (const child of nested) childList.append(...[renderTree(child, depth + 1)].filter(Boolean));
+    return node('div', {class: 'conv-tree-node'}, entry.row, childList);
+  }
+  const roots = visible.filter(item => !item.owner_conversation_id || !visibleIds.has(item.owner_conversation_id));
+  // Keep malformed imported ownership cycles visible and finite.
+  for (const item of [...roots, ...visible]) {
+    if (visited.has(item.id)) continue;
+    const next = query ? '搜索结果 · ' + visible.length : view === 'archived' ? '已归档的对话' :
+      (item.pinned ? '置顶' : groupFor(item));
+    if (next !== group) { group = next; children.push(node('h3', {class: 'conv-date-group'}, group)); }
+    children.push(renderTree(item));
   }
   if (!visible.length) {
     children.push(node('div', {class: 'conv-list-empty'},
@@ -396,7 +465,7 @@ function positionMoveMenu(){
   moveSubmenu.style.top=Math.max(8,Math.min(innerHeight-bounds.height-8,anchor.top))+'px';
 }
 function showMoveMenu(focus=false){
-  if(!moveSubmenu)return;clearTimeout(moveHideTimer);moveSubmenu.hidden=false;moveTrigger.setAttribute('aria-expanded','true');positionMenu();
+  if(!moveSubmenu||moveTrigger?.disabled)return;clearTimeout(moveHideTimer);moveSubmenu.hidden=false;moveTrigger.setAttribute('aria-expanded','true');positionMenu();
   if(focus)(moveSubmenu.querySelector('button:not(:disabled)')||moveSubmenu).focus();
 }
 function hideMoveMenu(focus=false){
@@ -436,6 +505,8 @@ function openMenu(id, trigger) {
     ? button([icon('restore'), node('span', {}, '恢复对话')], () => restoreConversation(id), {role: 'menuitem'})
     : button([icon('archive'), node('span', {}, '归档对话')], () => archiveConversation(id), {role: 'menuitem'});
   const download=button([icon('export'),node('span',{},'导出')],()=>exportConversation(item),{role:'menuitem'});download.disabled=exporting.has(id);
+  const newChild=button([icon('branch'),node('span',{},'新建子对话')],()=>createChildConversation(id),{role:'menuitem'});
+  newChild.disabled=isArchived(item);
   const remove=button('🗑 删除对话',()=>confirmConversationAction('delete',id),{role:'menuitem',class:'danger'});
   const botCurrent=state.telegram_conversation_id===id;
   const setBot=button(botCurrent?'🤖 Bot 当前对话':'🤖 设为 Bot 当前对话',()=>setBotConversation(item),{role:'menuitem'});
@@ -449,6 +520,8 @@ function openMenu(id, trigger) {
   pin.title='所属分组：'+groupName(item.group_id||'ungrouped');
   const moveWrapper=node('div',{class:'conv-move-menu'});
   moveTrigger=button([node('span',{},'移动到'),node('span',{class:'conv-menu-caret','aria-hidden':'true'},'›')],()=>moveSubmenu.hidden?showMoveMenu():hideMoveMenu(),{role:'menuitem','aria-haspopup':'menu','aria-expanded':'false'});
+  moveTrigger.disabled=!!item.owner_conversation_id;
+  if(item.owner_conversation_id)moveTrigger.title='子对话跟随父对话分组';
   moveSubmenu=node('div',{class:'conv-group-submenu',role:'menu','aria-label':'移动到分组',tabindex:'-1',hidden:''});
   const moveButtons=groups().map(group=>button((group.id===(item.group_id||'ungrouped')?'✓ ':'')+group.name,async()=>{
     closeMenu(false);
@@ -456,9 +529,9 @@ function openMenu(id, trigger) {
     catch(error){notify(error.message,{error:true,retry:refresh});}
   },{role:'menuitem',disabled:group.id===(item.group_id||'ungrouped')?'':null}));
   moveSubmenu.append(...moveButtons);moveWrapper.append(moveTrigger,moveSubmenu);
-  moveWrapper.addEventListener('pointerenter',event=>{if(event.pointerType!=='touch')showMoveMenu();});
+  moveWrapper.addEventListener('pointerenter',event=>{if(event.pointerType!=='touch'&&!moveTrigger.disabled)showMoveMenu();});
   moveWrapper.addEventListener('pointerleave',event=>{if(event.pointerType!=='touch')moveHideTimer=setTimeout(()=>hideMoveMenu(),150);});
-  menu.replaceChildren(rename, other, download, pin, moveWrapper, setBot, remove); menu.hidden = false; positionMenu();
+  menu.replaceChildren(rename, newChild, other, download, pin, moveWrapper, setBot, remove); menu.hidden = false; positionMenu();
   rename.focus({preventScroll: true});
 }
 async function setBotConversation(item){
@@ -483,12 +556,12 @@ async function confirmConversationAction(action,id) {
     try{
       const result=await mutate(action,{id,confirm:true});if(!result)return;
       dialog.close();notify(deleting?(result.deleting?'删除已提交，正在停止所属任务…':'已删除「'+title(item)+'」'):'已重置「'+title(item)+'」的上下文，历史保留。');
-      if(deleting)window.dispatchEvent(new CustomEvent('xgent-conversation-deleted',{detail:{conversation_id:id}}));
+      if(deleting)for(const target of result.deleted_conversation_ids||[id])window.dispatchEvent(new CustomEvent('xgent-conversation-deleted',{detail:{conversation_id:target}}));
     }catch(error){feedback.textContent=error.message;}
     finally{cancel.disabled=confirm.disabled=false;}
   },{class:deleting?'danger':''});
   dialog.append(node('h2',{},deleting?'永久删除对话？':'重置模型上下文？'),node('p',{},title(item)+' · '+id.slice(0,6)),
-    node('p',{},deleting?'会话历史与任务记录将永久删除，并终止 '+info.active_tasks+' 个未完成任务。共享工作目录文件和用量统计保留。':'历史消息、附件与定时任务保留；此前内容不再提供给模型，其他会话不受影响。'),
+    node('p',{},deleting?'会话历史与任务记录将永久删除'+(info.child_count?'，包括 '+info.child_count+' 个子对话':'')+'，并终止 '+info.active_tasks+' 个未完成任务。共享工作目录文件和用量统计保留。':'历史消息、附件与定时任务保留；此前内容不再提供给模型，其他会话不受影响。'),
     feedback,node('div',{class:'conv-dialog-actions'},cancel,confirm));
   dialog.addEventListener('cancel',event=>{if(confirm.disabled)event.preventDefault();});
   dialog.addEventListener('close',()=>dialog.remove(),{once:true});document.body.append(dialog);dialog.showModal();cancel.focus();
@@ -572,7 +645,7 @@ search.addEventListener('keydown', event => {
 list.addEventListener('keydown', event => {
   if (!event.target.matches('.conv-open') || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const choices = Array.from(list.querySelectorAll('.conv-open:not(:disabled)'));
+  const choices = Array.from(list.querySelectorAll('.conv-open:not(:disabled)')).filter(element=>element.getClientRects().length);
   const index = choices.indexOf(event.target);
   if (event.key === 'ArrowUp' && index === 0) { search.focus(); return; }
   const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : Math.max(0, Math.min(choices.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));

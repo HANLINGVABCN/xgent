@@ -472,6 +472,9 @@ async def _start_triggers_component() -> None:
     这一步原先在 setup_bot_commands 里，也就是 PTB 的 post_init 里——TG 连不上
     时它跟着一起没跑，用户的定时任务静默全停，日志上一个字都看不到。
     """
+    manager = get_conversations()
+    manager.job_admission_enabled = True
+    manager.start()
     ok = await _start_component(
         "triggers", lambda: SelfTriggerManager.startup(None), label="trigger 调度器",
     )

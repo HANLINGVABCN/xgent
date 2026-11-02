@@ -2931,6 +2931,9 @@ async def resume_from_ask(ask_id: str) -> str:
     pending = PENDING_ASKS.get(ask_id)
     if pending is not None and pending.conversation_id != current_scope().conversation_id:
         return '请先切回该表单所属会话。'
+    from xgent_app.child_conversations import reject_cancelled_job_form
+    if await reject_cancelled_job_form(globals(), pending):
+        return '后台任务已取消，表单不会继续执行。'
     if pending is not None and pending.form.unanswered(pending.draft):
         return '请填写全部问题后再提交。'
     pending = PENDING_ASKS.pop(ask_id)
@@ -2942,6 +2945,7 @@ async def resume_from_ask(ask_id: str) -> str:
     if pending.generation != current_gen:
         # 期间被 /清空上下文：快照历史已作废，别拿旧上下文继续。
         return "上下文已清空，这个表单已失效——如需继续，请让 AI 重新发起提问。"
+    await db.bind_conversation_job_run(pending)
     from xgent_app.web_ask import sync_ask
     await sync_ask(globals(), pending, status='submitted')
 
@@ -2984,6 +2988,9 @@ async def cancel_ask(ask_id: str) -> str:
     pending = PENDING_ASKS.get(ask_id)
     if pending is not None and pending.conversation_id != current_scope().conversation_id:
         return '请先切回该表单所属会话。'
+    from xgent_app.child_conversations import reject_cancelled_job_form
+    if await reject_cancelled_job_form(globals(), pending):
+        return '后台任务已取消，表单不会继续执行。'
     pending = PENDING_ASKS.pop(ask_id)
     if pending is None:
         return "这个表单已经处理过或已失效。"
@@ -2991,6 +2998,7 @@ async def cancel_ask(ask_id: str) -> str:
     db = await BotMemoryDB.get_instance()
     if pending.generation != await db.get_attachment_generation():
         return "上下文已清空，这个表单已失效。"
+    await db.bind_conversation_job_run(pending)
     from xgent_app.web_ask import sync_ask
     await sync_ask(globals(), pending, status='cancelled')
 

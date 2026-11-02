@@ -20,7 +20,7 @@ TABLES = {
         "context_compressions", "context_compression_jobs", "conversation_groups", "artifact_objects",
         "conversation_snapshots", "snapshot_entries", "conversation_turns", "turn_operations",
         "conversation_branch_drafts", "conversation_mutation_requests", "telegram_topics"),
-    "tasks": ("trigger_tasks", "trigger_runs"),
+    "tasks": ("trigger_tasks", "trigger_runs", "conversation_jobs"),
     "usage_statistics": ("token_usage_stats",),
     "security_logs": ("unauthorized_access_logs", "channel_deadletter"),
     "runtime_state": ("cli_relay_ops", "channel_outbox"),

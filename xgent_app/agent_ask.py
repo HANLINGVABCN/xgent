@@ -306,6 +306,9 @@ class PendingAskStore:
     def get(self, ask_id: str) -> Optional[PendingAsk]:
         return self._store.get(ask_id)
 
+    def values(self):
+        return tuple(self._store.values())
+
     def pop(self, ask_id: str) -> Optional[PendingAsk]:
         """原子取出：提交/取消用它，天然防重复处理。"""
         return self._store.pop(ask_id, None)

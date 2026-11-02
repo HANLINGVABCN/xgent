@@ -24,7 +24,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m pip install pytest pytest-xdist pytest-split
       - run: python tools/check_split_integrity.py
-      - run: python -m compileall -q xgent_server.py xgent_app
+      - run: python -m compileall -q xgent_server.py xgent_conversation.py xgent_app
       # compileall 对不存在的目录也可能返回 0，先显式确认目录存在。
       - run: test -d skill-public/script && python -m compileall -q tools tests skill-public/script
       - run: pytest --splits 4 --group ${{ matrix.shard }}

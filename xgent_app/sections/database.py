@@ -1859,10 +1859,14 @@ class BotMemoryDB(ConversationStore):
     # --- 持久化后台触发任务 ---
     async def create_trigger_task(self, task: Dict[str, Any]):
         async with self._transaction() as conn:
-            owner = await conn.execute('SELECT id FROM chat_sessions WHERE id=? AND deleting=0', (task['conversation_id'],))
-            if await owner.fetchone() is None:
-                raise ConversationError('任务来源会话已不存在，未创建任务。')
-            await conn.execute('''
+            await self._insert_trigger_task(conn, task)
+
+    @staticmethod
+    async def _insert_trigger_task(conn, task):
+        owner = await conn.execute('SELECT id FROM chat_sessions WHERE id=? AND deleting=0', (task['conversation_id'],))
+        if await owner.fetchone() is None:
+            raise ConversationError('任务来源会话已不存在，未创建任务。')
+        await conn.execute('''
                 INSERT INTO trigger_tasks (
                     id, chat_id, conversation_id, command, summary, schedule_type, schedule_expr,
                     timezone, next_run_at, condition_expr, repeat, status,
@@ -1871,7 +1875,7 @@ class BotMemoryDB(ConversationStore):
                     recovery_count, last_result_hash, duplicate_count, backoff_seconds,
                     backoff_until, last_error
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
+        ''', (
                 task['id'], task['chat_id'], task['conversation_id'], task['command'],
                 task.get('summary'), task['schedule_type'], task.get('schedule_expr'), task['timezone'],
                 task.get('next_run_at'), task.get('condition_expr'), int(bool(task.get('repeat'))),
@@ -1882,7 +1886,7 @@ class BotMemoryDB(ConversationStore):
                 task.get('last_result_hash'), int(task.get('duplicate_count', 0)),
                 float(task.get('backoff_seconds', 0) or 0), task.get('backoff_until'),
                 task.get('last_error'),
-            ))
+        ))
 
     async def get_trigger_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         conn = await self._get_conn()

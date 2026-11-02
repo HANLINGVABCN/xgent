@@ -19,6 +19,7 @@ from xgent_app.conversations import (
     ConversationError, ConversationBusy, ExecutionFileLock, current_scope, require_conversation_id,
 )
 from xgent_app.queue_store import QueueStore, migrate_queue
+from xgent_app.child_conversations import ChildConversationStore, migrate_children, descendant_ids
 
 
 async def _config(conn, key, default=None):
@@ -34,7 +35,7 @@ async def _set_config(conn, key, value):
                        (key, json.dumps(value, ensure_ascii=False)))
 
 
-class ConversationStore(QueueStore):
+class ConversationStore(ChildConversationStore, QueueStore):
     async def backup_legacy_conversations(self):
         conn = await self._get_conn()
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -365,6 +366,9 @@ class ConversationStore(QueueStore):
                 await conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_topic_thread '
                     'ON telegram_topics(bot_id,chat_id,thread_id) WHERE thread_id IS NOT NULL')
                 await _set_config(conn,'conversation_schema_version',9)
+            if version < 10:
+                await migrate_children(conn)
+                await _set_config(conn, 'conversation_schema_version', 10)
         self._config_cache.clear()
 
     async def get_conversation_groups(self):
@@ -407,8 +411,11 @@ class ConversationStore(QueueStore):
                 if item is None:
                     raise ConversationError('对话不存在。')
                 if action == 'move':
+                    if item['owner_conversation_id']:
+                        raise ConversationError('子对话跟随父对话分组，请移动父对话。')
                     if item['group_id'] != gid:
-                        await conn.execute('UPDATE chat_sessions SET group_id=?,pinned=0 WHERE id=?', (gid, cid))
+                        targets = [cid, *await descendant_ids(conn, cid)]
+                        await conn.executemany('UPDATE chat_sessions SET group_id=?,pinned=0 WHERE id=?', [(gid, target) for target in targets])
                 elif action in {'pin', 'unpin'}:
                     # A stale UI cannot pin a conversation after it moved groups.
                     if item['group_id'] != gid:
@@ -445,9 +452,14 @@ class ConversationStore(QueueStore):
         if session is None:
             raise ConversationError('该会话已不存在。')
         conn = await self._get_conn()
-        cursor = await conn.execute("SELECT COUNT(*) n FROM trigger_tasks WHERE conversation_id=? "
-                                    "AND status NOT IN ('completed','cancelled','failed')", (cid,))
-        return {**session, 'active_tasks': int((await cursor.fetchone())['n'])}
+        targets = [cid, *await descendant_ids(conn, cid)]
+        placeholders = ','.join('?' for _ in targets)
+        cursor = await conn.execute(f"SELECT COUNT(*) n FROM trigger_tasks WHERE "
+                                    f'(conversation_id IN ({placeholders}) OR id IN '
+                                    f'(SELECT trigger_task_id FROM conversation_jobs WHERE conversation_id IN ({placeholders}))) '
+                                    "AND status NOT IN ('completed','cancelled','failed')", (*targets, *targets))
+        return {**session, 'active_tasks': int((await cursor.fetchone())['n']),
+                'child_count': len(targets) - 1, 'conversation_ids': targets}
 
     async def begin_conversation_delete(self, cid):
         async with self._transaction() as conn:
@@ -455,21 +467,42 @@ class ConversationStore(QueueStore):
             row = await cursor.fetchone()
             if row is None:
                 return False
-            if not row['deleting']:
-                generation = await self._allocate_conversation_generation(conn)
-                await conn.execute('UPDATE chat_sessions SET deleting=1,generation=? WHERE id=?', (generation,cid))
+            targets = [cid, *await descendant_ids(conn, cid)]
+            if row['owner_conversation_id'] in targets:
+                # Break an imported ownership cycle only inside the tree that
+                # is already being deleted, so child-first cleanup can finish.
+                await conn.execute('UPDATE chat_sessions SET owner_conversation_id=NULL WHERE id=?', (cid,))
+            placeholders = ','.join('?' for _ in targets)
+            for target in targets:
+                cursor = await conn.execute('SELECT deleting FROM chat_sessions WHERE id=?', (target,))
+                if not (await cursor.fetchone())['deleting']:
+                    generation = await self._allocate_conversation_generation(conn)
+                    await conn.execute('UPDATE chat_sessions SET deleting=1,generation=? WHERE id=?', (generation,target))
             now = time.time()
-            await conn.execute("UPDATE trigger_tasks SET status='cancelled',next_run_at=NULL,updated_at=? WHERE conversation_id=?", (now,cid))
+            await conn.execute(f"UPDATE conversation_jobs SET status='cancelled',updated_at=?,error='所属对话已删除' "
+                               f'WHERE parent_conversation_id IN ({placeholders}) OR conversation_id IN ({placeholders})',
+                               (now, *targets, *targets))
+            await conn.execute(f"UPDATE trigger_tasks SET status='cancelled',next_run_at=NULL,updated_at=? "
+                               f'WHERE conversation_id IN ({placeholders}) OR id IN '
+                               f'(SELECT trigger_task_id FROM conversation_jobs WHERE conversation_id IN ({placeholders}))',
+                               (now, *targets, *targets))
             await conn.execute('UPDATE trigger_runs SET delivered_at=COALESCE(delivered_at,?) '
-                               'WHERE task_id IN (SELECT id FROM trigger_tasks WHERE conversation_id=?)', (now,cid))
+                               f'WHERE task_id IN (SELECT id FROM trigger_tasks WHERE conversation_id IN ({placeholders}) '
+                               f'OR id IN (SELECT trigger_task_id FROM conversation_jobs WHERE conversation_id IN ({placeholders})))',
+                               (now, *targets, *targets))
+            changed = await conn.execute(f"UPDATE message_queue SET status='cancelled',reason='',revision=revision+1,updated_at=? "
+                               f"WHERE conversation_id IN ({placeholders}) AND status IN ('pending','paused','invalid')", (now, *targets))
+            if changed.rowcount:
+                from .queue_store import bump
+                await bump(conn)
             runs = await _config(conn, 'conversation_runs', {})
-            running = runs.get(cid)
-            if running:
-                running['stop_requested'] = True
-                await _set_config(conn, 'conversation_runs', runs)
-            if await _config(conn, 'current_chat_id') == cid:
+            for target in targets:
+                if target in runs:
+                    runs[target]['stop_requested'] = True
+            await _set_config(conn, 'conversation_runs', runs)
+            if await _config(conn, 'current_chat_id') in targets:
                 await self._select_fallback(conn)
-            if await _config(conn, 'telegram_conversation_id') == cid:
+            if await _config(conn, 'telegram_conversation_id') in targets:
                 await _set_config(conn, 'telegram_conversation_id', None)
                 self._config_cache.pop('telegram_conversation_id', None)
             await self._bump_conversation_revision(conn)
@@ -488,11 +521,14 @@ class ConversationStore(QueueStore):
                 return
             if not row['deleting']:
                 raise ConversationError('删除操作尚未确认。')
+            if await descendant_ids(conn, cid):
+                raise ConversationError('正在删除所属子对话，请稍候。')
             runs = await _config(conn, 'conversation_runs', {})
             if cid in runs:
                 raise ConversationError('正在停止该会话的回合，请稍候。')
-            await conn.execute('DELETE FROM trigger_runs WHERE task_id IN (SELECT id FROM trigger_tasks WHERE conversation_id=?)', (cid,))
-            await conn.execute('DELETE FROM trigger_tasks WHERE conversation_id=?', (cid,))
+            task_ids = 'SELECT id FROM trigger_tasks WHERE conversation_id=? OR id IN (SELECT trigger_task_id FROM conversation_jobs WHERE conversation_id=?)'
+            await conn.execute('DELETE FROM trigger_runs WHERE task_id IN (' + task_ids + ')', (cid, cid))
+            await conn.execute('DELETE FROM trigger_tasks WHERE id IN (' + task_ids + ')', (cid, cid))
             for table in ('global_messages','chat_messages','context_compressions','context_compression_jobs'):
                 await conn.execute(f'DELETE FROM {table} WHERE session_id=?', (cid,))
             await conn.execute('DELETE FROM ui_messages WHERE conversation_id=?', (cid,))
@@ -503,6 +539,7 @@ class ConversationStore(QueueStore):
             await conn.execute('DELETE FROM conversation_turns WHERE conversation_id=?', (cid,))
             await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=?', (cid,))
             await conn.execute('DELETE FROM conversation_mutation_requests WHERE conversation_id=?', (cid,))
+            await conn.execute('DELETE FROM conversation_jobs WHERE parent_conversation_id=?', (cid,))
             for table, key in (('cli_relay_ops','conversation_context'),('channel_outbox','_conversation_context'),('channel_deadletter','_conversation_context')):
                 cursor = await conn.execute(f'SELECT id,payload FROM {table}')
                 ids = []

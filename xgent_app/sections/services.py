@@ -1347,6 +1347,9 @@ async def save_skill_state(path: str, state: str) -> None:
             UserDataManager.set(key, items)
     if '_sync_knowledge_state' in globals():
         await _sync_knowledge_state(db, force=True)
+    if state in {'disabled', 'hidden'}:
+        from xgent_app.child_conversations import poll_conversation_jobs
+        await poll_conversation_jobs(globals())
 
 def build_absolute_path_prompt_section() -> str:
     project_root_raw = AgentExecutor.current_work_dir()
@@ -2502,8 +2505,11 @@ async def _finish_conversation_deletion(cid):
     from xgent_app.conversations import ExecutionFileLock
     if SelfTriggerManager._scheduler is None and ExecutionFileLock(str(db.db_path) + '.scheduler').busy():
         return
+    from xgent_app.queue_store import rows as child_job_rows
+    callback_tasks = {job['trigger_task_id'] for job in await child_job_rows(await db._get_conn(),
+        'SELECT trigger_task_id FROM conversation_jobs WHERE conversation_id=?', (cid,))}
     for task in await db.list_trigger_tasks(active_only=False):
-        if task['conversation_id'] == cid:
+        if task['conversation_id'] == cid or task['id'] in callback_tasks:
             await SelfTriggerManager.cancel(task['id'])
     while True:
         running = (await manager.state()).get('runs', {}).get(cid)
@@ -2527,6 +2533,11 @@ async def _finish_conversation_deletion(cid):
                 if pending.flush_task is not None:
                     pending.flush_task.cancel()
                 _pending_album_conversations.pop(key, None)
+    # Invalidate the entire owned tree together; shared parent files may only
+    # be released after all child runs and their task processes have exited.
+    from xgent_app.child_conversations import descendant_ids
+    while await descendant_ids(await db._get_conn(), cid):
+        await asyncio.sleep(.1)
     workspace_path = (deleting_session or {}).get('workspace_path')
     if workspace_path:
         workspace = Path(workspace_path).resolve()
@@ -2558,6 +2569,8 @@ async def _conversation_maintenance():
     if '_sync_web_appearance' in globals():
         await _sync_web_appearance(db)
     await _sync_knowledge_state(db)
+    from xgent_app.child_conversations import poll_conversation_jobs
+    await poll_conversation_jobs(globals())
     for cid in await db.pending_conversation_deletions():
         previous = _conversation_delete_tasks.get(cid)
         if previous is not None and not previous.done():
@@ -2574,13 +2587,15 @@ async def _conversation_maintenance():
 
 async def delete_conversation(cid):
     db = await BotMemoryDB.get_instance()
+    info = await db.conversation_delete_info(cid) if await db.get_session(cid) else {'conversation_ids': [cid]}
     await db.begin_conversation_delete(cid)
     await _conversation_maintenance()
     await get_conversations().poll_once()
     task = _conversation_delete_tasks.get(cid)
     if task is not None:
         await asyncio.wait({task}, timeout=1)
-    return {'ok': True, 'deleting': await db.get_session(cid) is not None}
+    return {'ok': True, 'deleting': any([await db.get_session(target) is not None for target in info['conversation_ids']]),
+            'deleted_conversation_ids': info['conversation_ids']}
 
 async def reset_conversation_context(cid):
     async with conversation_operation(cid, fresh=True, allow_archived=True):

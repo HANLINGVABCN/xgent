@@ -282,7 +282,7 @@ class Workbench:
                           'skills': self.skills, 'memories': self.memories, 'usage': self.usage, 'usage/records': self.usage_records,
                           'artifacts/preview': self.artifact_preview, 'artifacts/cover': self.artifact_cover, 'settings/blacklist': self.blacklist, 'settings': self.read_settings}
         else:
-            operations = {**{f'{kind}/{action}': self.document_action for kind in ('skills','memories') for action in ('create','update','rename','delete')}, **{f'conversations/{action}': self.conversation_action for action in ('create','switch','rename','archive','restore','reset_context','delete')},
+            operations = {**{f'{kind}/{action}': self.document_action for kind in ('skills','memories') for action in ('create','update','rename','delete')}, **{f'conversations/{action}': self.conversation_action for action in ('create','create_child','switch','rename','archive','restore','reset_context','delete')},
                           'tasks/create': self.create_task, 'tasks/cancel': self.cancel_tasks,
                           'providers/save': self.save_provider, 'providers/delete': self.delete_provider,
                           'providers/fetch': self.fetch_models, 'providers/select': self.select_model,
@@ -1168,7 +1168,12 @@ class Workbench:
             raise WorkbenchError('缺少目标会话。', 409)
         action = data['action']
         result = {}
-        if action in {'reset_context','delete'}:
+        if action == 'create_child':
+            db = await self.db()
+            result = await db.create_child_conversation(str(data['id']), data.get('name'),
+                generation=data.get('generation'), request_id=data.get('request_id'))
+            await get_conversations().manage('switch', result['conversation_id'])
+        elif action in {'reset_context','delete'}:
             if data.get('confirm') is not True:
                 raise WorkbenchError('请确认目标会话后再操作。')
             if action == 'delete':

@@ -1650,6 +1650,7 @@ class AgentExecutor:
                 run_env['XGENT_CHAT_ID'] = str(route['chat_id'])
             if scope is not None:
                 run_env['XGENT_CONVERSATION_ID'] = scope.conversation_id
+                run_env['XGENT_CONVERSATION_GENERATION'] = str(scope.generation)
 
             # 创建进程途中也可能收到取消，先取回句柄再让 finally 回收它。
             spawn_task = asyncio.create_task(asyncio.create_subprocess_shell(

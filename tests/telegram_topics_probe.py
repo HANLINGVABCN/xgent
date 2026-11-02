@@ -70,6 +70,7 @@ async def exercise(bot, root):
 
 async def migration(bot, root):
     from pathlib import Path
+    from xgent_app.conversations import SCHEMA_VERSION
     async with Harness(bot,root) as h:
         async with h.db._transaction() as conn:
             await conn.execute("UPDATE config SET value='8' WHERE key='conversation_schema_version'")
@@ -80,7 +81,7 @@ async def migration(bot, root):
         conn=await h.db._get_conn()
         row=await (await conn.execute("SELECT name FROM sqlite_master WHERE name='telegram_topics'")).fetchone()
         return {'version':await h.db.get_config('conversation_schema_version'),
-                'backup':any(Path(root).glob('memory.db.pre-conversations-v9.sqlite3')),'table':bool(row)}
+                'backup':any(Path(root).glob(f'memory.db.pre-conversations-v{SCHEMA_VERSION}.sqlite3')),'table':bool(row)}
 
 
 async def parallel_pages(bot, root):
