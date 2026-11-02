@@ -47,6 +47,7 @@ def history_archive_files(snapshot, *, system_prompt, compression_prompt, access
              '旧版没有留存的记录、时间或分界不推测补造。',
              f"当前模型上下文起始记录 ID：{snapshot.get('context_start_record_id', 0)}。", '']
     current_files = None
+    exported_records = []
 
     def write_source(prefix, rows):
         unique = []
@@ -57,6 +58,7 @@ def history_archive_files(snapshot, *, system_prompt, compression_prompt, access
                     continue
                 seen_ids.add(rid)
             unique.append(row)
+        exported_records.extend(unique)
         a = f'{prefix}a{MEMORY_NAME}.txt'
         b = f'{prefix}b{ATTACHMENTS_NAME}.txt'
         files[a] = format_records(unique).encode('utf-8')
@@ -102,4 +104,6 @@ def history_archive_files(snapshot, *, system_prompt, compression_prompt, access
         if stage == current_epoch:
             current_files = tail
     files['上下文范围.txt'] = ('\n'.join(notes) + '\n').encode('utf-8')
+    from .readable_export import readable_files
+    files.update(readable_files(exported_records))
     return dict(sorted(files.items())), current_files

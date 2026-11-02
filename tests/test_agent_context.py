@@ -8,10 +8,35 @@ from xgent_app.agent_context import (
     build_read_ranged_context_message,
     build_sendfile_context_message,
     build_shell_context_message,
+    build_grep_context_message,
+    build_search_context_message,
+    build_intel_context_message,
 )
 
 
 class AgentContextTests(unittest.TestCase):
+    def test_guidance_uses_pinned_mode_without_rewriting_the_original_result(self):
+        from xgent_app.tool_calls import ToolSession, session_scope
+        original = 'ORIGINAL grep-x read-x fetch-x\n  code indentation\n'
+        cases = [(build_grep_context_message, ('search_files', 'read_file', 'edit_file')),
+                 (build_search_context_message, ('fetch_urls',)),
+                 (build_intel_context_message, ('inspect_code', 'search_files')),
+                 (build_sendfile_context_message, ('read_file',)),
+                 (build_file_context_message, ('read_file',)),
+                 (build_edit_context_message, ('search_files', 'read_file', 'write_file'))]
+        for builder, names in cases:
+            with session_scope(ToolSession('openai', 'p', 'm', 'run', mode='toolcall')):
+                message = builder(original)
+                self.assertTrue(message['content'].startswith(original + '\n'))
+                guidance = message['content'][len(original):]
+                self.assertNotRegex(guidance, r'\b(?:grep|read|edit|file|fetch|intel)-x\b')
+                for name in names:
+                    self.assertIn(name, guidance)
+            with session_scope(ToolSession('openai', 'p', 'm', 'run', mode='fence')):
+                fence = builder(original)
+                self.assertTrue(fence['content'].startswith(original + '\n'))
+                self.assertRegex(fence['content'][len(original):], r'\b(?:grep|read|edit|file|fetch|intel)-x\b')
+
     def test_file_and_sendfile_context_keep_notice_and_protocol_guidance(self):
         sendfile = build_sendfile_context_message("[sendfile结果] 已发送 a.txt")
         file_message = build_file_context_message("[file结果] 已写入 a.txt")

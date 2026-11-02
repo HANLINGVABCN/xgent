@@ -121,6 +121,57 @@ async def exercise(bot, root, fmt, style):
         return {'format': fmt, 'style': style, 'requests': len(h.requests), 'executions': len(h.executed)}
 
 
+async def cross_turn_history(bot, root, fmt, style):
+    async with NativeHarness(bot, root, fmt, style) as h:
+        h.responses = [([call(cid='first-call', command='first-mocked')], ''), ([], 'FIRST_DONE'),
+                       ([call(cid='second-call', command='second-mocked')], ''), ([], 'SECOND_DONE')]
+        await h.turn('first synthetic request')
+        await h.turn('second synthetic request')
+        assert h.executed == ['first-mocked', 'second-mocked']
+        assert len(h.requests) == 4
+        request = h.requests[2]
+        assert request['tools']
+        messages = request.get('messages') or request['contents']
+        encoded = json.dumps(messages, ensure_ascii=False)
+        assert '[已发生的工具调用]' not in encoded, messages
+        if fmt in {'openai', 'openai_compatible'}:
+            assert any(m.get('tool_calls') for m in messages)
+            assert any(m['role'] == 'tool' and m['tool_call_id'] == 'first-call' for m in messages)
+        elif fmt in {'gemini', 'vertex'}:
+            assert any('functionCall' in part for m in messages for part in m.get('parts', []))
+            assert any('functionResponse' in part for m in messages for part in m.get('parts', []))
+            assert 'provider-signature' not in encoded
+        else:
+            assert any(p.get('type') == 'tool_use' for m in messages for p in m['content'])
+            assert any(p.get('type') == 'tool_result' for m in messages for p in m['content'])
+        assert 'ACTUAL_RESULT' in encoded
+        rows = await h.db.get_display_history(100)
+        assert not any(row['msg_type'] == 'runtime_error' for row in rows), rows
+        return {'requests': len(h.requests), 'executions': len(h.executed), 'native_history': True}
+
+
+async def diagnostic_round_trip(bot, root, fmt, style):
+    async with NativeHarness(bot, root, fmt, style) as h:
+        events = []
+        with patch.object(bot, 'write_model_trace', side_effect=lambda event, data: events.append((event, data))):
+            h.responses = [([call(command='SYNTHETIC_ARGUMENT')], ''), ([], 'DONE')]
+            await h.turn('diagnose real protocol events')
+            h.responses = [([], '[已发生的工具调用] exec_command\n{"command":"PROSE_ONLY"}')]
+            await h.turn('literal model content')
+        diagnostics = [(event, data) for event, data in events if event.startswith('tool_')]
+        requests = [data for event, data in diagnostics if event == 'tool_request']
+        replies = [data for event, data in diagnostics if event == 'tool_response']
+        results = [data for event, data in diagnostics if event == 'tool_execution_result']
+        assert len(requests) == 3 and all(data['defined_tools'] == 16 for data in requests)
+        assert [data['received_calls'] for data in replies] == [1, 0, 0]
+        assert any(data.get('success') is True and data.get('return_code') == 0 for data in results), diagnostics
+        assert h.executed == ['SYNTHETIC_ARGUMENT']
+        assert 'SYNTHETIC_ARGUMENT' not in json.dumps(diagnostics) and 'PROSE_ONLY' not in json.dumps(diagnostics)
+        rows = await h.db.get_display_history(100)
+        assert not any(row['msg_type'] == 'runtime_error' for row in rows), rows
+        return {'defined_tools': 16, 'actual_calls': [1, 0, 0], 'no_prose_dispatch': True}
+
+
 async def form_sequence(bot, root, fmt, cancel=False):
     async with NativeHarness(bot, root, fmt, 'nonstream') as h:
         questions = [{'label': 'Q1', 'type': 'text', 'prompt': 'confirm label'}]
@@ -166,6 +217,19 @@ async def over_and_fence(bot, root, mode):
                            ([], 'FENCE_RESULT')]
             await h.turn('use fence')
             assert h.executed == ['fence-command'] and not h.requests[0].get('tools')
+        elif mode in {'literal', 'unclosed-example', 'unclosed-fence'}:
+            if mode == 'unclosed-fence':
+                await bot.UserDataManager.save_config('agent_call_mode', 'fence')
+            original = ('[已发生的工具调用] exec_command\n{"command":"example-only"}' if mode == 'literal' else
+                        '```run-x\n<<BEGIN_run_test000\nexample-only\n')
+            h.responses = [([], original)]
+            await h.turn('literal response')
+            assert h.executed == [] and len(h.requests) == 1
+            rows = await h.db.get_display_history(100)
+            assert any(row['msg_type'] == 'ai_reply' and row['content'] == original for row in rows)
+            assert not any(row['msg_type'] == 'runtime_error' for row in rows)
+            warning = '检测到未闭合的协议块' in json.dumps(h.drain_frames(), ensure_ascii=False)
+            assert warning == (mode == 'unclosed-fence')
         else:
             h.responses = [([], '```run-x\n<<BEGIN_run_test000\nexample-only\n<<END_run_test000\n```')]
             await h.turn('explain')

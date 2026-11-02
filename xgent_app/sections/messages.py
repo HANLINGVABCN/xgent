@@ -2125,7 +2125,8 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                 pending_round_status_msg = None
                 pending_round_iteration = None
             if not protocol_blocks:
-                if AgentExecutor.has_unclosed_protocol_block(response):
+                if ((native_session is None or native_session.mode == 'fence')
+                        and AgentExecutor.has_unclosed_protocol_block(response)):
                     # 有开始行但没闭合：解析器会停止扫描，后面的协议全部不执行。
                     # 以前这是完全静默的，用户只看到 AI 说要做事却什么也没发生。
                     await safe_send_message(
@@ -2174,7 +2175,8 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                 is_native = bool(native_session and native_session.mode == 'toolcall' and native_session.current)
                 if is_native:
                     message['native_result'] = {'id': native_session.current, 'run_id': native_session.run_id,
-                                                'response_id': native_session.current_response_id}
+                                                'response_id': native_session.current_response_id,
+                                                **native_session.current_outcome}
                 if retain_tools or is_native:
                     stored = message
                     if is_native and not retain_tools and isinstance(message.get('content'), list):
@@ -2479,6 +2481,9 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         )
                         if native_session is not None and native_session.mode == 'toolcall':
                             native_session.remaining = list(protocol_blocks[protocol_index + 1:])
+                            native_session.trace('tool_waiting', response_id=native_session.current_response_id,
+                                                 call_id=native_session.current, ask_id=ask_id,
+                                                 remaining_calls=len(native_session.remaining))
                             import copy
                             native_session.presentation = {'replies': copy.deepcopy(current_turn().replies),
                                 'operations': copy.deepcopy(current_turn().operations), 'started_at': current_turn().started_at}
@@ -2905,15 +2910,15 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                                       else {'role': 'assistant', 'content': response})
 
 
-async def persist_ask_answer(text, chat_id, generation, native_session=None):
+async def persist_ask_answer(text, chat_id, generation, native_session=None, *, cancelled=False):
     answer = build_ask_context_message(text)
     metadata = {'attachment_generation': generation, 'ask_answer': True}
     if native_session is not None and native_session.mode == 'toolcall':
+        native_session.note_result({'state': 'cancelled' if cancelled else 'success', 'success': not cancelled})
         answer['native_result'] = {'id': native_session.current, 'run_id': native_session.run_id,
-                                   'response_id': native_session.current_response_id}
+                                   'response_id': native_session.current_response_id, **native_session.current_outcome}
         for operation in (native_session.presentation or {}).get('operations', []):
             if operation.get('native_call_id') == native_session.current:
-                cancelled = text.startswith('[用户已取消表单]')
                 operation.update(state='stopped' if cancelled else 'success', success=not cancelled,
                     status='cancelled' if cancelled else 'completed',
                     elapsed_seconds=time.monotonic() - operation['started_at'])
@@ -3005,10 +3010,11 @@ async def cancel_ask(ask_id: str) -> str:
     queue = get_text_queue()
     await queue.start()
     await db.queue_resume(current_scope(), queue.instance, ask=True, cancel_ask=True)
-    answer_message = await persist_ask_answer(notice, pending.chat_id, pending.generation, pending.native_session)
+    answer_message = await persist_ask_answer(notice, pending.chat_id, pending.generation, pending.native_session, cancelled=True)
     if pending.native_session is not None and pending.native_session.mode == 'toolcall':
         for block in pending.native_session.remaining:
             pending.native_session.claim(block)
+            pending.native_session.note_result({'state': 'cancelled', 'success': False, 'stopped': True})
             cancelled = {'role': 'user', 'content': '[工具结果] 用户取消表单，本调用未执行。'}
             pending.native_session.current_results = [cancelled]
             pending.native_session.finish([])

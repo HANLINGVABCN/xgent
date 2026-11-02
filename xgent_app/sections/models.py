@@ -104,6 +104,9 @@ class ModelClient:
         guard = getattr(history, 'before_request', None)
         if guard is not None:
             await guard()
+        response = native_tools.current_response()
+        if response is not None:
+            response.request_attempt()
 
     @staticmethod
     def _raise_conversation_request_error(history: list, error: Any) -> None:
@@ -111,6 +114,7 @@ class ModelClient:
         mark_failed()
         if native_tools.current_response() is not None:
             detail = error if isinstance(error, str) else json.dumps(error, ensure_ascii=False)
+            native_tools.current_response().trace('tool_request_error', stage='provider_error', error=detail[:2000])
             if any(word in detail.lower() for word in ('tools', 'tool_choice', 'function calling', 'function_call')) and any(
                     word in detail.lower() for word in ('not supported', 'unsupported', 'unknown parameter', 'unrecognized', 'not allowed')):
                 hint = '\n当前模型或接口不支持 Tool call，请切换“正则围栏”后重试。'

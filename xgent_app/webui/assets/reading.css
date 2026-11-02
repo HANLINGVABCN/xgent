@@ -240,8 +240,9 @@ body.dark #composer .send-btn.ready,body.dark #composer .stop-btn { background:#
 #composer-options-popover { position:absolute; bottom:calc(100% + 8px); display:flex; flex-direction:column; min-height:0; overflow:hidden; border:1px solid var(--wb-border); border-radius:14px; background:var(--wb-panel); color:var(--wb-text); padding:5px; box-shadow:0 6px 24px #0002; z-index:32; font-size:var(--web-ui-font-size); }
 #composer-options-popover[hidden] { display:none; }
 .composer-options-head { display:flex; align-items:center; justify-content:space-between; padding:3px 6px 5px 9px; gap:12px; flex-shrink:0; }
-.composer-options-head strong { font-size:.92em; font-weight:600; }
-.composer-options-head button { display:grid; place-items:center; width:30px; height:30px; border:0; background:transparent; border-radius:8px; color:var(--wb-muted); }
+.composer-options-head strong { flex:0 0 auto; white-space:nowrap; font-size:.92em; font-weight:600; }
+.composer-current-model { flex:1 1 0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:right; font:11px/17px var(--font); color:var(--wb-muted); }
+.composer-options-head button { display:grid; place-items:center; flex:0 0 30px; width:30px; height:30px; border:0; background:transparent; border-radius:8px; color:var(--wb-muted); }
 .composer-options-head button .icon { width:16px; height:16px; }
 .composer-choice-list { min-height:0; overflow:auto; overscroll-behavior:contain; }
 .composer-response-modes{flex-shrink:0;border-bottom:1px solid var(--wb-border);padding-bottom:3px;margin-bottom:3px}

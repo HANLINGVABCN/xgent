@@ -79,6 +79,28 @@ def restore_tool_context(history: list, records: list, upload_root) -> list:
         payload = metadata.get("model_context") or {}
         if payload.get("assets") and record.get("id") not in present:
             prefix.extend(messages_from_metadata(metadata, record.get("id")) or [])
+    # Retained native attachments can be older than the ordinary history depth.
+    # Bring their saved call and sibling results along, never an orphan result.
+    from .native_history import message_groups
+    groups = message_groups(prefix)
+    linked = {m.get(TOOL_CONTEXT) for m in prefix}
+    while groups:
+        added = False
+        for record in records:
+            rid = record.get('id')
+            if rid in present or rid in linked:
+                continue
+            messages = messages_from_metadata(metadata_of(record), rid) or []
+            targets = message_groups(messages)
+            if targets & groups:
+                prefix.extend(messages)
+                linked.add(rid)
+                groups.update(targets)
+                added = True
+        if not added:
+            break
+    order = {record.get('id'): index for index, record in enumerate(records)}
+    prefix.sort(key=lambda message: order.get(message.get(TOOL_CONTEXT), -1))
     result = prefix + result
     for message in result:
         content = message.get("content")

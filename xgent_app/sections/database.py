@@ -624,26 +624,80 @@ class BotMemoryDB(ConversationStore):
     
     async def get_conversation_messages(self, limit: int = 50, *, before_record_id=None) -> List[Dict]:
         """获取所有消息（用于AI上下文）- 包含对话和系统操作"""
+        if limit <= 0:
+            return []
         # Filter before applying the model-message limit: UI rows do not consume it.
         conn = await self._get_conn()
+        start = await self._context_start(conn)
+        if before_record_id is None:
+            upper = await conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM global_messages WHERE session_id=?',
+                                       (self._conversation_id(),))
+            before_record_id = (await upper.fetchone())[0]
+            await upper.close()
         cursor = await conn.execute("SELECT id, role, content, timestamp, msg_type, metadata "
-                                    "FROM global_messages WHERE session_id = ? AND withdrawn=0 AND id >= "
-                                    "(SELECT context_start_record_id FROM chat_sessions WHERE id=global_messages.session_id) "
-                                    "AND (? IS NULL OR id<?) "
+                                    "FROM global_messages WHERE session_id = ? AND withdrawn=0 AND id >= ? AND id<? "
                                     "ORDER BY timestamp DESC, id DESC",
-                                    (self._conversation_id(), before_record_id, before_record_id))
-        result = []
-        while True:
-            rows = await cursor.fetchmany(max(128, min(limit, 1024)))
-            if not rows:
-                break
-            for row in rows:
-                result.extend(reversed(self.conversation_records_to_messages([row])))
-                if len(result) >= limit:
-                    await cursor.close()
-                    return list(reversed(result[:limit]))
-        await cursor.close()
-        return list(reversed(result))
+                                    (self._conversation_id(), start, before_record_id))
+        entries = []
+        try:
+            while len(entries) < limit:
+                rows = await cursor.fetchmany(max(128, min(limit, 1024)))
+                if not rows:
+                    break
+                for row in rows:
+                    messages = self.conversation_records_to_messages([row])
+                    entries.extend((row['timestamp'], row['id'], index, messages[index])
+                                   for index in reversed(range(len(messages))))
+                    if len(entries) >= limit:
+                        break
+        finally:
+            await cursor.close()
+        entries = list(reversed(entries[:limit]))
+        from xgent_app.native_history import message_groups
+        groups = message_groups([entry[3] for entry in entries])
+        if not groups:
+            return [entry[3] for entry in entries]
+        linked = {}
+        checked = set()
+        while groups - checked:
+            wanted = sorted(groups - checked)
+            checked.update(wanted)
+            # Fixed metadata paths only. Complete the selected response's calls
+            # and all result fragments, without reading other chats or later rows.
+            cursor = await conn.execute('''
+                WITH wanted AS (
+                    SELECT json_extract(value,'$[0]') run, json_extract(value,'$[1]') response FROM json_each(?)
+                )
+                SELECT DISTINCT g.id, g.role, g.content, g.timestamp, g.msg_type, g.metadata
+                FROM global_messages g
+                JOIN json_each(CASE WHEN json_valid(g.metadata) THEN g.metadata ELSE '{}' END,
+                               '$.model_context.messages') m
+                WHERE g.session_id=? AND g.withdrawn=0 AND g.id>=? AND g.id<? AND m.type='object'
+                  AND EXISTS (
+                    SELECT 1 FROM wanted w WHERE
+                      (json_extract(m.value,'$.native_result.run_id')=w.run AND
+                       json_extract(m.value,'$.native_result.response_id')=w.response)
+                      OR EXISTS (SELECT 1 FROM json_each(m.value,'$.native_calls') c WHERE c.type='object'
+                           AND json_extract(c.value,'$.run_id')=w.run AND json_extract(c.value,'$.response_id')=w.response)
+                  )
+                ORDER BY g.timestamp, g.id
+            ''', (json.dumps(wanted), self._conversation_id(), start, before_record_id))
+            try:
+                while rows := await cursor.fetchmany(128):
+                    for row in rows:
+                        if row['id'] not in linked:
+                            messages = self.conversation_records_to_messages([row])
+                            linked[row['id']] = [(row['timestamp'], row['id'], index, message)
+                                                  for index, message in enumerate(messages)]
+                            groups.update(message_groups(messages))
+            finally:
+                await cursor.close()
+        if start != await self._context_start(conn):
+            raise AttachmentContextError('对话上下文已变化，请重新发起请求。')
+        completed = [entry for entry in entries if entry[1] not in linked]
+        completed.extend(entry for values in linked.values() for entry in values)
+        completed.sort(key=lambda entry: entry[:3])
+        return [entry[3] for entry in completed]
 
     @staticmethod
     def conversation_records_to_messages(rows, *, include_all: bool = False) -> List[Dict]:

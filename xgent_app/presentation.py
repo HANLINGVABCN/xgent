@@ -280,6 +280,10 @@ class PresentationTurn:
             if result.get('stopped'):
                 self.active_operation['state'] = 'stopped'
             self.active_operation['state'] = operation_state(self.active_operation)
+            from .tool_calls import current_session
+            native = current_session()
+            if native is not None and native.current == self.active_operation.get('native_call_id'):
+                native.note_result({**result, 'state': self.active_operation['state']})
             if not self.active_operation.get('running'):
                 from .conversations import current_scope
                 from .stop_targets import end_phase

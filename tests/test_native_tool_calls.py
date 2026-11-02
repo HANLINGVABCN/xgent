@@ -11,6 +11,21 @@ def test_native_tool_call_round_trip_with_original_command_and_history(tmp_path,
     assert result['requests'] == 2 and result['executions'] == 1
 
 
+@pytest.mark.parametrize('fmt', ['openai', 'openai_compatible', 'gemini', 'vertex', 'claude'])
+@pytest.mark.parametrize('style', ['nonstream', 'foreground', 'background'])
+def test_next_user_turn_keeps_native_history_instead_of_assistant_command_prose(tmp_path, fmt, style):
+    result = run_in_app('import asyncio\nfrom tests.native_tool_probe import cross_turn_history\n' +
+                        f'print(json.dumps(asyncio.run(cross_turn_history(bot,{str(tmp_path)!r},{fmt!r},{style!r}))))')
+    assert result == {'requests': 4, 'executions': 2, 'native_history': True}
+
+
+@pytest.mark.parametrize('fmt', ['openai', 'openai_compatible', 'gemini', 'vertex', 'claude'])
+def test_diagnostics_count_real_protocol_calls_without_inspecting_prose(tmp_path, fmt):
+    result = run_in_app('import asyncio\nfrom tests.native_tool_probe import diagnostic_round_trip\n' +
+        f'print(json.dumps(asyncio.run(diagnostic_round_trip(bot,{str(tmp_path)!r},{fmt!r},"nonstream"))))')
+    assert result == {'defined_tools': 16, 'actual_calls': [1, 0, 0], 'no_prose_dispatch': True}
+
+
 @pytest.mark.parametrize('fmt', ['openai', 'gemini', 'claude'])
 @pytest.mark.parametrize('cancel', [False, True])
 def test_form_keeps_call_mode_and_resumes_only_remaining_operations(tmp_path, fmt, cancel):
@@ -19,7 +34,7 @@ def test_form_keeps_call_mode_and_resumes_only_remaining_operations(tmp_path, fm
     assert result['ordered'] and result['pinned']
 
 
-@pytest.mark.parametrize('mode', ['over', 'fence', 'example'])
+@pytest.mark.parametrize('mode', ['over', 'fence', 'example', 'literal', 'unclosed-example', 'unclosed-fence'])
 def test_exclusive_execution_entry_and_over_removes_only_next_request(tmp_path, mode):
     result = run_in_app('import asyncio\nfrom tests.native_tool_probe import over_and_fence\n' +
                         f'print(json.dumps(asyncio.run(over_and_fence(bot,{str(tmp_path)!r},{mode!r}))))')
