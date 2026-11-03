@@ -1310,7 +1310,14 @@ def get_disabled_skills() -> set:
     return {str(item) for item in raw}
 
 
+def conversation_knowledge_enabled() -> bool:
+    scope = current_scope(required=False)
+    return scope is None or not scope.owner_conversation_id
+
+
 def build_skill_prompt_section() -> str:
+    if not conversation_knowledge_enabled():
+        return ''
     skill_files = list_skill_files()
     if not skill_files:
         return ''
@@ -1362,13 +1369,14 @@ def build_absolute_path_prompt_section() -> str:
     project_root = to_display_path(project_root_raw)
     skill_public_dir = to_display_path(os.path.join(project_root_raw, 'skill-public'))
     skill_private_dir = to_display_path(os.path.join(project_root_raw, 'skill-private'))
+    skill_paths = (f"- skill 公有目录: {skill_public_dir}\n"
+                   f"- skill 私有目录: {skill_private_dir}\n") if conversation_knowledge_enabled() else ''
     upload_dir = to_display_path(ArtifactManager.UPLOAD_DIR)
     return (
         "\n\n---\n"
         "【当前运行目录绝对路径】\n"
         f"- 项目根目录: {project_root}\n"
-        f"- skill 公有目录: {skill_public_dir}\n"
-        f"- skill 私有目录: {skill_private_dir}\n"
+        f"{skill_paths}"
         f"- 上传目录: {upload_dir}\n"
         f"- 数据根目录: {to_display_path(DATA_PATHS.root)}\n"
         f"- 用户工作目录: {to_display_path(os.path.join(project_root_raw, 'workspace'))}\n"
@@ -1392,20 +1400,25 @@ def get_agent_runtime_prompt(agent_mode: bool, *, notification_only: bool = Fals
     else:
         prompt = PromptFileManager.get('agent_prompt_addon')
     prompt += build_absolute_path_prompt_section()
-    prompt += build_skill_prompt_section()
+    knowledge_enabled = conversation_knowledge_enabled()
+    if knowledge_enabled:
+        prompt += build_skill_prompt_section()
     if notification_only:
-        return prompt + '\n技能索引仅是背景资料；本次不读取技能文件，不输出待执行的工具请求。\n'
+        return prompt + ('\n技能索引仅是背景资料；本次不读取技能文件，不输出待执行的工具请求。\n' if knowledge_enabled else '')
     read_tool = 'read_file' if toolcall else 'read-x'
-    prompt += (
-        '\n【技能查阅】普通关闭只省略简介，不禁止使用。若任务需要已列出的关闭技能，'
-        f'按其绝对路径用 {read_tool} 先读取开头的 ```! 简介块；若块未结束则继续读取，'
-        '需要原理或完整流程时再分段查阅正文。不要声称未读取的内容已知。'
-        '此规则不授予修改权限；Agent 关闭时不得调用读取工具。\n'
-    )
+    if knowledge_enabled:
+        prompt += (
+            '\n【技能查阅】普通关闭只省略简介，不禁止使用。若任务需要已列出的关闭技能，'
+            f'按其绝对路径用 {read_tool} 先读取开头的 ```! 简介块；若块未结束则继续读取，'
+            '需要原理或完整流程时再分段查阅正文。不要声称未读取的内容已知。'
+            '此规则不授予修改权限；Agent 关闭时不得调用读取工具。\n'
+        )
     if toolcall:
         prompt += ('\n【当前工具调用方式：Tool call】\n'
-                   '本回合按 API tools 定义调用函数；不执行回复正文里的围栏。'
-                   '技能资料里的旧协议示例只用于了解操作内容，应转换成对应函数及参数，不照抄围栏。\n')
+                   '本回合按 API tools 定义调用函数；不执行回复正文里的围栏。')
+        if knowledge_enabled:
+            prompt += '技能资料里的旧协议示例只用于了解操作内容，应转换成对应函数及参数，不照抄围栏。'
+        prompt += '\n'
     return prompt
 
 
@@ -1471,6 +1484,8 @@ def clear_all_memory() -> int:
 
 def build_memory_prompt_section() -> str:
     """拼接所有记忆到 system prompt。无记忆返回空串，不污染 prompt。"""
+    if not conversation_knowledge_enabled():
+        return ''
     files = list_memory_files()
     if not files:
         return ''
@@ -1504,7 +1519,7 @@ def build_conversation_system_prompt(agent_mode: bool, *, notification_only: boo
     return (
         get_runtime_prompt('assistant_prompt')
         + get_runtime_prompt('global_prompt_addon')
-        + build_memory_prompt_section()
+        + (build_memory_prompt_section() if conversation_knowledge_enabled() else '')
         + get_agent_runtime_prompt(agent_mode, notification_only=notification_only)
         + "\n\n【对话附件】\n"
           "Conversation attachments 区段直接提供当前可读取的附件内容，与 Agent 开关无关。"

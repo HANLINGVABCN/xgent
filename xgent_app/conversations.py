@@ -48,6 +48,7 @@ class ConversationScope:
     telegram_bot_id: int | None = None
     telegram_chat_id: int | None = None
     telegram_thread_id: int | None = None
+    owner_conversation_id: str | None = None
 
 
 _scope = contextvars.ContextVar('xgent_conversation', default=None)
@@ -105,7 +106,8 @@ def replay_conversation(snapshot):
                               snapshot.get('run_id'), str(snapshot.get('name') or ''),
                               str(snapshot.get('origin') or 'legacy'), str(snapshot.get('purpose') or 'chat'),
                               snapshot.get('telegram_delivery'), snapshot.get('workspace_path'),
-                              snapshot.get('telegram_bot_id'),snapshot.get('telegram_chat_id'),snapshot.get('telegram_thread_id'))
+                              snapshot.get('telegram_bot_id'),snapshot.get('telegram_chat_id'),snapshot.get('telegram_thread_id'),
+                              snapshot.get('owner_conversation_id'))
     with interaction(scope.origin, scope.purpose), bind_conversation(scope):
         yield scope
 
@@ -411,7 +413,7 @@ class ConversationManager:
             workspace, owner = parent.get('workspace_path'), parent.get('owner_conversation_id')
         return ConversationScope(cid, int(session['generation']), name=session.get('name') or '新对话',
                                  origin=origin, purpose=purpose, telegram_delivery=deliver if origin != 'legacy' else None,
-                                 workspace_path=workspace,**route)
+                                  workspace_path=workspace,owner_conversation_id=session.get('owner_conversation_id'),**route)
 
     @contextlib.asynccontextmanager
     async def operation(self, conversation_id=None, *, execution=False, wait=False,
