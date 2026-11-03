@@ -92,8 +92,10 @@ async def build_compression_history(snapshot, instruction):
 
 
 async def generate_compression_summary(provider, data, model, history, stop_event, usage_sink):
-    """Buffer uncommitted output. No partial summary can become a chat message."""
+    """Buffer uncommitted output; the optional view never commits partial text."""
     from xgent_app.compression import validate_summary
+    from xgent_app.compression_display import current_compression_output
+    output = current_compression_output()
     args = (provider, get_next_api_key(provider, data['api_key']), data['base_url'],
             model, '', history)
     kwargs = dict(api_format=data.get('api_format', 'openai'), usage_sink=usage_sink,
@@ -120,7 +122,9 @@ async def generate_compression_summary(provider, data, model, history, stop_even
         return result
 
     try:
-        if normalize_bool(UserDataManager.get('stream_mode', True), True):
+        stream_enabled = (output.policy.generation_mode != 'nonstream' if output is not None else
+                          normalize_bool(UserDataManager.get('stream_mode', True), True))
+        if stream_enabled:
             stream = ModelClient.think_and_reply_stream(*args, **kwargs).__aiter__()
             chunks = []
             while True:
@@ -129,6 +133,8 @@ async def generate_compression_summary(provider, data, model, history, stop_even
                 except StopAsyncIteration:
                     break
                 chunks.append(chunk)
+                if output is not None:
+                    await output.append(chunk)
             text = ''.join(chunks)
         else:
             text, error = await wait_result(ModelClient.think_and_reply(*args, **kwargs),
@@ -168,10 +174,16 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
         restore_mirror = lambda: None
         typing_stop = asyncio.Event()
         typing_task = None
+        output = None
         try:
             if not getattr(context.bot, '_is_xgent_web_bot', False) and not getattr(context.bot, '_is_xgent_cli_bot', False):
                 outbox = get_web_outbox() or globals().get('_web_external_outbox')
                 restore_mirror = install_tg_to_web_mirror(context.bot, outbox)
+            from xgent_app.compression_display import CompressionOutput
+            from xgent_app.presentation import message_presentation, presentation_turn
+            output = CompressionOutput(globals(), context, update.effective_chat.id, stop_event)
+            await output.open()
+            context = output.context
             publish_conversation_event(context, {'type': 'compression_state', 'busy': True})
             typing_task = asyncio.create_task(keep_typing_while_waiting(
                 context, update.effective_chat.id, typing_stop, max_duration=TYPING_MAX_DURATION_SECONDS))
@@ -190,7 +202,7 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                         raise CompressionError('该任务已完成，不会重复压缩。')
             snapshot = await db.get_compression_snapshot()
             if not has_new_content(snapshot['records']):
-                await message.reply_text('没有新的对话内容需要压缩。')
+                await context.bot.send_message(chat_id=update.effective_chat.id, text='没有新的对话内容需要压缩。')
                 return
             _, bundle = await create_conversation_export(snapshot)
             entry = await db.begin_compression(snapshot, bundle, update.effective_chat.id,
@@ -198,11 +210,11 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
             warning = await deliver_conversation_export(context, update.effective_chat.id, bundle, record_failure=False)
             if warning:
                 with contextlib.suppress(Exception):
-                    await message.reply_text(warning)
+                    await context.bot.send_message(chat_id=update.effective_chat.id, text=warning)
             # Create this message only after archive delivery: editing an earlier
             # placeholder would leave the compression status above the ZIP in chat.
             with contextlib.suppress(Exception), telegram_label('inline'):
-                status = await message.reply_text('正在压缩，成功前保留原上下文...', reply_markup=build_stop_keyboard())
+                status = await output.start(build_stop_keyboard())
             entry = await db.start_compression_attempt(entry['job_id'], provider, model)
             await asyncio.to_thread(verify_export, entry)
             history = await build_compression_history(snapshot, entry['instruction'])
@@ -216,11 +228,11 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
             publish_conversation_event(context, {'type': 'context_reset'})
             # Delivery is after commit; a Telegram outage cannot undo the summary.
             with contextlib.suppress(Exception):
-                from xgent_app.presentation import message_presentation
-                with message_presentation({'kind':'ai_reply','record_id':entry['response_row_id']}):
-                    await safe_send_message(context, update.effective_chat.id, summary)
+                await output.complete(entry, summary)
+                status = None
                 notice, _ = db._compression_notice(entry)
-                await message.reply_text(notice)
+                with message_presentation({'kind': 'system_op', 'record_id': entry.get('notice_row_id')}):
+                    await context.bot.send_message(chat_id=update.effective_chat.id, text=notice)
         except asyncio.CancelledError:
             if entry is not None and not changed:
                 with contextlib.suppress(Exception):
@@ -251,11 +263,16 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                     current_scope().conversation_id, {'attachment_generation': snapshot['generation'],
                                                'src': _RECORDER_SOURCE_ID})
             with contextlib.suppress(Exception):
+                if output is not None:
+                    await output.discard()
+                    status = None
                 if status is not None:
                     await safe_edit_text(status, result, reply_markup=compression_retry_keyboard(entry) if entry else None)
                     status = None
                 else:
-                    await message.reply_text(result, reply_markup=compression_retry_keyboard(entry) if entry else None)
+                    with message_presentation({'kind': 'system_op', 'record_id': entry.get('notice_row_id') if entry else None}):
+                        await context.bot.send_message(chat_id=update.effective_chat.id, text=result,
+                            reply_markup=compression_retry_keyboard(entry) if entry else None)
         finally:
             if warning and db is not None:
                 with contextlib.suppress(Exception):
@@ -282,13 +299,16 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                         # Recording makes usage visible in refreshed history; Telegram
                         # also needs an actual send through the active channel/mirror.
                         with contextlib.suppress(Exception):
-                            await send_token_usage_message(
-                                context, update.effective_chat.id, usage, elapsed)
+                            with presentation_turn(None):
+                                await send_token_usage_message(
+                                    context, update.effective_chat.id, usage, elapsed)
             finally:
                 try:
                     publish_conversation_event(context, {'type': 'compression_state', 'busy': False, 'committed': changed})
                 finally:
                     restore_mirror()
+                    if output is not None:
+                        await output.close()
 
 
 async def cmd_show_info(update: Update, context: ContextTypes.DEFAULT_TYPE):

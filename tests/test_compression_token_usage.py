@@ -43,6 +43,11 @@ class TelegramProbe:
         return self.message(text)
 
     async def edit_message_text(self, text, **kwargs):
+        if self.fail_summary and SUMMARY in text:
+            raise OSError('Telegram summary delivery unavailable')
+        serializable = {key: value.to_dict() if hasattr(value, 'to_dict') else value
+                        for key, value in kwargs.items()}
+        self.sent.append({'text': text, 'operation': 'edit', **serializable})
         return self.message(text)
 
     async def edit_message_reply_markup(self, **kwargs):

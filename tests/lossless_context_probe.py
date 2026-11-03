@@ -388,7 +388,7 @@ async def live_stop(bot, root):
             closed = asyncio.Event()
             async def stream(*a, **k):
                 try:
-                    yield 'PARTIAL-NEVER-SHOWN'
+                    yield 'PARTIAL-UNCOMMITTED'
                     if mode == 'stop': bot.get_or_create_stop_event().set()
                     await asyncio.Event().wait()
                 finally:
@@ -398,7 +398,8 @@ async def live_stop(bot, root):
                 await h.compress()
             assert closed.is_set()
             assert_preserved(before, await h.db.get_compression_snapshot())
-            assert 'PARTIAL-NEVER-SHOWN' not in json.dumps(h.drain_frames())
+            assert not any(row['msg_type']=='ai_reply' and 'PARTIAL-UNCOMMITTED' in row['content']
+                           for row in await h.db.get_global_messages(1000))
             results[mode] = True
     return results
 
@@ -439,7 +440,8 @@ async def export_before_compression_status(bot, root):
             archives = [i for i, f in enumerate(frames)
                         if f['type'] == 'document' and f.get('filename') == '系统记忆.zip']
             statuses = [i for i, f in enumerate(frames)
-                        if f['type'] == 'message' and f.get('text', '').startswith('正在压缩')]
+                        if f['type'] == 'message' and f.get('text', '') in
+                        {'前台流式输出中...', '后台流式输出中...', '非流式输出中...'}]
             if mode == 'export_failure':
                 assert not archives and not statuses and not h.requests
             else:

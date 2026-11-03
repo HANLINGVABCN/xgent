@@ -67,7 +67,7 @@ class CompressionRequestTests(unittest.TestCase):
     def test_unsupported_binary_is_not_degraded_to_a_filename(self):
         self.check('blocked_binary', 'lossless_context_probe')
 
-    def test_live_stream_stop_and_timeout_do_not_show_or_persist_partial_summaries(self):
+    def test_live_stream_stop_and_timeout_never_commit_partial_summaries(self):
         self.check('live_stop', 'lossless_context_probe', 2)
 
     def test_archive_is_sent_before_compression_status_including_retry(self):
