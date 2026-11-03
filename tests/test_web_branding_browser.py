@@ -51,7 +51,7 @@ def active_avatar(value):
 
 
 def save(page):
-    page.get_by_role('button', name='保存品牌设置', exact=True).click()
+    page.get_by_role('button', name='保存设置', exact=True).click()
     page.get_by_text('品牌设置已保存，其他网页设备同步生效。', exact=True).wait_for()
 
 
@@ -80,7 +80,7 @@ def test_six_presets_exact_geometry_and_default_github_logo(branding_page, brows
     page.get_by_role('radio', name='自定义', exact=True).click()
     assert code(page).input_value() == ''
     assert logo(page).locator('svg').count() == 0
-    page.get_by_role('button', name='取消品牌预览', exact=True).click()
+    preset(page, '4-B').click()
     assert name(page).input_value() == 'XGent'
     assert '#38bdf8' in code(page).input_value()
 
@@ -183,7 +183,7 @@ def test_save_failure_preserves_editor_and_retry_then_updates_other_device_and_l
     preset(page, '4-A').click()
     before = code(page).input_value()
     page.route('**/api/config', lambda route: route.fulfill(status=503, json={'error': '保存暂时不可用'}) if route.request.method == 'POST' else route.continue_())
-    page.get_by_role('button', name='保存品牌设置', exact=True).click()
+    page.get_by_role('button', name='保存设置', exact=True).click()
     page.get_by_text('保存暂时不可用', exact=True).wait_for()
     assert name(page).input_value() == '跨设备品牌' and code(page).input_value() == before
     assert current_brand(browser_context, base) == DEFAULT_BRANDING
@@ -272,3 +272,75 @@ def test_avatar_save_keeps_unsaved_system_name_and_merges_other_device_library(b
     assert name(page).input_value() == '尚未保存的系统名'
     save(page)
     assert current_brand(browser_context, base)['name'] == '尚未保存的系统名'
+
+
+def test_presets_are_readonly_and_removed_buttons_stay_absent(branding_page):
+    page = branding_page
+    assert page.get_by_role('button', name='恢复默认 4-B', exact=True).count() == 0
+    assert page.get_by_role('button', name='取消品牌预览', exact=True).count() == 0
+    assert page.get_by_role('button', name='保存品牌设置', exact=True).count() == 0
+    for identifier, _ in PRESETS:
+        preset(page, identifier).click()
+        value = code(page).input_value()
+        assert code(page).evaluate('node=>node.readOnly')
+        code(page).focus()
+        page.keyboard.type('MUST_NOT_EDIT_PRESET')
+        assert code(page).input_value() == value
+    assert page.locator('.brand-avatar-delete').count() == 0
+    page.get_by_role('radio', name='自定义', exact=True).click()
+    assert not code(page).evaluate('node=>node.readOnly')
+    code(page).fill('<svg viewBox="0 0 32 32"/>')
+    assert code(page).input_value() == '<svg viewBox="0 0 32 32"/>'
+
+
+def test_custom_avatar_delete_confirmation_sync_and_default_fallback(branding_page, browser_context, workspace_url, tmp_path):
+    page = branding_page
+    base = workspace_url['url']
+    items = [
+        {'id': 'first-avatar', 'name': '第一个', 'mode': 'custom', 'source': '<div style="background:orange;width:100%;height:100%">A</div>'},
+        {'id': 'active-avatar', 'name': '正在使用', 'mode': 'custom', 'source': '<div style="background:cyan;width:100%;height:100%">B</div>'},
+    ]
+    value = {**DEFAULT_BRANDING, 'mode': 'custom', 'avatar_id': 'active-avatar', 'avatars': items}
+    assert browser_context.request.post(base + '/api/config', data={'key': 'web_branding', 'value': value}).ok
+    page.reload()
+    page.locator('.branding-form').wait_for()
+    assert page.locator('.brand-avatar-delete').count() == 2
+    remove = page.get_by_role('button', name='删除头像：第一个', exact=True)
+    page.once('dialog', lambda dialog: dialog.dismiss())
+    remove.click()
+    assert current_brand(browser_context, base) == value
+    assert page.get_by_role('radio', name='第一个', exact=True).count() == 1
+
+    def confirm_with_concurrent_avatar(dialog):
+        assert '第一个' in dialog.message
+        latest = current_brand(browser_context, base)
+        latest['avatars'].append({'id': 'another-device', 'name': '另一设备', 'mode': 'custom', 'source': '<svg viewBox="0 0 32 32"/>'})
+        assert browser_context.request.post(base + '/api/config', data={'key': 'web_branding', 'value': latest}).ok
+        dialog.accept()
+
+    page.once('dialog', confirm_with_concurrent_avatar)
+    remove.click()
+    page.get_by_text('头像已删除。', exact=True).wait_for()
+    stored = current_brand(browser_context, base)
+    assert stored['avatar_id'] == 'active-avatar'
+    assert {item['id'] for item in stored['avatars']} == {'active-avatar', 'another-device'}
+    assert page.get_by_role('radio', name='第一个', exact=True).count() == 0
+    page.once('dialog', lambda dialog: dialog.accept())
+    page.get_by_role('button', name='删除头像：正在使用', exact=True).click()
+    page.get_by_text('头像已删除。', exact=True).wait_for()
+    page.wait_for_function('window.XGentBranding.state.values.mode==="preset"')
+    stored = current_brand(browser_context, base)
+    assert stored['mode'] == 'preset' and stored['preset'] == '4-B' and stored['avatar_id'] == ''
+    assert [item['id'] for item in stored['avatars']] == ['another-device']
+    assert preset(page, '4-B').get_attribute('aria-checked') == 'true'
+    assert code(page).evaluate('node=>node.readOnly')
+    page.reload()
+    page.locator('.branding-form').wait_for()
+    assert page.locator('.brand-avatar-delete').count() == 1
+    assert page.get_by_role('radio', name='正在使用', exact=True).count() == 0
+    page.set_viewport_size({'width': 390, 'height': 844})
+    delete_button = page.get_by_role('button', name='删除头像：另一设备', exact=True)
+    delete_button.scroll_into_view_if_needed()
+    assert delete_button.is_visible()
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+    page.screenshot(path=str(tmp_path / 'branding-delete-mobile.png'))

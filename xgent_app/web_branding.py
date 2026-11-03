@@ -2,10 +2,12 @@
 from copy import deepcopy
 import base64
 import binascii
+import json
 import re
 from urllib.parse import unquote_to_bytes, urlsplit
 
 BRANDING_KEY = 'web_branding'
+BRANDING_DELETE_KEY = 'web_branding_delete_avatar'
 PRESET_IDS = ('4-A', '4-B', '4-C', '4-D', '4-E', '4-F')
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_CODE_CHARS = 64 * 1024
@@ -74,6 +76,8 @@ def validate_branding(value):
         identifier, label, item_mode = item.get('id'), item.get('name'), item.get('mode', 'custom')
         if not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', identifier) or identifier in identifiers:
             raise ValueError('头像 ID 无效或重复。')
+        if identifier in PRESET_IDS or identifier == 'custom':
+            raise ValueError('自定义头像 ID 不能与预设冲突。')
         if not isinstance(label, str) or not label.strip() or len(label.strip()) > 40 or re.search(r'[\x00-\x1f\x7f]', label):
             raise ValueError('头像名称需为 1–40 个可见字符。')
         if item_mode not in ('custom', 'upload'):
@@ -140,3 +144,32 @@ async def read_branding(db):
     from .web_appearance import read_appearance
     appearance = await read_appearance(db)
     return {'revision': appearance['revision'], 'branding': appearance['values'][BRANDING_KEY]}
+
+
+async def delete_avatar(db, identifier):
+    """Delete only this saved ID against the latest config in one transaction."""
+    if not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', identifier):
+        raise ValueError('头像 ID 无效。')
+    if identifier in PRESET_IDS or identifier == 'custom':
+        raise ValueError('默认头像不能删除。')
+    changed = False
+    async with db._transaction() as conn:
+        cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (?,?)',
+                                    (BRANDING_KEY, 'web_settings_revision'))
+        raw = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
+        await cursor.close()
+        value = saved_branding(raw.get(BRANDING_KEY))
+        if any(item['id'] == identifier for item in value['avatars']):
+            value['avatars'] = [item for item in value['avatars'] if item['id'] != identifier]
+            if value['avatar_id'] == identifier:
+                value.update(mode='preset', preset='4-B', source='', avatar_id='')
+            revision = int(raw.get('web_settings_revision') or 0) + 1
+            await conn.executemany('INSERT INTO config(key,value) VALUES(?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                [(BRANDING_KEY, json.dumps(value)), ('web_settings_revision', json.dumps(revision))])
+            changed = True
+    if changed:
+        db._config_cache.pop(BRANDING_KEY, None)
+        db._web_branding_cache = None
+    from .web_appearance import read_appearance
+    return await read_appearance(db)

@@ -350,7 +350,7 @@ _web_config_watch_task: Optional[asyncio.Task] = None
 
 # 网页可改的参数白名单。刻意不含提供商增删改和 API Key——那些留在 Telegram 里。
 from xgent_app.web_appearance import FONT_SETTINGS, read_appearance, write_appearance
-from xgent_app.web_branding import BRANDING_KEY, read_branding
+from xgent_app.web_branding import BRANDING_KEY, BRANDING_DELETE_KEY, read_branding, delete_avatar
 
 WEB_EDITABLE_SETTINGS = {
     *FONT_SETTINGS,
@@ -973,10 +973,11 @@ async def _web_read_settings() -> Dict[str, Any]:
 @conversation_entry()
 async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
     """写入前一律过 normalize_*，与 Telegram 菜单走同一套校验。"""
-    if key in FONT_SETTINGS or key == BRANDING_KEY:
+    if key in FONT_SETTINGS or key in {BRANDING_KEY, BRANDING_DELETE_KEY}:
         db = await BotMemoryDB.get_instance()
-        appearance = await write_appearance(db, key, value)
-        UserDataManager.set(key, appearance['values'][key])
+        appearance = await delete_avatar(db, value) if key == BRANDING_DELETE_KEY else await write_appearance(db, key, value)
+        saved_key = BRANDING_KEY if key == BRANDING_DELETE_KEY else key
+        UserDataManager.set(saved_key, appearance['values'][saved_key])
         await _sync_web_appearance(db, force=True)
         return await _web_read_settings()
     if key in {'presentation_mode', 'hide_protocol_blocks'}:

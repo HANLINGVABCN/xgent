@@ -125,6 +125,11 @@ export async function saveBranding(value) {
   const result=await response.json();if(!response.ok)throw new Error(result.error||'品牌设置保存失败');
   acceptBranding(result.settings);preview=null;applyBranding();return {...saved};
 }
+export async function deleteBrandingAvatar(id) {
+  const response=await fetch('/api/config',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'web_branding_delete_avatar',value:id})});
+  const result=await response.json();if(!response.ok)throw new Error(result.error||'头像删除失败');
+  acceptBranding(result.settings);preview=null;applyBranding();return {...saved};
+}
 export async function refreshBranding(fresh=false) {
   const response=await fetch('/api/branding'+(!fresh&&revision>=0?'?revision='+revision:''),{credentials:'same-origin',cache:'no-store'});
   if(response.ok)acceptBranding(await response.json());

@@ -13,6 +13,10 @@
 .branding-form{display:grid;gap:16px;min-width:0}
 .branding-form .wb-field{margin:0}
 .brand-avatar-strip{display:flex;gap:6px;overflow-x:auto;min-width:0;padding:2px 2px 7px;scrollbar-width:thin;overscroll-behavior-x:contain;scroll-snap-type:x proximity}
+.brand-avatar-option{position:relative;flex:0 0 58px;min-width:0;scroll-snap-align:start}
+.brand-avatar-option .brand-preset{width:100%}
+.brand-avatar-delete{position:absolute;right:0;top:0;display:grid;place-items:center;width:20px;height:20px;padding:0;line-height:1;font-size:15px;border:1px solid var(--wb-border);border-radius:50%;background:var(--wb-panel);color:var(--wb-muted);cursor:pointer}
+.brand-avatar-delete:hover,.brand-avatar-delete:focus-visible{color:var(--wb-danger);border-color:var(--wb-danger)}
 .brand-preset{display:flex;flex:0 0 58px;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:6px 3px;min-width:0;height:62px;border:1px solid var(--wb-border);border-radius:8px;background:var(--wb-bg);color:var(--wb-text);font:inherit;font-size:11px;line-height:14px;cursor:pointer;scroll-snap-align:start}
 .brand-preset:hover{background:var(--wb-soft)}
 .brand-preset[aria-checked=true]{border-color:var(--wb-accent);box-shadow:0 0 0 1px var(--wb-accent);background:var(--wb-tint)}
@@ -28,6 +32,7 @@
 .brand-code-editor>.wb-btn{position:absolute;right:8px;bottom:8px;padding:5px 12px;min-height:30px;font-size:12px}
 .branding-form textarea{display:block;resize:vertical;min-height:145px;max-height:480px;width:100%;padding:10px 12px;border:1px solid var(--wb-border);border-radius:8px;background:var(--wb-bg);color:var(--wb-text);font:12px/1.55 var(--mono);overflow-wrap:anywhere;white-space:pre-wrap;box-sizing:border-box}
 .brand-code-editor textarea{padding-bottom:46px}
+.brand-code-editor textarea[readonly]{background:var(--wb-soft)}
 .brand-file-name{color:var(--wb-muted);font-size:12px;overflow-wrap:anywhere;min-width:0}
 .brand-feedback:empty{display:none}
 @media(max-width:767px){.brand-preview-row{gap:8px}.brand-editor-preview{width:52px;height:52px}.brand-preview-row .wb-field{min-width:80px}.brand-upload-row .wb-btn{min-height:40px}}

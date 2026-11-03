@@ -8,7 +8,7 @@ import unittest
 from tests import test_conversations as base_tests
 from tests.test_full_output_web import full_output_server  # noqa: F401
 from xgent_app.web_appearance import read_appearance, write_appearance
-from xgent_app.web_branding import BRANDING_KEY, DEFAULT_BRANDING, MAX_IMAGE_BYTES, read_branding, validate_branding
+from xgent_app.web_branding import BRANDING_KEY, DEFAULT_BRANDING, MAX_IMAGE_BYTES, read_branding, validate_branding, delete_avatar
 
 
 class BrandingConfigTests(unittest.IsolatedAsyncioTestCase):
@@ -72,6 +72,21 @@ class BrandingConfigTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await write_appearance(self.db, BRANDING_KEY, invalid)
             self.assertEqual(after, await read_appearance(self.db))
+
+    async def test_deletion_only_removes_selected_id_and_is_idempotent(self):
+        first = {'id': 'first', 'name': '第一个', 'mode': 'custom', 'source': '<div>first</div>'}
+        active = {'id': 'active', 'name': '当前', 'mode': 'custom', 'source': '<svg/>'}
+        value = {**DEFAULT_BRANDING, 'name': '系统名保留', 'mode': 'custom', 'avatar_id': 'active', 'avatars': [first, active]}
+        await write_appearance(self.db, BRANDING_KEY, value)
+        removed = await delete_avatar(self.db, 'first')
+        self.assertEqual([active], removed['values'][BRANDING_KEY]['avatars'])
+        self.assertEqual('active', removed['values'][BRANDING_KEY]['avatar_id'])
+        self.assertEqual(removed, await delete_avatar(self.db, 'first'))
+        with self.assertRaises(ValueError):
+            await delete_avatar(self.db, '4-B')
+        self.assertEqual(removed, await read_appearance(self.db))
+        empty = (await delete_avatar(self.db, 'active'))['values'][BRANDING_KEY]
+        self.assertEqual({**DEFAULT_BRANDING, 'name': '系统名保留'}, empty)
 
 
 def request(server, method, path, payload=None, cookie=''):
