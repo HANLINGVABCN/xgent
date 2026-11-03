@@ -188,7 +188,7 @@ async function route(){
   rememberPage();
   state.request?.abort();state.renderSequence++;state.pendingKey=null;
   state.dirty=false;state.detailDirty=false;
-  if(state.route==='settings'&&next!=='settings')window.XGentAppearance?.cancelPreview();
+  if(state.route==='settings'&&next!=='settings'){window.XGentAppearance?.cancelPreview();window.XGentBranding?.cancelPreview();}
   if(next!=='chat'){sourceNavigationSequence++;sourceVisit='';clearSourceReader();}
   state.route=next;state.retryAfter=0;
   state.routed=true;document.body.dataset.page=next;

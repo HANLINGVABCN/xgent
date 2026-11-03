@@ -1,3 +1,4 @@
+import {acceptBranding} from './branding.js';
 const defaults = {web_message_font_size:16, web_ui_font_size:14, web_terminal_font_size:13};
 const limits = {web_message_font_size:[12,24], web_ui_font_size:[12,20], web_terminal_font_size:[10,24]};
 let state = {revision:-1, values:{...defaults}}, preview = null;
@@ -8,6 +9,7 @@ function apply(values) {
   document.getElementById('terminal-iframe')?.contentWindow?.postMessage({type:'xgent-fonts',values},location.origin);
 }
 function accept(data) {
+  acceptBranding(data);
   if (!data?.values || !Number.isSafeInteger(data.revision) || data.revision<state.revision) return;
   const values={...state.values};
   for (const [key,[min,max]] of Object.entries(limits)) {

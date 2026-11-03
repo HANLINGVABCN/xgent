@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>XGent Web Chat</title>
+<link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
 <script src="/vendor/telegram-web-app.js"></script>
 <script src="/vendor/marked.umd.js"></script>
 <link rel="stylesheet" href="/assets/chat.css">
@@ -12,6 +13,7 @@
 <link rel="stylesheet" href="/assets/global-search.css">
 <link rel="stylesheet" href="/assets/reading.css">
 <link rel="stylesheet" href="/assets/knowledge.css">
+<link rel="stylesheet" href="/assets/branding.css">
 </head>
 <body data-page="chat">
 
@@ -52,7 +54,7 @@
 
 <aside id="wb-nav" aria-label="对话与工作台">
   <div class="conv-brand-row">
-    <a class="wb-brand" href="#/chat"><span class="wb-mark">x</span><span>XGent</span></a>
+    <a class="wb-brand" href="#/chat"><span class="wb-mark" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="29" height="29" alt=""></span><span data-brand-name>XGent</span></a>
     <button id="conversation-drawer-close" class="conv-icon-button" type="button" aria-label="关闭对话列表" title="关闭对话列表"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <button id="conversation-new" class="conv-new" type="button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 5.5 18.5.5l5 5-5 5M16 3 5 14l-1 6 6-1L21 8M12 4H5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2v-7" transform="translate(1 0) scale(.86)"/></svg><span>新对话</span></button>
@@ -91,7 +93,7 @@
   <div class="header-info"><div class="header-text">
     <h1 id="wb-conversation-title" title="新对话">新对话</h1><span id="wb-page-title" hidden></span>
     <div class="bot-status" id="status-text"><span class="conn-dot" id="conn-dot"></span> 在线</div>
-    <span class="bot-name" hidden>XGent</span><span id="bot-avatar" hidden>X</span>
+    <span class="bot-name" data-brand-name hidden>XGent</span><span id="bot-avatar" data-brand-logo hidden>X</span>
   </div><span id="conversation-current-status" class="conv-title-status" hidden>正在生成</span></div>
   <button id="btn-theme" class="icon-btn" type="button" title="切换主题" aria-label="切换主题"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-moon"/></svg></button>
   <button id="btn-terminal" class="icon-btn" type="button" title="终端" aria-label="终端"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-terminal"/></svg></button>
@@ -141,7 +143,7 @@
 <div id="drop-overlay">
   <div class="drop-box">
     <svg class="icon" viewBox="0 0 24 24"><use href="#i-attach"/></svg>
-    <h3>释放文件以上传至 XGent</h3>
+    <h3 data-brand-name data-brand-prefix="释放文件以上传至 ">释放文件以上传至 XGent</h3>
     <p>支持图片、音频、视频及各类文档</p>
   </div>
 </div>
@@ -192,7 +194,7 @@
 <div id="terminal-modal">
   <div class="term-head">
     <button id="btn-close-terminal" class="icon-btn" title="返回聊天" aria-label="返回聊天"><svg class="icon" viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
-    <strong>XGent 终端控制台</strong>
+    <strong data-brand-name data-brand-suffix=" 终端控制台">XGent 终端控制台</strong>
   </div>
   <iframe id="terminal-iframe" src="about:blank"></iframe>
 </div>
@@ -201,7 +203,7 @@
 <div id="settings">
   <div class="settings-head">
     <button id="btn-close-settings" class="icon-btn" aria-label="返回"><svg class="icon" viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
-    <strong>XGent 设置中心</strong>
+    <strong data-brand-name data-brand-suffix=" 设置中心">XGent 设置中心</strong>
   </div>
   <div class="settings-body">
     <div class="section-label">对话与思考参数</div>
@@ -229,8 +231,8 @@
 <!-- 登录弹窗 -->
 <dialog id="login">
   <div class="login-card">
-    <div class="login-icon">X</div>
-    <h2>XGent Web</h2>
+    <div class="login-icon" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="58" height="58" alt=""></div>
+    <h2 data-brand-name data-brand-suffix=" Web">XGent Web</h2>
     <p class="login-sub" id="login-sub">请输入访问密码以继续</p>
     <div class="err" id="login-err"></div>
     <input type="password" id="password" placeholder="访问密码" autocomplete="current-password">

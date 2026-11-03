@@ -350,9 +350,11 @@ _web_config_watch_task: Optional[asyncio.Task] = None
 
 # 网页可改的参数白名单。刻意不含提供商增删改和 API Key——那些留在 Telegram 里。
 from xgent_app.web_appearance import FONT_SETTINGS, read_appearance, write_appearance
+from xgent_app.web_branding import BRANDING_KEY, read_branding
 
 WEB_EDITABLE_SETTINGS = {
     *FONT_SETTINGS,
+    BRANDING_KEY,
     'thinking_level', 'stream_mode', 'response_mode', 'web_response_mode', 'telegram_response_mode', 'agent_mode', 'agent_call_mode', 'text_stitch_mode',
     'global_depth', 'agent_max_iterations', 'stream_timeout', 'chat_model',
     'disabled_skills', 'hidden_skills', 'skill_state', 'agent_command_timeout', 'idle_message_interval',
@@ -971,7 +973,7 @@ async def _web_read_settings() -> Dict[str, Any]:
 @conversation_entry()
 async def _web_write_setting(key: str, value: Any) -> Dict[str, Any]:
     """写入前一律过 normalize_*，与 Telegram 菜单走同一套校验。"""
-    if key in FONT_SETTINGS:
+    if key in FONT_SETTINGS or key == BRANDING_KEY:
         db = await BotMemoryDB.get_instance()
         appearance = await write_appearance(db, key, value)
         UserDataManager.set(key, appearance['values'][key])
@@ -1975,6 +1977,7 @@ async def start_web_chat_if_enabled(app: Optional[Any] = None, *,
         read_conversations=get_conversations().state,
         read_history_message=_web_read_history_message,
         read_settings=_web_read_settings,
+        read_branding=_web_read_branding,
         write_setting=_web_write_setting,
         # 分通道健康详情。同步回调（runtime.runtime_health 不 await 任何东西）：
         # 这个接口最需要被用到的时刻，正是事件循环或某个通道出问题的时刻。
@@ -2235,6 +2238,10 @@ async def _web_scoped_call(coro, conversation_id, outbox, *, execution=False, re
 
 
 _web_appearance_revision = -1
+
+
+async def _web_read_branding():
+    return await read_branding(await BotMemoryDB.get_instance())
 
 async def _sync_web_appearance(db, force=False):
     global _web_appearance_revision

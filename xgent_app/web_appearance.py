@@ -1,5 +1,6 @@
-"""Shared, validated Web typography stored in SQLite configuration."""
+"""Shared, validated Web typography and branding in SQLite configuration."""
 import json
+from .web_branding import BRANDING_KEY, branding_for_revision, validate_branding
 
 FONT_SETTINGS = {
     'web_message_font_size': (16, 12, 24),
@@ -26,11 +27,13 @@ async def read_appearance(db):
             values[key] = validate_font(key, raw.get(key, default))
         except (ValueError, TypeError, OverflowError):
             values[key] = default
-    return {'revision': int(raw.get('web_settings_revision') or 0), 'values': values}
+    revision = int(raw.get('web_settings_revision') or 0)
+    values[BRANDING_KEY] = await branding_for_revision(db, conn, revision)
+    return {'revision': revision, 'values': values}
 
 
 async def write_appearance(db, key, value):
-    value = validate_font(key, value)
+    value = validate_branding(value) if key == BRANDING_KEY else validate_font(key, value)
     async with db._transaction() as conn:
         cursor = await conn.execute("SELECT value FROM config WHERE key='web_settings_revision'")
         row = await cursor.fetchone()
@@ -38,4 +41,6 @@ async def write_appearance(db, key, value):
         for field, result in ((key,value),('web_settings_revision',revision)):
             await conn.execute('INSERT INTO config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (field,json.dumps(result)))
     db._config_cache.pop(key, None)
+    if key == BRANDING_KEY:
+        db._web_branding_cache = None
     return await read_appearance(db)

@@ -138,9 +138,11 @@ class WebChatConfig:
         upload_directory: Optional[str] = None,
         file_transfer_directory: Optional[str] = None,
         security_api: Optional[Callable[..., Any]] = None,
+        read_branding: Optional[Callable[[], Any]] = None,
     ):
         self.accept_text = accept_text
         self.security_api = security_api
+        self.read_branding = read_branding
         self.queue_api = queue_api
         self.workbench = workbench
         self.host = host
@@ -372,6 +374,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._handle_media_download(path[len("/api/media/"):])
             elif path == "/api/session":
                 self._send_json({"authenticated": self._is_authenticated()}, extra_headers={'Cache-Control': 'private, no-store'})
+            elif path == '/api/branding':
+                self._handle_read_branding()
             elif path == '/api/security/2fa':
                 self._handle_security('GET')
             elif path == '/api/queue':
@@ -469,7 +473,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # --- 处理器 ---
 
     def _serve_workbench_asset(self, path: str) -> None:
-        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "branding.js", "branding-settings.js", "branding.css", "logo.svg", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
@@ -486,7 +490,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(304 if self.headers.get('If-None-Match') == etag else 200)
         self.send_header('ETag', etag)
         self.send_header('Cache-Control', 'no-cache')
-        self.send_header('Content-Type', 'text/javascript; charset=utf-8' if name.endswith('.js') else 'text/css; charset=utf-8')
+        content_type = ('text/javascript; charset=utf-8' if name.endswith('.js') else
+                        'image/svg+xml' if name.endswith('.svg') else 'text/css; charset=utf-8')
+        self.send_header('Content-Type', content_type)
         self.send_header('X-Content-Type-Options', 'nosniff')
         if self.headers.get('If-None-Match') != etag:
             self.send_header('Content-Length', str(len(body)))
@@ -769,10 +775,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         self._send_json(self._run_coro(self.config.read_settings()))
 
+    def _handle_read_branding(self) -> None:
+        # Public login appearance is an explicit allowlist, not general config.
+        from .web_branding import DEFAULT_BRANDING, saved_branding, public_branding
+        result = self._run_coro(self.config.read_branding()) if self.config.read_branding else {}
+        branding = saved_branding(result.get('branding', DEFAULT_BRANDING))
+        if not self._is_authenticated():
+            branding = public_branding(branding)
+        revision = int(result.get('revision') or 0)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        payload = ({'revision': revision, 'unchanged': True} if query.get('revision') == [str(revision)]
+                   else {'revision': revision, 'branding': branding})
+        self._send_json(payload, extra_headers={'Cache-Control': 'no-store'})
+
     def _handle_write_config(self) -> None:
         if not self._require_auth():
             return
-        data = self._read_json()
+        from .web_branding import MAX_BRANDING_REQUEST
+        data = self._read_json(MAX_BRANDING_REQUEST)
         if data is None:
             return
         key = str(data.get("key") or "")

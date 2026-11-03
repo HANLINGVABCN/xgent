@@ -1,5 +1,6 @@
 import {syncAskForm} from './ask-form.js';
 import {installCommandSeries} from './command-series.js';
+import {decorateBrandAuthor} from './branding.js';
 (function () {
   "use strict";
 
@@ -928,8 +929,7 @@ import {installCommandSeries} from './command-series.js';
       entry.head.dataset.modelError='true';
       const author=entry.head.querySelector('.bubble-author');
       author.replaceChildren();
-      const icon=document.createElement('span');icon.className='bubble-author-icon';icon.textContent='X';
-      author.append(icon,document.createTextNode(' XGent'));
+      decorateBrandAuthor(author);
       if(!entry.aiMeta){entry.aiMeta=document.createElement('span');entry.aiMeta.className='ai-generation-meta';entry.head.append(entry.aiMeta);}
     }
   }
@@ -986,6 +986,7 @@ import {installCommandSeries} from './command-series.js';
       var iconText = role === "ai" ? "X" : "◇";
       var authorName = role === "ai" ? "XGent" : role === "user" ? "你" : (role === "cmd" ? "工具结果" : "系统");
       head.innerHTML = '<div class="bubble-author"><span class="bubble-author-icon' + iconCls + '">' + iconText + '</span> ' + authorName + '</div>';
+      if(role==='ai')decorateBrandAuthor(head.querySelector('.bubble-author'));
       if (role === "ai") {
         var aiMeta = document.createElement("span");
         aiMeta.className = "ai-generation-meta";
@@ -3465,7 +3466,7 @@ import {installCommandSeries} from './command-series.js';
   function resetLoginFactor() {
     loginChallenge = null;document.getElementById('login-code').value='';document.getElementById('login-code').hidden=true;
     document.getElementById('password').value='';document.getElementById('password').hidden=false;document.getElementById('login-back').hidden=true;
-    document.getElementById('btn-login').textContent='登 录';loginSub.textContent='请输入访问密码以继续使用 XGent Web';
+    document.getElementById('btn-login').textContent='登 录';loginSub.textContent='请输入访问密码以继续使用 '+(window.XGentBranding?.name||'XGent')+' Web';
   }
   function tryLogin(payload) {
     return api('/api/login', {method:'POST',body:JSON.stringify(payload)}).then(function(data){
@@ -3489,7 +3490,7 @@ import {installCommandSeries} from './command-series.js';
         loginDlg.showModal();
       });
     }
-    loginSub.textContent = "请输入访问密码以继续使用 XGent Web";
+    loginSub.textContent = '请输入访问密码以继续使用 '+(window.XGentBranding?.name||'XGent')+' Web';
     loginDlg.showModal();
   }).catch(function () { loginDlg.showModal(); });
 

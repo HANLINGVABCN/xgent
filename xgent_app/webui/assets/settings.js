@@ -1,13 +1,14 @@
 import {el,button,field,select,check,wb,message,tag} from './components.js';
 import {dataBackupCards} from './data-backups.js';
 import {twoFactorCard} from './two-factor.js';
+import {brandingCard} from './branding-settings.js';
 
 export async function settingsView({logout,boot,health,state,render,dialog,closeDialog,submit,dirtyForm,confirmAction,refreshBootstrap,setTheme,filter,heading,card,actions}) {
   const settings=boot.settings;
-  const page=el('div',{},heading('设置','网页与 Bot 回复方式分别保存；其他业务设置与 Telegram、CLI 共享。字号跨网页设备同步，主题与动效仅影响当前浏览器。',[button('退出登录',logout,'danger')]));
+  const page=el('div',{},heading('设置','网页与 Bot 回复方式分别保存；其他业务设置与 Telegram、CLI 共享。品牌与字号保存到配置并跨网页设备同步，主题与动效仅影响当前浏览器。',[button('退出登录',logout,'danger')]));
   const sections=[['appearance','外观'],['conversation','对话与记忆'],['agent','Agent'],['web','Web 与安全'],['data','数据与备份'],['health','系统状态']];
   const active=filter('section')||'appearance';
-  page.append(el('div',{class:'wb-tabs',role:'tablist'},sections.map(([id,title])=>el('button',{role:'tab','aria-selected':id===active,class:id===active?'active':'',onclick:()=>{if(state.dirty&&!confirm('尚有未保存设置，放弃修改？'))return;state.dirty=false;if(active==='appearance'&&id!==active)window.XGentAppearance?.cancelPreview();filter('section',id);render();}},title))));
+  page.append(el('div',{class:'wb-tabs',role:'tablist'},sections.map(([id,title])=>el('button',{role:'tab','aria-selected':id===active,class:id===active?'active':'',onclick:()=>{if(state.dirty&&!confirm('尚有未保存设置，放弃修改？'))return;state.dirty=false;if(active==='appearance'&&id!==active){window.XGentAppearance?.cancelPreview();window.XGentBranding?.cancelPreview();}filter('section',id);render();}},title))));
   const grid=el('div',{class:'wb-settings-grid'});
   page.classList.add('wb-preferences-page');
   if(active==='data'){
@@ -17,6 +18,7 @@ export async function settingsView({logout,boot,health,state,render,dialog,close
     return page;
   }
   if(active==='appearance'){
+    grid.append(brandingCard({card,actions,state,submit,dirtyForm}));
     const appearance=card('文字字号',el('p',{},'消息、界面和网页终端字号都在这里调整。预览只影响本页，保存后写入服务端配置并同步到其他网页设备。'));
     const theme=select('主题','theme',[{value:'system',label:'跟随系统'},{value:'light',label:'浅色'},{value:'dark',label:'深色'}],localStorage.getItem('xgent-theme')||'system');theme.querySelector('select').onchange=e=>setTheme(e.target.value);
     const reduce=check('减少界面动效','reduce',localStorage.getItem('xgent-reduce-motion')==='1');reduce.onchange=e=>{localStorage.setItem('xgent-reduce-motion',e.target.checked?'1':'0');document.body.classList.toggle('wb-reduce-motion',e.target.checked);};

@@ -4,13 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>XGent Terminal</title>
+<link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
 <script src="/vendor/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/vendor/xterm.min.css">
 <script src="/vendor/xterm.min.js"></script>
 <script src="/vendor/addon-fit.min.js"></script>
 <link rel="stylesheet" href="/assets/terminal.css">
+<link rel="stylesheet" href="/assets/branding.css">
 </head>
-<body>
+<body data-brand-terminal="true">
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
@@ -28,8 +30,8 @@
 <div id="bar">
   <button class="icon-btn" id="backBtn" title="返回聊天" aria-label="返回聊天"><svg class="icon" viewBox="0 0 24 24"><use href="#i-back"/></svg></button>
   <div class="brand">
-    <div class="dot-mark"><svg class="icon" viewBox="0 0 24 24"><use href="#i-terminal"/></svg></div>
-    <span class="title">XGent 终端</span>
+    <div class="dot-mark" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="24" height="24" alt=""></div>
+    <span class="title" data-brand-name data-brand-suffix=" 终端">XGent 终端</span>
   </div>
   <button class="icon-btn" id="fontMinusBtn" title="缩小字号" aria-label="缩小字号">A-</button>
   <button class="icon-btn" id="fontPlusBtn" title="放大字号" aria-label="放大字号">A+</button>
