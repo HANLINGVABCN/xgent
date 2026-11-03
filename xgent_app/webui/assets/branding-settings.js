@@ -10,8 +10,8 @@ export function brandingCard({card,actions,state,dirtyForm}) {
   const list=el('div',{class:'brand-avatar-strip',role:'radiogroup','aria-label':'头像列表'});
   const preview=el('span',{class:'brand-editor-preview','aria-hidden':'true'});
   const avatarName=field('头像名称','avatar_name','','text');
-  const avatarInput=avatarName.querySelector('input');avatarInput.maxLength=40;avatarInput.placeholder='给头像命名';
-  const nameSave=button('命名',()=>persist(true));
+  const avatarInput=avatarName.querySelector('input');avatarInput.maxLength=40;avatarInput.placeholder='输入头像名称';
+  const nameSave=button('保存',()=>persist(true));nameSave.setAttribute('aria-label','保存头像名称');
   const code=el('textarea',{name:'brand_source',rows:8,spellcheck:'false',placeholder:'输入 SVG／HTML 代码，或粘贴图片地址','aria-label':'Logo 代码或图片链接'});
   const codeSave=button('保存',()=>persist(true), 'primary');codeSave.setAttribute('aria-label','保存头像');
   const codeLabel=el('label',{class:'wb-field brand-code-field'},el('span',{},'Logo 代码或图片链接'),el('div',{class:'brand-code-editor'},code,codeSave));
@@ -89,12 +89,12 @@ export function brandingCard({card,actions,state,dirtyForm}) {
   preview.addEventListener('brand-image-error',()=>feedback.replaceChildren(message('图片暂时无法读取，请检查地址或换一张图片。')));
   form.append(name,list,el('div',{class:'brand-preview-row'},preview,avatarName,nameSave),codeLabel,
     el('div',{class:'brand-upload-row'},button('上传本地图片',()=>file.click()),file,fileName),
-    el('p',{class:'wb-note'},'代码框内“保存”将头像加入上方列表。“命名”保存头像名称。图片最多 8 MB，代码最多 65,536 个字符。'),feedback,
+    el('p',{class:'wb-note'},'代码框内“保存”将头像加入上方列表，头像名称旁“保存”确认名称。图片最多 8 MB，代码最多 65,536 个字符。'),feedback,
     actions(button('恢复默认 4-B',()=>{load({...initial(),...defaultBranding,avatars:initial().avatars});changed();}),
       button('取消品牌预览',()=>{editing=false;state.dirty=false;cancelBrandingPreview();load(initial());feedback.replaceChildren();}),save));
   dirtyForm(form);
   form.onsubmit=event=>{event.preventDefault();persist(false);};
   form.addEventListener('brand-config-changed',()=>{if(!editing&&!busy)load(initial());});
   load(draft);
-  const result=card('品牌名称与 Logo',form);result.classList.add('branding-card');return result;
+  const result=card('',form);result.querySelector(':scope>h3')?.remove();result.classList.add('branding-card');return result;
 }

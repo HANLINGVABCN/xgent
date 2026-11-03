@@ -239,7 +239,7 @@ def test_compact_single_scroll_row_code_save_and_avatar_naming(branding_page, br
     assert stored['source'] == '' and stored['avatar_id'] == stored['avatars'][-1]['id']
     identifier = stored['avatar_id']
     page.get_by_role('textbox', name='头像名称', exact=True).fill('改名')
-    page.get_by_role('button', name='命名', exact=True).click()
+    page.get_by_role('button', name='保存头像名称', exact=True).click()
     page.get_by_text('头像已保存。', exact=True).wait_for()
     renamed = current_brand(browser_context, workspace_url['url'])
     assert len(renamed['avatars']) == 3 and renamed['avatar_id'] == identifier
