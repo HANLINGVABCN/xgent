@@ -549,9 +549,14 @@ class GeneratedAttachmentTests(unittest.TestCase):
         refs = create_generated_image_references([artifact], self.generated)
         path = Path(artifact["path"])
         path.unlink()
-        self.assertIn("missing or unreadable", self.restore([self.record(*refs)])[2][0])
+        parts, _, errors = self.restore([self.record(*refs)])
+        self.assertFalse(errors)
+        self.assertIn('附件暂不可用', str(parts))
+        self.assertIn("missing or unreadable", str(parts))
         path.write_bytes(b"corrupted")
-        self.assertIn("has changed", self.restore([self.record(*refs)])[2][0])
+        parts, _, errors = self.restore([self.record(*refs)])
+        self.assertFalse(errors)
+        self.assertIn("has changed", str(parts))
         with self.assertRaisesRegex(AttachmentContextError, "Cannot parse"):
             create_generated_image_references([artifact], self.generated)
 

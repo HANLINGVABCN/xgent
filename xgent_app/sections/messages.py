@@ -2342,7 +2342,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                             cancel_task_quietly=cancel_task_quietly,
                         )
                         if sendfile_notice:
-                            await persist_agent_result(
+                            file_record_id = await persist_agent_result(
                                 recorder=GlobalRecorder,
                                 message_type=MessageType.AGENT_RESULT,
                                 database=db,
@@ -2350,6 +2350,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                                 chat_id=update.effective_chat.id,
                                 notice=sendfile_notice,
                             )
+                            await publish_saved_reply(context, file_record_id)
                             await add_tool_context(
                                 _ctx_with_notice(build_sendfile_context_message(sendfile_notice), smart_notice)
                             )

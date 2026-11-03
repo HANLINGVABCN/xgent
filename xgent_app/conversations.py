@@ -135,6 +135,14 @@ def set_reply_generation(provider, model):
             'provider':str(provider or ''),'model':str(model or ''),'generated_at':time.time()})
 
 
+def reply_generation_snapshot():
+    scope = current_scope(required=False)
+    value = _reply_generation.get()
+    if value and scope and value['conversation_id'] == scope.conversation_id and value['run_id'] == scope.run_id:
+        return {key: value[key] for key in ('provider', 'model', 'generated_at')}
+    return None
+
+
 def stamp_frame(frame: dict) -> dict:
     from .message_policy import stamp_frame_policy
     frame = stamp_frame_policy(frame)
@@ -147,7 +155,8 @@ def stamp_frame(frame: dict) -> dict:
     if (scope.run_id and generated and generated['run_id'] == scope.run_id
             and generated['conversation_id'] == scope.conversation_id
             and frame.get('type') in {'message','edit','document','photo'}
-            and frame.get('msg_type') in {'ai_reply','media_reply'}):
+            and (frame.get('msg_type') in {'ai_reply','media_reply'} or
+                 frame.get('msg_type') == 'runtime_error' and (frame.get('web_display') or {}).get('model_error') is True)):
         result.setdefault('ai_generation', {key:generated[key] for key in ('provider','model','generated_at')})
     return result
 

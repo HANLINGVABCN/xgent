@@ -1,7 +1,8 @@
 // Fold only completed runs of command-only replies. Original message nodes stay in place.
-export function installCommandSeries(log, {conversation, currentRun}) {
+export function installCommandSeries(log, {conversation, currentRun, captureAnchor, restoreAnchor, scrollAdjusted}) {
   const controls=new Map(),completed=new Set();
   const commandCounts=new WeakMap();
+  const memberships=new WeakMap();
   let queued=false,positionQueued=false;
   let pointer=null;
   const touchControls=window.matchMedia('(hover: none) and (pointer: coarse)');
@@ -13,6 +14,7 @@ export function installCommandSeries(log, {conversation, currentRun}) {
   const entry=row=>row._chatEntry;
   const owner=row=>(row.dataset.presentationConversationId||conversation()||'global_memory')+':'+
     (row.dataset.replyGroupId||row.dataset.runId||row.dataset.turnId||'legacy');
+  const runKey=row=>row.dataset.runId?(row.dataset.presentationConversationId||conversation()||'global_memory')+':'+row.dataset.runId:null;
   const rows=()=>Array.from(log.children).filter(node=>node.classList.contains('msg-row'));
   const commands=row=>{
     const value=entry(row),segments=value?.webDisplay?.segments;
@@ -104,14 +106,21 @@ export function installCommandSeries(log, {conversation, currentRun}) {
   }
   function repaint(){
     queued=false;
+    const anchor=captureAnchor?.();
+    for(const control of controls.values())for(const row of control.members)memberships.delete(row);
     const messages=rows();stopNotices(messages);
     const ended=new Set(completed),waiting=new Set(),summaries=new Map();
     for(const row of messages){
       const value=entry(row),key=owner(row);
-      if(value?.replyComplete===true&&value?.loadedFromHistory)ended.add(key);
-      if(value?.askState?.snapshot?.status==='pending')waiting.add(key);
+      if(value?.replyComplete===true&&value?.loadedFromHistory){
+        ended.add(key);completed.add(key);
+        if(runKey(row))completed.add(runKey(row));
+      }
+      if(completed.has(runKey(row)))ended.add(key);
+      if(value?.askState?.snapshot?.status==='pending'){waiting.add(key);if(runKey(row))waiting.add(runKey(row));}
       if(value?.executionSummary)summaries.set(key,value.executionSummary.items||[]);
     }
+    while(completed.size>1000)completed.delete(completed.values().next().value);
     const sequences=[];let sequence=null;
     function finish(){if(sequence&&sequence.replies.length>1)sequences.push(sequence);sequence=null;}
     for(const row of messages){
@@ -133,11 +142,22 @@ export function installCommandSeries(log, {conversation, currentRun}) {
     for(const group of sequences){
       const running=currentRun();
       const isCurrent=running&&group.members.some(row=>row.dataset.runId===running.run_id);
-      if(!ended.has(group.owner)||waiting.has(group.owner)||isCurrent&&!completed.has(group.owner))continue;
+      if(!ended.has(group.owner)||waiting.has(group.owner)||group.members.some(row=>waiting.has(runKey(row)))||
+          isCurrent&&!completed.has((running.conversation_id||conversation()||'global_memory')+':'+running.run_id))continue;
       const first=group.replies[0];
       const key=group.owner+':'+(first.dataset.recordId||first.dataset.runId||first.dataset.turnId||group.replies.indexOf(first));
-      retained.add(key);
       let control=controls.get(key);
+      if(!control){
+        // The first loaded round moves when a page extends the same sequence.
+        // Keep its existing control and user choice while the ranges overlap.
+        const overlap=Array.from(controls.values()).find(value=>value.owner===group.owner&&
+          !retained.has(value.key)&&value.members.some(row=>group.members.includes(row)));
+        if(overlap){
+          controls.delete(overlap.key);control=overlap;control.key=key;controls.set(key,control);
+          save(key,control.collapsed);
+        }
+      }
+      retained.add(key);
       if(!control){
         const node=document.createElement('div');node.className='command-series-control';
         const button=document.createElement('button');button.type='button';button.className='command-series-toggle';
@@ -145,15 +165,24 @@ export function installCommandSeries(log, {conversation, currentRun}) {
         const label=document.createElement('em');button.append(arrow,label);
         const close=document.createElement('button');close.type='button';close.className='command-series-close';close.textContent='收起';
         close.hidden=true;close.title='收起这段命令';close.setAttribute('aria-label','收起这段命令');node.append(button);document.body.append(close);
-        control={node,button,label,close,members:[],collapsed:preferences[key]!==false};controls.set(key,control);
+        control={node,button,label,close,key,owner:group.owner,members:[],collapsed:preferences[key]!==false};controls.set(key,control);
         button.onclick=event=>{
-          save(key,false);setCollapsed(control,false);
+          const anchor={row:control.node,top:control.node.getBoundingClientRect().top};
+          save(control.key,false);setCollapsed(control,false);
+          restoreAnchor?.(anchor);
           if(event.detail===0&&!touchControls.matches){control.close.hidden=false;control.close.focus({preventScroll:true});}
         };
-        close.onclick=()=>{save(key,true);setCollapsed(control,true);control.button.focus();};
+        close.onclick=()=>{
+          const top=control.node.getBoundingClientRect().top,viewport=log.getBoundingClientRect();
+          save(control.key,true);setCollapsed(control,true);
+          if(top>=viewport.top&&top<=viewport.bottom)restoreAnchor?.({row:control.node,top});
+          else{control.node.scrollIntoView({block:'nearest'});scrollAdjusted?.();}
+          control.button.focus({preventScroll:true});
+        };
       }
       for(const old of control.members)if(!group.members.includes(old))old.classList.remove('command-series-collapsed','command-series-anchor');
       control.members=group.members;
+      for(const row of control.members)memberships.set(row,control);
       const bubble=entry(first).bubble,head=entry(first).head;
       const before=head?head.nextSibling:bubble.firstChild;
       if(before!==control.node)bubble.insertBefore(control.node,before);
@@ -179,15 +208,25 @@ export function installCommandSeries(log, {conversation, currentRun}) {
     for(const row of measuredRows)if(!members.has(row)){resizeObserver.unobserve(row);measuredRows.delete(row);}
     for(const row of members)if(!measuredRows.has(row)){resizeObserver.observe(row);measuredRows.add(row);}
     position();
+    restoreAnchor?.(anchor);
   }
-  function changed(){if(!queued){queued=true;queueMicrotask(repaint);}}
+  function changed(){if(!queued){queued=true;queueMicrotask(()=>{if(queued)repaint();});}}
   function finished(frame){
-    if(frame.reply_group_id&&frame.reply_complete===true){
-      completed.add((frame.conversation_id||conversation()||'global_memory')+':'+frame.reply_group_id);
+    if(frame.reply_complete===true||frame.type==='turn_error'&&!frame.interaction_id){
+      const prefix=(frame.conversation_id||conversation()||'global_memory')+':';
+      if(frame.reply_group_id)completed.add(prefix+frame.reply_group_id);
+      if(frame.run_id)completed.add(prefix+frame.run_id);
       if(completed.size>1000)completed.delete(completed.values().next().value);
     }
     changed();
   }
   new MutationObserver(changed).observe(log,{childList:true});
-  return {changed,finished};
+  return {changed,finished,flush:()=>{if(queued)repaint();},
+    reveal:row=>{
+      if(queued)repaint();
+      const control=memberships.get(row);
+      if(control?.collapsed){save(control.key,false);setCollapsed(control,false);}
+    },
+    members:row=>(memberships.get(row)?.members||[row]).filter(member=>member.parentNode===log),
+    focused:row=>memberships.get(row)?.close===document.activeElement};
 }

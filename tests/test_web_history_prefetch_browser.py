@@ -256,7 +256,7 @@ def test_locate_or_reset_cancels_inflight_preload(history_browser, action):
     assert page.locator('[data-record-id="251"]').count() == 0
 
 
-def test_bounded_history_forward_page_and_latest_restore_inflight_reply(history_browser):
+def test_loaded_history_is_retained_until_returning_to_latest(history_browser):
     server, page, base = history_browser
     def route(r):
         q = parse_qs(urlsplit(r.request.url).query)
@@ -270,31 +270,27 @@ def test_bounded_history_forward_page_and_latest_restore_inflight_reply(history_
             r.fulfill(json=page_data(server, 401, 451, baseline=True, next_cursor='401'))
     page.route('**/api/workbench/history?*', route)
     ready(page, base)
-    # Compact rows let velocity-based prefetch load several pages per scroll.
-    # Exercise the bounded window without assuming one specific page remains
-    # mounted while later off-screen pages are already arriving.
+    # Reading older pages must retain the records already loaded, including the
+    # newer end. Only the explicit latest action replaces that reading session.
     for _ in range(4):
         first_id=page.locator('#log [data-record-id]').first.get_attribute('data-record-id')
         page.locator('#log').evaluate('(e)=>e.scrollTop=400')
         page.wait_for_function('(id)=>Number(document.querySelector("#log [data-record-id]").dataset.recordId)<Number(id)',arg=first_id)
-        if not page.locator('[data-record-id="450"]').count():
-            break
-    assert page.locator('#log>.msg-row').count() <= 200
-    assert page.locator('#wb-chat').evaluate('(e)=>e.classList.contains("history-past")')
-    assert page.locator('[data-record-id="450"]').count() == 0
+    assert page.locator('#log>.msg-row').count() >= 250
+    assert page.locator('[data-record-id="450"]').count() == 1
     anchor = remember_anchor(page)
     server.outbox.put({'type': 'message', 'conversation_id': 'A', 'message_id': 9010,
                       'text': '正在生成的新回复', 'run_id': 'current-run',
                       'reply_markup': [[{'text': '停止', 'callback_data': 'act_stop_generation:current-run'}]]})
     server.outbox.put({'type': 'edit', 'conversation_id': 'A', 'message_id': 9010,
                       'text': '正在生成的新回复，已追加内容', 'run_id': 'current-run'})
-    page.wait_for_function('document.querySelector("#wb-history-state").textContent.includes("新动态")')
+    page.get_by_text('正在生成的新回复，已追加内容', exact=True).wait_for()
     assert_anchor(page, anchor)
-    assert page.get_by_text('正在生成的新回复，已追加内容', exact=True).count() == 0
+    assert page.get_by_text('正在生成的新回复，已追加内容', exact=True).count() == 1
     page.locator('#log').evaluate('(e)=>e.scrollTop=e.scrollHeight')
     page.locator('[data-record-id="450"]').wait_for()
-    assert page.locator('#log>.msg-row').count() <= 200
-    assert page.locator('#wb-chat').evaluate('(e)=>e.classList.contains("history-past")')
+    assert page.locator('#log>.msg-row').count() >= 251
+    page.locator('#log').evaluate('(e)=>e.scrollTop=400')
     page.locator('#scroll-bottom').click()
     page.get_by_text('正在生成的新回复，已追加内容', exact=True).wait_for()
     assert page.locator('#log>.msg-row').count() == 51

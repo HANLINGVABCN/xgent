@@ -21,7 +21,7 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
         recorder.record.side_effect = lambda **kwargs: calls.append(("record", kwargs)) or 1
         database.add_chat_message.side_effect = lambda *args: calls.append(("db", args))
 
-        await persist_agent_result(
+        row_id = await persist_agent_result(
             recorder=recorder,
             message_type="agent-result",
             database=database,
@@ -31,6 +31,7 @@ class AgentHistoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([item[0] for item in calls], ["record", "db"])
+        self.assertEqual(row_id, 1)
         recorder.record.assert_awaited_once_with(
             msg_type="agent-result",
             role="system",

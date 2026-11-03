@@ -23,7 +23,7 @@ class AttachmentContextError(ValueError):
 
 
 class AttachmentUnavailable(AttachmentContextError):
-    """A safe upload path exists in history but its current bytes cannot be read."""
+    """A verified history path no longer supplies its recorded bytes."""
 
 
 def _read_stable_upload(path: Path) -> bytes:
@@ -462,17 +462,19 @@ def _restore_reference(reference: dict, upload_root: str | Path,
         reference.update(info, size=len(data), sha256=digest)
         kind, mime_type = reference['kind'], reference['mime_type']
     else:
-        if kind == 'invalid':
-            raise AttachmentContextError(f"{name}: {reference.get('error', 'Invalid attachment')}")
         try:
-            data = path.read_bytes()
-        except OSError as exc:
-            raise AttachmentContextError(
-                f"{name}: original file is missing or unreadable ({path})"
-            ) from exc
-        if (len(data) != reference.get("size")
-                or hashlib.sha256(data).hexdigest() != reference.get("sha256")):
-            raise AttachmentContextError(f"{name}: original file has changed ({path})")
+            if kind == 'invalid':
+                raise AttachmentUnavailable(f"{name}: {reference.get('error', 'Invalid attachment')}")
+            data = _read_stable_upload(path)
+            if (len(data) != reference.get("size")
+                    or hashlib.sha256(data).hexdigest() != reference.get("sha256")):
+                raise AttachmentUnavailable(f"{name}: original file has changed ({path})")
+        except AttachmentUnavailable as exc:
+            if strict:
+                raise
+            # Historical generated images and immutable uploads retain their
+            # identity. Never substitute changed bytes or silently drop them.
+            return path, _unavailable_parts(reference, path, str(exc))
     label = f"[Attachment: {name}]\nOriginal: {path}\nType: {mime_type}"
     if mutable and storage == 'uploads':
         label += f'\nCurrent on-disk version SHA-256: {hashlib.sha256(data).hexdigest()}'
@@ -524,7 +526,7 @@ def prepare_attachment_context(records: list[dict], upload_root: str | Path,
                                strict: bool = False, file_limits=None) -> tuple[list, list, list]:
     """Return current parts, conditional metadata updates, and blocking errors.
 
-    Ordinary uploads may change; missing/damaged uploads have explicit placeholders.
+    Ordinary uploads may change; unavailable originals have explicit placeholders.
     Compression opts into strict completeness. Unsafe metadata/paths always fail.
     """
     parts, updates, errors = [], [], []

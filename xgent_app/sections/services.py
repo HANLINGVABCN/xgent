@@ -254,6 +254,12 @@ class GlobalRecorder:
             text = '⚠️ ' + text
         metadata = {**(display_metadata or {}), 'error_source': source, 'error_type': type(error).__name__ if isinstance(error, BaseException) else 'reported_error',
                     'display': {'content': text, 'parse_mode': None}}
+        if source in {'model_stream', 'model_background', 'model_nonstream', 'model_empty', 'model_timeout'}:
+            from xgent_app.conversations import reply_generation_snapshot
+            metadata['model_error'] = True
+            generation = reply_generation_snapshot()
+            if generation:
+                metadata.setdefault('ai_generation', generation)
         if source in {'web_menu', 'workbench'}:
             metadata['ui_only'] = True
         if context and context[0] == chat_id:

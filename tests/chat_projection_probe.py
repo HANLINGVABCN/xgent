@@ -35,8 +35,16 @@ async def workflow(bot, root, style):
         assert len(files) == 2, files
         assert files[0]['content'].startswith('📄 toolcall_all_test.txt (')
         assert files[1]['content'].startswith('📄 fixture.png (')
-        assert all(len(message['media']) == 1 and message['media'][0]['kind'] == 'file' for message in files)
+        assert all(len(message['media']) == 1 for message in files)
+        assert [message['media'][0]['kind'] for message in files] == ['file', 'photo']
+        # Web previews by MIME while Telegram still delivers the original document.
+        assert all(message['media'][0]['delivery_kind'] == 'file' for message in files)
+        assert all(message['media'][0].get('download_url') for message in files)
         assert all(message.get('web_live', {}).get('message_ids') for message in files)
+        snapshots = {frame['record_id']: frame for frame in frames if frame.get('type') == 'record_snapshot'}
+        for message in files:
+            assert snapshots[message['id']]['media'] == message['media']
+            assert snapshots[message['id']]['web_live'] == message['web_live']
         written = [message for message in history if 'file-write-result' in str(message.get('web_display'))]
         assert len(written) == 1 and written[0]['media'] == [], written
         assert '✅ 已写入' in written[0]['content']

@@ -47,12 +47,21 @@ async def main():
                 h.error=(500, 'Post https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent: EOF')
                 h.drain_frames()
                 await h.turn('first question')
-                frames=html.unescape(json.dumps(h.drain_frames(),ensure_ascii=False))
+                outgoing=h.drain_frames()
+                frames=html.unescape(json.dumps(outgoing,ensure_ascii=False))
+                assert any(frame.get('web_display',{}).get('model_error') is True and
+                           frame.get('ai_generation',{}).get('provider')=='p'
+                           for frame in outgoing if frame.get('msg_type')=='runtime_error'), outgoing
                 rows=await h.db.get_global_messages(100, active_context=True)
                 errors=[r for r in rows if r['msg_type']=='runtime_error']
                 context=await h.db.get_conversation_messages(100)
                 assert len(errors)==1,rows
                 text=errors[0]['content']
+                from xgent_app.presentation import metadata_dict
+                metadata=metadata_dict(errors[0]['metadata'])
+                assert metadata['model_error'] is True
+                assert metadata['ai_generation']['provider']=='p'
+                assert metadata['ai_generation']['model']=='vision-model'
                 assert 'OpenAI compatible API error (500)' in text and 'EOF' in text
                 assert 'AttachmentContextError:' not in text and '没有自动减少附件' not in text
                 assert 'EOF' in frames

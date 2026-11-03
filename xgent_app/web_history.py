@@ -92,7 +92,7 @@ def delivered_file_display(notice: str) -> dict | None:
     else:
         caption = '📄 已写入服务器并发送' + (' (base64)' if match['protocol'] == 'file:base64' else '') + ': ' + filename
     kind = media_kind(refs[0]['mime_type'])
-    return {'path': refs[0]['path'], 'caption': caption, 'kind': 'file' if kind == 'photo' else kind}
+    return {'path': refs[0]['path'], 'caption': caption, 'kind': kind}
 
 
 def _within(path: str, root: Path) -> Path:
@@ -496,6 +496,10 @@ def build_history_message(
         message.update(content=content, parse_mode=None,
                        web_display={'version': 1, 'plain_text': content,
                                     'segments': [{'kind': 'html', 'text': _html.escape(content).replace('\n', '<br>')}]})
+        if metadata.get('model_error') is True or metadata.get('error_source') in {
+                'model_stream', 'model_background', 'model_nonstream', 'model_empty', 'model_timeout'}:
+            message['model_error'] = True
+            message['web_display']['model_error'] = True
     elif isinstance(display, dict) and isinstance(display.get("content"), str):
         from .protocols import ProtocolParser
         from .output_archive import attach_archive_path
@@ -587,15 +591,18 @@ def build_history_message(
     for ref, attachment in groups:
         item = _describe_media(ref, storage, attachment=attachment)
         if isinstance(ref, dict) and ref.get('delivery_kind') in {'file', 'photo', 'video', 'audio'}:
-            item['kind'] = ref['delivery_kind']
+            item['delivery_kind'] = ref['delivery_kind']
         elif (kind == 'agent_result' and isinstance(metadata.get('file_delivery'), dict)
               and metadata['file_delivery'].get('kind') in {'file', 'photo', 'video', 'audio'}):
-            item['kind'] = metadata['file_delivery']['kind']
+            item['delivery_kind'] = metadata['file_delivery']['kind']
         if item.get("path") and item["path"] in seen:
             continue
         if item.get("path"):
             seen.add(item["path"])
         index = len(message["media"])
+        if type(record.get('id')) is int:
+            item['id'] = f"{record['id']}:{index}"
+            item['timestamp'] = record.get('timestamp')
         if role == 'user' and attachment:
             item['ingress_mode'] = 'server_upload' if ref in metadata.get('server_uploads', []) else 'attachment'
         if (kind in {'user_file', 'user_photo'} and role == 'user' and attachment and isinstance(ref, dict)

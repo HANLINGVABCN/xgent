@@ -62,11 +62,13 @@ def test_web_message_retains_form_keyboard_after_text_and_markup_edits():
 
 
 @pytest.mark.parametrize('protocol', ['file', 'file:base64', 'sendfile'])
-def test_previous_file_results_restore_the_original_caption_and_file_representation(tmp_path, protocol):
+@pytest.mark.parametrize(('filename', 'preview_kind'), [('image.png', 'photo'), ('report.txt', 'file'), ('icon.svg', 'file')])
+def test_previous_file_results_restore_caption_and_preview_without_rewriting_records(tmp_path, protocol, filename, preview_kind):
     from copy import deepcopy
     from xgent_app.message_policy import stamp_record_metadata
-    path = tmp_path / 'image.png'
-    path.write_bytes(b'fixture bytes')
+    from tests.test_attachments import image_bytes
+    path = tmp_path / filename
+    path.write_bytes(image_bytes('PNG') if preview_kind == 'photo' else b'fixture bytes')
     notice = f'[{protocol}结果] 已' + ('发送服务器文件给用户' if protocol == 'sendfile' else '写入服务器文件')
     notice += f': {path} ({path.stat().st_size} bytes)'
     raw = {'id': 81, 'role': 'system', 'msg_type': 'agent_result', 'content': notice,
@@ -74,8 +76,9 @@ def test_previous_file_results_restore_the_original_caption_and_file_representat
     before = deepcopy(raw)
     result = build_history_message(raw, tmp_path, tmp_path)
     assert result['file_message']
-    assert result['media'][0]['kind'] == 'file'
-    assert '已写入服务器并发送' in result['content'] if protocol.startswith('file') else result['content'].startswith('📄 image.png (')
+    assert result['media'][0]['kind'] == preview_kind
+    assert result['media'][0]['download_url'] == '/api/history/media/81/0'
+    assert '已写入服务器并发送' in result['content'] if protocol.startswith('file') else result['content'].startswith(f'📄 {filename} (')
     assert str(path) not in result['content']
     assert raw == before
 
@@ -139,13 +142,22 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             page.goto(base)
             page.wait_for_selector('#input:not([disabled])')
             for frame in workflow_case['frames']:
+                # Replay the isolated producer into this server's transport epoch.
+                # Stale epochs must remain unable to alias unrelated live IDs.
+                frame = dict(frame)
+                if isinstance(frame.get('web_live'), dict):
+                    frame['web_live'] = {**frame['web_live'], 'epoch': server.outbox.snapshot()['epoch']}
                 server.outbox.put(frame)
             page.wait_for_selector('.web-ask-form')
             live = page.locator('#log').inner_text()
             assert 'local media fixture' in live
             assert '✅ 已写入' in live
             assert page.locator('.file-write-result').count() == 1
-            assert page.locator('.fc-name', has_text='fixture.png').count() == 1
+            assert page.locator('.media-photo .media-filename', has_text='fixture.png').count() == 2
+            assert page.locator('.fc-name', has_text='fixture.png').count() == 0
+            assert page.locator('.fc-name', has_text='toolcall_all_test.txt').count() == 1
+            assert page.locator('.fc-preview').count() == 1
+            assert page.locator('.media-filename').first.evaluate('node=>getComputedStyle(node).fontSize') == '11px'
             assert page.locator('.msg-row.ai .bubble-header:visible').count() <= 1
             assert page.locator('.fc-name').first.evaluate('node=>getComputedStyle(node).fontSize') == '11px'
             # Project the durable state on the same page, then compare a full refresh.
@@ -158,7 +170,9 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             before = page.locator('#log').inner_text()
             assert '✅ 已写入' in before
             assert page.locator('.file-write-result').count() == 1
-            assert page.locator('.fc-name', has_text='fixture.png').count() == 1
+            assert page.locator('.media-photo .media-filename', has_text='fixture.png').count() == 2
+            assert page.locator('.fc-name', has_text='fixture.png').count() == 0
+            assert page.locator('.fc-name', has_text='toolcall_all_test.txt').count() == 1
             assert page.locator('.msg-row.ai .bubble-header:visible').count() <= 1
             page.reload()
             page.wait_for_selector('.web-ask-form')

@@ -13,7 +13,8 @@ import {installCommandSeries} from './command-series.js';
   var log = document.getElementById("log");
   var input = document.getElementById("input");
   var selectedConversationId = null;
-  const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun});
+  const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun,
+    captureAnchor:scrollAnchor,restoreAnchor:restoreScrollAnchor,scrollAdjusted:noteScrollAdjustment});
   var conversationDrafts = Object.create(null);
   var conversationFiles = Object.create(null);
   function draftKey(cid) { return 'xgent-draft:' + (cid || selectedConversationId || 'global_memory'); }
@@ -504,7 +505,7 @@ import {installCommandSeries} from './command-series.js';
   }
 
   function applyAiGeneration(entry, timestamp, generation) {
-    if (!entry || entry.role !== 'ai' || !entry.aiMeta) return;
+    if (!entry || entry.role !== 'ai' && !entry.modelError || !entry.aiMeta) return;
     entry.aiGeneration = generation || entry.aiGeneration || null;
     if(timestamp!=null)entry.timestamp=timestamp;
     var provider = entry.aiGeneration?.provider || '', model = entry.aiGeneration?.model || '';
@@ -531,7 +532,7 @@ import {installCommandSeries} from './command-series.js';
         // Old records without turn IDs fall back to user-message boundaries.
         if(!sameTurn&&!sameRun&&!sameGroup){seenReply=false;groupId=null;}
         turnId=id;runId=run;if(group)groupId=group;
-      }else if(row.classList.contains('ai')){
+      }else if(row.classList.contains('ai')||row.classList.contains('model-error')){
         if(changed){seenReply=false;turnId=null;runId=null;groupId=null;}
         if(id)turnId=id;
         if(run)runId=run;
@@ -568,7 +569,7 @@ import {installCommandSeries} from './command-series.js';
     const intent=cardScrollIntent;finishCardRequest(frame.interaction_id);
     if(!intent||intent.id!==frame.interaction_id||intent.cid!==selectedConversationId)return;
     if(frame.appended){
-      if(viewingPast){historyAnchor=null;viewingPast=false;newFrames=0;await resync();}
+      if(viewingPast){historyAnchor=null;viewingPast=false;newFrames=0;await resync(false,true);}
       if(cardScrollIntent===intent&&intent.cid===selectedConversationId)scrollDown();
     }else{
       const entry=byMessageId[frame.edited_message_id]||byMessageId[intent.messageId];
@@ -577,7 +578,9 @@ import {installCommandSeries} from './command-series.js';
     if(cardScrollIntent===intent)cardScrollIntent=null;
   }
   var renderingHistory=0;
-  function scrollDown() { if(renderingHistory)return;log.scrollTop = log.scrollHeight; hideScrollBtn(); }
+  function noteScrollAdjustment(){historyScrollTop=log.scrollTop;historyScrollAt=0;adjustedScrollTop=log.scrollTop;historyDirection=0;}
+  function setLogScrollTop(value){const before=log.scrollTop;log.scrollTop=value;if(Math.abs(log.scrollTop-before)>.5)noteScrollAdjustment();}
+  function scrollDown() { if(renderingHistory)return;setLogScrollTop(log.scrollHeight); hideScrollBtn(); }
   function isNearBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 90; }
   function hideScrollBtn() { scrollBtn.classList.remove("show"); }
   function showScrollBtn() { scrollBtn.classList.add("show"); }
@@ -915,6 +918,21 @@ import {installCommandSeries} from './command-series.js';
     return role;
   }
 
+  function syncErrorAuthor(entry, frame) {
+    const modelError=entry.messageType==='runtime_error'&&
+      (frame.model_error===true||frame.web_display?.model_error===true||entry.modelError===true);
+    entry.modelError=modelError;entry.row.classList.toggle('model-error',modelError);
+    if(!modelError||!entry.head)return;
+    if(!entry.head.dataset.modelError){
+      entry.head.dataset.modelError='true';
+      const author=entry.head.querySelector('.bubble-author');
+      author.replaceChildren();
+      const icon=document.createElement('span');icon.className='bubble-author-icon';icon.textContent='X';
+      author.append(icon,document.createTextNode(' XGent'));
+      if(!entry.aiMeta){entry.aiMeta=document.createElement('span');entry.aiMeta.className='ai-generation-meta';entry.head.append(entry.aiMeta);}
+    }
+  }
+
   function speakText(text, btn) {
     if (!window.speechSynthesis) { toast("当前浏览器不支持语音朗读"); return; }
     if (window.speechSynthesis.speaking) {
@@ -1053,6 +1071,7 @@ import {installCommandSeries} from './command-series.js';
 
     var entry = { row: row, body: body, bubble: bubble, head: head, btns: btns, rawText: text, parseMode: parseMode, role: role, messageType:messageType, messagePolicy:policy, webDisplay:webDisplay, aiGeneration: aiGeneration || null };
     entry.aiMeta = head && head._aiMeta;
+    syncErrorAuthor(entry,{web_display:webDisplay});
     if(role==='ai'){entry.replyTime=document.createElement('span');entry.replyTime.className='reply-timestamp';}
     applyAiGeneration(entry, timestamp, aiGeneration);
     syncMessageChrome(entry);
@@ -1149,6 +1168,13 @@ import {installCommandSeries} from './command-series.js';
     }else if(modeBadge)modeBadge.remove();
     const body=container.querySelector('.fc-body');
     if(body){let details=body.querySelector('.fc-details');if(!details){details=document.createElement('small');details.className='fc-details';body.appendChild(details);}details.textContent=[item.size!=null?(item.size/1024/1024>=1?(item.size/1024/1024).toFixed(1)+' MiB':Math.ceil(item.size/1024)+' KiB'):null,item.mime_type].filter(Boolean).join(' · ');}
+    const card=container.querySelector('.file-card');
+    if(card&&item.id&&item.download_url){
+      let preview=card.querySelector('.fc-preview');
+      if(!preview){preview=document.createElement('button');preview.type='button';preview.className='fc-preview';preview.textContent='预览';card.insertBefore(preview,card.querySelector('.fc-dl'));}
+      preview.onclick=event=>{event.stopPropagation();previewFile(container._mediaItem);};
+      card.onclick=event=>{if(!event.target.closest('.fc-dl,.fc-preview'))previewFile(container._mediaItem);};
+    }
     if(item.kind==='photo')sizeImagePlaceholder(container,item.width,item.height);
     container.querySelectorAll('a.media-dl,a.fc-dl').forEach(function(link){
       link.href=item.download_url;link.download=item.filename||'file';
@@ -1163,6 +1189,26 @@ import {installCommandSeries} from './command-series.js';
       });
       container.appendChild(versions);
     }else if(!item.versions_id&&versions)versions.remove();
+  }
+
+  function previewFile(item){
+    const cid=item.conversation_id||selectedConversationId;
+    if(window.XGentWorkbench?.previewFile){window.XGentWorkbench.previewFile({...item,source:{conversation_id:cid,record_id:Number(String(item.id).split(':')[0])}});return;}
+    const box=actionNode('div'),content=actionNode('div');
+    const download=actionNode('a','下载原文件','wb-btn');download.href=item.download_url;download.download=item.filename;
+    box.append(download,content);showAction(item.filename||'文件预览',box);
+    let sequence=0;
+    async function load(offset,back){
+      const version=++sequence;content.replaceChildren(actionMessage('读取文件预览…'));
+      try{
+        const page=await api('/api/workbench/artifacts/preview?id='+encodeURIComponent(item.id)+'&offset='+offset+'&conversation_id='+encodeURIComponent(cid));
+        if(version!==sequence||!box.isConnected)return;
+        const pre=actionNode('pre',page.text,'wb-pre wb-document-preview');
+        const prev=actionButton('上一页',()=>load(back.at(-1),back.slice(0,-1))),next=actionButton('下一页',()=>load(page.next_offset,[...back,offset]));
+        prev.disabled=!back.length;next.disabled=page.eof;content.replaceChildren(prev,next,pre);
+      }catch(error){if(version===sequence&&box.isConnected)content.replaceChildren(actionMessage(error.message,true));}
+    }
+    load(0,[]);
   }
 
   function canReuseMediaContent(container, item) {
@@ -1207,7 +1253,7 @@ import {installCommandSeries} from './command-series.js';
         media.decoding = 'async';
         media.className = "media-img";
         media.alt = filename || "图片";
-        media.addEventListener("click", function () { openLightbox(media.src, container._mediaItem.filename); });
+        media.addEventListener("click", function () { openLightbox(container._mediaItem.download_url||media.src, container._mediaItem.filename); });
         media.addEventListener('load',function(){
           var source=media.src;
           sizeImagePlaceholder(container,media.naturalWidth,media.naturalHeight);
@@ -1294,6 +1340,12 @@ import {installCommandSeries} from './command-series.js';
 
   function setInlineMedia(entry, items) {
     var stick = isNearBottom();
+    items=items.map(item=>{
+      const mime=String(item.mime_type||'').toLowerCase();
+      const kind=mime.startsWith('image/')&&mime!=='image/svg+xml'?'photo':
+        mime.startsWith('video/')?'video':mime.startsWith('audio/')?'audio':item.kind;
+      return kind===item.kind?item:{...item,delivery_kind:item.delivery_kind||item.kind,kind};
+    });
     if (!items.length) {
       if (entry.mediaContainer) entry.mediaContainer.remove();
       if (entry.mediaPaths) entry.mediaPaths.remove();
@@ -1536,6 +1588,7 @@ import {installCommandSeries} from './command-series.js';
     if(frame.run_id)entry.row.dataset.runId=String(frame.run_id);
     if(frame.reply_group_id)entry.row.dataset.replyGroupId=String(frame.reply_group_id);
     if(frame.conversation_id)entry.row.dataset.presentationConversationId=frame.conversation_id;
+    syncErrorAuthor(entry,frame);
     if(frame.record_id!=null&&!frame.ui_message_id){entry.durable=true;entry.row.dataset.recordId=String(frame.record_id);}
     applyAiGeneration(entry, frame.timestamp??frame.ts, frame.ai_generation);
     syncMessageChrome(entry);
@@ -1691,7 +1744,7 @@ import {installCommandSeries} from './command-series.js';
           var requestId=confirm.dataset.requestId||(confirm.dataset.requestId=queueRequestId());
           var result=await api('/api/workbench/conversations/withdraw',{method:'POST',body:JSON.stringify({conversation_id:cid,record_id:message.id,turn_id:preview.turn_id,current_digest:preview.current_digest,confirm:true,request_id:requestId})});
           restoreQueuedDraft(cid,result.draft?.text??message.content??message.text??'','withdraw:'+requestId);
-          closeAction();if(cid===selectedConversationId)await resync(true);toast(result.telegram_sync_warning||'消息已撤回，原文已放回输入框',!!result.telegram_sync_warning);
+          closeAction();if(cid===selectedConversationId)await resync(true,true);toast(result.telegram_sync_warning||'消息已撤回，原文已放回输入框',!!result.telegram_sync_warning);
         }finally{confirm.disabled=false;}
       },'danger');controls.append(actionButton('取消',closeAction),confirm);box.append(controls);
     }catch(error){box.replaceChildren(actionMessage(error.message,true),actionButton('关闭',closeAction));}
@@ -1764,7 +1817,7 @@ import {installCommandSeries} from './command-series.js';
     if (uiGeneration !== null && frame.ui_generation > uiGeneration) {
       // UI frames are persisted before delivery. Fetch their new generation;
       // never put an unsequenced raw frame into the transport replay queue.
-      resync(true).catch(function(){});
+      resync(true,true).catch(function(){});
       return false;
     }
     uiGeneration = frame.ui_generation;
@@ -1780,7 +1833,7 @@ import {installCommandSeries} from './command-series.js';
     return api("/api/workbench/history?limit=50").then(function (data) {
       if (!historyReady || generation !== historyGen) return;
       if (Number.isSafeInteger(data.ui_generation) && data.ui_generation !== uiGeneration) {
-        if (uiGeneration === null || data.ui_generation > uiGeneration) return resync();
+        if (uiGeneration === null || data.ui_generation > uiGeneration) return resync(false,true);
         return;
       }
       (data.ui_tombstones || []).forEach(function (item) {
@@ -1880,7 +1933,7 @@ import {installCommandSeries} from './command-series.js';
         refreshPresentation([frame.record_id]).catch(()=>{});return;
       }
       if(Number.isSafeInteger(frame.ui_generation)&&uiGeneration!==null&&frame.ui_generation!==uiGeneration){
-        if(frame.ui_generation>uiGeneration)resync(true).catch(function(){});
+        if(frame.ui_generation>uiGeneration)resync(true,true).catch(function(){});
         return;
       }
       var anchor=Array.from(log.children).find(row=>row.getBoundingClientRect().bottom>log.getBoundingClientRect().top);
@@ -1920,7 +1973,6 @@ import {installCommandSeries} from './command-series.js';
       var nextMedia = oldMedia && oldMedia.row.nextSibling;
       removeEntry(oldMedia);
       var mediaKind = frame.type === "photo" ? "photo" : mediaKindFromName(frame.filename);
-      if(frame.type==='document'&&mediaKind==='photo')mediaKind='file';
       var mediaEntry = makeMediaBubble(mediaKind, frame.filename, frame.caption, frame.download_url, frame.message_id, "ai", frame.timestamp || frame.ts);
       if (nextMedia && nextMedia.parentNode === log) log.insertBefore(mediaEntry.row, nextMedia);
     } else if (frame.type === "chat_action") {
@@ -1957,14 +2009,14 @@ import {installCommandSeries} from './command-series.js';
       if (!frame.busy) {
         reconcileAfterTurn = false;
         // Restore failures and retry controls are durable after the archive switch.
-        if (frame.committed) resync(true).catch(function(){});
+        if (frame.committed) resync(true,true).catch(function(){});
       }
     } else if (frame.type === "history_reset" || frame.type === "context_reset") {
       cancelUploads("记忆已清空");
       pendingFrames = [];
       // An earlier baseline may be resolving and flushing this very event.
       // Invalidation must replace it, not coalesce into that stale request.
-      resync(true).catch(function(){});
+      resync(true,true).catch(function(){});
     }
   }
 
@@ -1991,11 +2043,11 @@ import {installCommandSeries} from './command-series.js';
     refreshQueue();
   }
 
-  function resync(force) {
-    if(historyRequest&&!force)return historyRequest;
+  function resync(force,replaceView=false) {
+    if(historyRequest&&!force&&!replaceView)return historyRequest;
     historyReady=false;btnSend.disabled=true;
     var requestGeneration=historyGen+1;
-    var request=loadHistory().then(function(){if(requestGeneration===historyGen)flushPending();}).catch(function(err){
+    var request=loadHistory(replaceView).then(function(){if(requestGeneration===historyGen)flushPending();}).catch(function(err){
       if(requestGeneration!==historyGen)return;
       toast('历史加载失败：'+err.message,true);
       setConnState('disconnected');
@@ -2174,28 +2226,37 @@ import {installCommandSeries} from './command-series.js';
   var viewingPast = false;
   var newerAvailable = false;
   var historyForwardCursor = null;
+  var keepLoadedHistory = false;
   var historyPreloads = new Map(),historyNetworkMs=500,historyVelocity=0,historyDirection=0,historyScrollAt=0,historyScrollTop=0;
+  var adjustedScrollTop=null;
   var newFrames = 0;
-  function historyUrl() {
-    return "/api/workbench/history?limit=50" + (historyAnchor ? "&anchor=" + encodeURIComponent(historyAnchor) : "");
+  function historyUrl(anchor=historyAnchor) {
+    return "/api/workbench/history?limit=50" + (anchor ? "&anchor=" + encodeURIComponent(anchor) : "");
   }
   function boundMessages(prepend) {
+    commandSeries.flush();
+    // A reading session keeps the records it has already loaded. Removing whole
+    // off-screen sequences without spacers changes the scroll range under it.
+    if(keepLoadedHistory)return;
+    const anchor=scrollAnchor(),viewport=log.getBoundingClientRect(),selection=window.getSelection();
     var rows = Array.from(log.children).filter(row=>row.classList.contains('msg-row'));
-    var removedFront=false,remaining=rows.length;
+    var removedFront=false,removedBack=false,remaining=rows.length;
     while (remaining > 200 && rows.length) {
-      var row = prepend ? rows.pop() : rows.shift();
-      var selection=window.getSelection();
-      var box=row.getBoundingClientRect(),viewport=log.getBoundingClientRect();
-      if((box.bottom>viewport.top&&box.top<viewport.bottom) || row.contains(document.activeElement) || row.querySelector("blockquote.expanded") ||
-         Array.from(row.querySelectorAll("video,audio")).some(function(media){return !media.paused;}) ||
-         (selection&&!selection.isCollapsed&&(row.contains(selection.anchorNode)||row.contains(selection.focusNode)))) continue;
-      var entry=null;
-      Object.keys(byMessageId).forEach(function(key){if(byMessageId[key].row===row){entry=byMessageId[key];delete byMessageId[key];}});
-      if(entry)removeEntry(entry);else row.remove();
-      remaining--;
-      if(prepend){newerAvailable=true;viewingPast=true;}else removedFront=true;
+      var row = prepend ? rows.at(-1) : rows[0];
+      const unit=commandSeries.members(row),members=new Set(unit);
+      if(unit.some(member=>{
+        const box=member.getBoundingClientRect();
+        return box.height>0&&box.bottom>viewport.top&&box.top<viewport.bottom||member.contains(document.activeElement)||
+          commandSeries.focused(member)||Array.from(member.querySelectorAll('video,audio')).some(media=>!media.paused)||
+          selection&&!selection.isCollapsed&&(member.contains(selection.anchorNode)||member.contains(selection.focusNode));
+      }))break;
+      for(const member of unit){const entry=member._chatEntry||Object.values(byMessageId).find(value=>value.row===member);if(entry)removeEntry(entry);else member.remove();}
+      rows=rows.filter(member=>!members.has(member));remaining-=unit.length;
+      if(prepend){newerAvailable=true;viewingPast=true;removedBack=true;}else removedFront=true;
     }
     if(removedFront)historyCursor=edgeCursor(false)||historyCursor;
+    if(removedBack)historyForwardCursor=edgeCursor(true)||historyForwardCursor;
+    restoreScrollAnchor(anchor);
   }
   function displayedFrameEntry(frame){
     var keys=[frame.ui_message_id?'ui:'+frame.ui_message_id:null,frame.media_group_id,
@@ -2204,14 +2265,18 @@ import {installCommandSeries} from './command-series.js';
     return keys.map(key=>key!=null?byMessageId[key]:null).find(Boolean);
   }
   function scrollAnchor(){
-    var row=Array.from(log.children).find(row=>row.getBoundingClientRect().bottom>log.getBoundingClientRect().top);
+    const viewport=log.getBoundingClientRect();
+    var row=Array.from(log.children).find(row=>{const box=row.getBoundingClientRect();return box.height>0&&box.bottom>viewport.top;});
     return row?{row:row,top:row.getBoundingClientRect().top}:null;
   }
   function restoreScrollAnchor(anchor){
     // Avatar deduplication changes row heights. Finish it before measuring the
     // restored position, rather than move the anchor in the next animation frame.
     syncTurnAuthors(log);
-    if(anchor?.row.isConnected)log.scrollTop+=anchor.row.getBoundingClientRect().top-anchor.top;
+    if(anchor?.row.isConnected){
+      const box=anchor.row.getBoundingClientRect();
+      if(box.height>0||anchor.row.classList.contains('command-series-control'))setLogScrollTop(log.scrollTop+box.top-anchor.top);
+    }
   }
   function cancelHistoryPage(){
     historyPageVersion++;
@@ -2271,8 +2336,8 @@ import {installCommandSeries} from './command-series.js';
       const nearBottom=newerAvailable&&viewingPast&&log.scrollHeight-log.scrollTop-log.clientHeight<=lead;
       if(!historyLoading){
         if(nearBottom&&historyDirection>0)historyPage(true);
-        else if(nearTop&&historyDirection<=0)historyPage(false);
-        else if(nearBottom&&!historyCursor)historyPage(true);
+        else if(nearTop&&historyDirection<0)historyPage(false);
+        else if(nearBottom&&!historyCursor&&historyDirection>=0)historyPage(true);
       }
     });
   }
@@ -2323,7 +2388,7 @@ import {installCommandSeries} from './command-series.js';
         throw new Error('会话已变化，请重试加载历史');
       }
       if(data.reset||(Number.isSafeInteger(data.ui_generation)&&uiGeneration!==null&&data.ui_generation!==uiGeneration)){
-        historyAnchor=null;viewingPast=false;await resync(true);return;
+        historyAnchor=null;viewingPast=false;await resync(true,true);return;
       }
       // Capture NOW, not before the network request: the reader may have moved
       // several screens while a slow page was in flight.
@@ -2338,6 +2403,7 @@ import {installCommandSeries} from './command-series.js';
           if(m.ui_message_id)uiRevisions[m.ui_message_id]=m.revision;
           if(!forward){log.insertBefore(entry.row,first);(entry.mediaEntries||[]).forEach(media=>log.insertBefore(media.row,first));}
         });
+        if(!forward&&data.messages?.length)keepLoadedHistory=true;
         // Restore before pruning so the visible rows are protected by the window.
         if(historyAnchor)sortHistoryRows();
         restoreScrollAnchor(anchor);boundMessages(!forward);
@@ -2354,15 +2420,25 @@ import {installCommandSeries} from './command-series.js';
     }
   }
   document.getElementById('history-retry').onclick=function(){const direction=!!historyError?.forward;historyPreloads.forEach(item=>item.controller.abort());historyPreloads.clear();historyPage(direction);};
-  function returnToLatest(){if(location.hash.includes('?conversation=')){history.replaceState(null,'','#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true).then(scrollDown).catch(function(){});}
-  function loadHistory() {
+  function returnToLatest(){if(location.hash.includes('?conversation=')){history.replaceState(null,'','#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true,true).then(scrollDown).catch(function(){});}
+  function loadHistory(replaceView=false) {
+    const visible=scrollAnchor(),row=visible?.row;
+    const readingAnchor=!replaceView&&(viewingPast||!isNearBottom())&&
+      (row?.dataset.uiMessageId?'ui:'+row.dataset.uiMessageId:row?.dataset.recordId?'history:'+row.dataset.recordId:null);
+    const oldFirst=edgeCursor(false),oldLast=edgeCursor(true);
     cancelHistoryPage();historyLoadController?.abort();
     var controller=historyLoadController=new AbortController();
     historyGen++;
     var gen=historyGen, requestedCid=selectedConversationId;
     var wasNearBottom=isNearBottom();
     var top=log.scrollTop;
-    return api(historyUrl(),{signal:controller.signal}).then(function(data){
+    let unavailableAnchor=false;
+    const response=api(historyUrl(readingAnchor||historyAnchor),{signal:controller.signal}).catch(function(error){
+      if(!readingAnchor||error.status!==404||controller.signal.aborted||gen!==historyGen||requestedCid!==selectedConversationId)throw error;
+      unavailableAnchor=true;
+      return api(historyUrl(null),{signal:controller.signal});
+    });
+    return response.then(function(data){
       if(gen!==historyGen || requestedCid!==selectedConversationId)return;
       if(data.conversation_id && requestedCid && data.conversation_id!==requestedCid){
         throw new Error('会话已变化，请重新加载');
@@ -2372,14 +2448,20 @@ import {installCommandSeries} from './command-series.js';
         if(!input.value){try{input.value=sessionStorage.getItem(draftKey())||'';}catch(e){}}
         syncSendState();
       }
-      historyControls(data);
       if(typeof data.queue_enabled==='boolean')queueEnabled=data.queue_enabled;
       const sameGeneration=uiGeneration===null || data.ui_generation==null || uiGeneration===data.ui_generation;
+      const preserveReading=!!readingAnchor&&sameGeneration&&!unavailableAnchor&&!data.reset;
+      const currentAnchor=preserveReading?scrollAnchor():null;
+      if(unavailableAnchor||!sameGeneration)historyAnchor=null;
+      if(!preserveReading){historyControls(data);keepLoadedHistory=!!historyAnchor;}
+      else keepLoadedHistory=true;
       if(!sameGeneration){uiRevisions={};uiDeleted={};}
       uiGeneration=Number.isSafeInteger(data.ui_generation)?data.ui_generation:null;
       (data.ui_tombstones||[]).forEach(function(item){uiRevisions[item.ui_message_id]=item.revision;uiDeleted[item.ui_message_id]=true;});
       const retained=new Set();
-      if(historyAnchor&&sameGeneration){Object.values(byMessageId).forEach(entry=>{if(entry?.row.isConnected)retained.add(entry);});}
+      if((historyAnchor&&!replaceView||preserveReading)&&sameGeneration){Object.values(byMessageId).forEach(entry=>{
+        if(entry?.row.isConnected&&(entry.durable||entry.ui)&&(!entry.ui||!uiDeleted[entry.ui.id]))retained.add(entry);
+      });}
       (data.messages||[]).forEach(function(m){
         if(m.ui_message_id&&uiDeleted[m.ui_message_id])return;
         const entry=putHistoryFrame(m,data.live?.epoch);
@@ -2392,6 +2474,11 @@ import {installCommandSeries} from './command-series.js';
         streamEpoch=live.epoch;streamCursor=live.cursor;
         (live.frames||[]).filter(frame=>!frame.conversation_id||frame.conversation_id===selectedConversationId).forEach(function(frame){
           rememberRun(frame);
+          if(preserveReading&&!displayedFrameEntry(frame)){
+            const key=frame.record_id!=null?'history:'+frame.record_id:frame.ui_message_id?'ui:'+frame.ui_message_id:frame.message_id;
+            if(!unseenHistoryFrames.has(key)){unseenHistoryFrames.add(key);newFrames++;}
+            newerAvailable=true;viewingPast=true;return;
+          }
           const entry=putTextFrame('ai',frame);retained.add(entry);log.appendChild(entry.row);
         });
       }
@@ -2407,13 +2494,18 @@ import {installCommandSeries} from './command-series.js';
       });
       const retainedRows=new Set();retained.forEach(entry=>{retainedRows.add(entry.row);(entry.mediaEntries||[]).forEach(child=>retainedRows.add(child.row));});
       Array.from(log.children).forEach(row=>{if(!retainedRows.has(row))row.remove();});
-      if(historyAnchor)sortHistoryRows();
+      if(historyAnchor||preserveReading)sortHistoryRows();
+      if(preserveReading){
+        if(edgeCursor(false)!==oldFirst)historyCursor=data.before?(data.before.has_more?data.before.cursor:null):data.next_cursor||null;
+        if(edgeCursor(true)!==oldLast){historyForwardCursor=data.after?.cursor||data.last_cursor||edgeCursor(true);newerAvailable=!!data.after?.has_more;}
+      }
       if(typeof data.busy==='boolean')setBusy(data.busy);
       if(data.busy && !(live?.frames||[]).length && (!data.running || data.running.conversation_id===selectedConversationId))showTyping();else hideTyping();
-      if(historyAnchor){const target=byMessageId[historyAnchor];if(target)target.row.scrollIntoView({block:'center'});}
-      updateEmptyState();boundMessages(!!historyAnchor);
-      if(historyAnchor){const target=byMessageId[historyAnchor];if(target)target.row.scrollIntoView({block:'center'});}
-      else if(wasNearBottom)scrollDown();else log.scrollTop=top;
+      if(historyAnchor&&!preserveReading){const target=byMessageId[historyAnchor];if(target){commandSeries.reveal(target.row);target.row.scrollIntoView({block:'center'});}}
+      updateEmptyState();if(preserveReading)restoreScrollAnchor(currentAnchor);boundMessages(!!historyAnchor||preserveReading);
+      if(historyAnchor&&!preserveReading){const target=byMessageId[historyAnchor];if(target){commandSeries.reveal(target.row);target.row.scrollIntoView({block:'center'});}}
+      else if(preserveReading)restoreScrollAnchor(currentAnchor);
+      else if(wasNearBottom)scrollDown();else setLogScrollTop(top);
       updateHistoryState();
       if(historyAnchor){const entry=byMessageId[historyAnchor];if(entry){entry.row.classList.add('wb-focus');setTimeout(()=>entry.row.classList.remove('wb-focus'),2000);}}
     }).finally(function(){if(historyLoadController===controller)historyLoadController=null;});
@@ -2425,11 +2517,11 @@ import {installCommandSeries} from './command-series.js';
     entry.mediaEntries = [];
     if (role === 'user' || message.file_message || message.media_group_id || message.msg_type === "ai_reply" || message.msg_type === "media_reply") {
       previousMedia.forEach(removeEntry);
-      setInlineMedia(entry, (message.media || []).map(item=>({...item,conversation_id:message.conversation_id||selectedConversationId})));
+      setInlineMedia(entry, (message.media || []).map(item=>({...item,conversation_id:item.conversation_id||message.conversation_id||selectedConversationId})));
     } else {
       var after = entry.row;
       (message.media || []).forEach(function (item,index) {
-        item={...item,conversation_id:message.conversation_id||selectedConversationId};
+        item={...item,conversation_id:item.conversation_id||message.conversation_id||selectedConversationId};
         var card = previousMedia[index];
         if(card)setInlineMedia(card,[item]);
         else card=makeMediaBubble(item.kind, item.filename, item.path, item.download_url,
@@ -3547,14 +3639,34 @@ import {installCommandSeries} from './command-series.js';
 
   log.addEventListener("scroll", function () {
     const now=performance.now(),delta=log.scrollTop-historyScrollTop,elapsed=now-historyScrollAt;
-    if(historyScrollAt&&Math.abs(delta)>3&&elapsed<1500){historyDirection=Math.sign(delta);historyVelocity=Math.abs(delta)/Math.max(16,elapsed);}
+    const adjusted=adjustedScrollTop!=null&&Math.abs(log.scrollTop-adjustedScrollTop)<2;
+    adjustedScrollTop=null;
+    if(!adjusted&&Math.abs(delta)>3){historyDirection=Math.sign(delta);if(historyScrollAt&&elapsed<1500)historyVelocity=Math.abs(delta)/Math.max(16,elapsed);}
     historyScrollTop=log.scrollTop;historyScrollAt=now;
     document.getElementById('wb-chat').classList.toggle('history-top',log.scrollTop<8&&!!historyCursor);
     if (isNearBottom()) hideScrollBtn(); else showScrollBtn();
     scheduleHistoryPrefetch();
   });
+  function noteHistoryIntent(direction){
+    if(!direction)return;
+    historyDirection=Math.sign(direction);scheduleHistoryPrefetch();
+  }
+  log.addEventListener('wheel',event=>noteHistoryIntent(event.deltaY),{passive:true});
+  let historyTouchY=null;
+  log.addEventListener('touchstart',event=>{historyTouchY=event.touches[0]?.clientY??null;},{passive:true});
+  log.addEventListener('touchmove',event=>{
+    const y=event.touches[0]?.clientY;
+    if(historyTouchY!=null&&y!=null)noteHistoryIntent(historyTouchY-y);
+    historyTouchY=y??null;
+  },{passive:true});
+  log.addEventListener('touchend',()=>{historyTouchY=null;},{passive:true});
+  log.addEventListener('keydown',event=>{
+    if(event.target.closest('input,textarea,select,[contenteditable]'))return;
+    if(['ArrowUp','PageUp','Home'].includes(event.key))noteHistoryIntent(-1);
+    if(['ArrowDown','PageDown','End'].includes(event.key))noteHistoryIntent(1);
+  });
   new ResizeObserver(scheduleHistoryPrefetch).observe(log);
-  scrollBtn.addEventListener("click", function () { if(viewingPast)returnToLatest();else scrollDown(); triggerHaptic(); });
+  scrollBtn.addEventListener("click", function () { if(viewingPast||keepLoadedHistory)returnToLatest();else scrollDown(); triggerHaptic(); });
 
   // These essentials belong to the standalone chat entry, not to the optional
   // admin module graph (a failed usage/settings import must not disable logout).
@@ -3740,7 +3852,7 @@ import {installCommandSeries} from './command-series.js';
     input.value=conversationDrafts[next]||'';
     try{input.value=input.value||sessionStorage.getItem(draftKey(next))||'';}catch(e){}
     pendingFiles=(conversationFiles[next]||[]).slice();renderPendingFiles();
-    historyGen++;historyAnchor=null;historyCursor=null;viewingPast=false;newFrames=0;newerAvailable=false;
+    historyGen++;historyAnchor=null;historyCursor=null;viewingPast=false;keepLoadedHistory=false;newFrames=0;newerAvailable=false;
     uiGeneration=null;uiRevisions={};uiDeleted={};pendingFrames=[];
     Array.from(new Set(Object.values(byMessageId))).forEach(removeEntry);
     byMessageId={};log.replaceChildren();msgCount=0;lastStreamEntry=null;
@@ -3790,13 +3902,13 @@ import {installCommandSeries} from './command-series.js';
       const error=window.XGentChat.commandError();if(error){toast(error,true);return false;}
       input.value=command;syncSendState();send();return true;
     },
-    reload: function(){historyAnchor=null;viewingPast=false;newFrames=0;return resync();},
+    reload: function(){historyAnchor=null;viewingPast=false;newFrames=0;return resync(false,true);},
     locate: async function(key){
       if(document.body.dataset.page!=='chat')location.hash='/chat';
       const cid=selectedConversationId;
-      if(key&&!byMessageId[key]){historyAnchor=key;await resync(true);}
+      if(key&&!byMessageId[key]){historyAnchor=key;await resync(true,true);}
       const entry=cid===selectedConversationId&&key&&byMessageId[key];
-      if(entry){entry.row.classList.add('source-target');entry.row.scrollIntoView({block:'center'});setTimeout(()=>entry.row.classList.remove('source-target'),3500);}
+      if(entry){commandSeries.reveal(entry.row);entry.row.classList.add('source-target');entry.row.scrollIntoView({block:'center'});noteScrollAdjustment();setTimeout(()=>entry.row.classList.remove('source-target'),3500);}
     },
     dismissLocation: function(){
       log.querySelectorAll('.source-target,.wb-focus').forEach(row=>row.classList.remove('source-target','wb-focus'));

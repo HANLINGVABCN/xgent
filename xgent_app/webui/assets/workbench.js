@@ -693,6 +693,7 @@ new MutationObserver(()=>{$('terminal-iframe')?.contentWindow?.postMessage({type
 // entire optional workbench initialized successfully.
 window.XGentWorkbench={
   attachmentVersions,
+  previewFile:fileDetail,
   dialog,closeDialog,
   prepareChat:async()=>{if(state.route!=='chat'||location.hash.includes('?')){location.hash='/chat';await route();}return state.route==='chat';},
   commands:()=>state.boot?.commands,

@@ -1134,3 +1134,7 @@
 .command-series-toggle:hover{background:var(--surface-2)}
 .command-series-close{position:fixed;z-index:34;min-height:28px;padding:4px 6px;border:1px solid var(--line-2);border-radius:4px;background:var(--surface);color:var(--text-2);font:11px/17px var(--font);cursor:pointer}
 .command-series-control.series-open{height:0;margin:0}.stop-notice{font:12px/17px var(--font);color:var(--text-2)}
+#wb-chat .msg-row.model-error:not(.turn-continuation)>.bubble>.bubble-header{display:grid!important;grid-template-columns:minmax(0,1fr);gap:3px}
+#wb-chat .msg-row.model-error.turn-continuation>.bubble>.bubble-header{display:none!important}
+#wb-chat #log{overflow-anchor:none}
+.fc-preview{border:0;background:transparent;color:var(--accent);font:inherit;font-size:12px;padding:5px 8px;white-space:nowrap;cursor:pointer}

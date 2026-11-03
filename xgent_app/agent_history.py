@@ -22,7 +22,7 @@ async def persist_agent_result(
     notice: str,
     display_content: Optional[str] = None,
     display_metadata: Optional[dict[str, Any]] = None,
-) -> None:
+) -> int:
     """Record an Agent result in both global and conversation history.
 
     ``notice`` is the plain-text form fed to the model as conversation
@@ -70,6 +70,7 @@ async def persist_agent_result(
         # A tool result is not optional: the action may already have happened.
         raise AttachmentContextError('工具结果保存失败，已暂停后续执行；请勿直接重复运行已执行的命令。')
     await database.add_chat_message(conversation_id, "user", notice)
+    return row_id
 
 
 async def persist_standard_operation_result(

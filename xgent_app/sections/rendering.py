@@ -1426,6 +1426,8 @@ def _stream_chunk_idle_timeout_seconds() -> float:
 
 
 async def _ensure_generated_reply(generated_reply, chat_id, provider_name, model_name):
+    from xgent_app.conversations import set_reply_generation
+    set_reply_generation(provider_name, model_name)
     if generated_reply is not None:
         return generated_reply
     db = await BotMemoryDB.get_instance()
@@ -1465,6 +1467,17 @@ async def finalize_reported_error(context, chat_id, msg, text):
             'telegram_error': str(text), 'error_owner_id': getattr(msg, 'message_id', None)}
     display = {'version': 1, 'plain_text': str(text), 'segments': [{'kind': 'html',
                'text': html.escape(str(text)).replace('\n', '<br>')}]}
+    if record_id is not None:
+        try:
+            db = await BotMemoryDB.get_instance()
+            record = await db.get_display_message(record_id)
+            from xgent_app.presentation import metadata_dict
+            metadata = metadata_dict((record or {}).get('metadata'))
+            if metadata.get('model_error') is True:
+                display['model_error'] = True
+                hint['model_error'] = True
+        except Exception:
+            logger.warning('错误展示元数据暂不可读，仍投递原始错误', exc_info=True)
     if hint['error_owner_id'] is not None:
         display['reply_message_id'] = hint['error_owner_id']
     with message_presentation(hint), web_display_scope(display):

@@ -68,7 +68,7 @@ def messages_from_metadata(metadata: dict, row_id=None) -> list | None:
     return messages
 
 
-def restore_tool_context(history: list, records: list, upload_root) -> list:
+def restore_tool_context(history: list, records: list, upload_root, *, strict=False) -> list:
     """Also keep native tool payloads outside the ordinary text history window."""
     from xgent_app.compression import metadata_of
     result = deepcopy(history)
@@ -116,8 +116,14 @@ def restore_tool_context(history: list, records: list, upload_root) -> list:
                     raise ValueError("snapshot changed")
                 content[index] = ({**part['part'], 'data': base64.b64encode(raw).decode('ascii')}
                                   if part.get('encoding') == 'native' else json.loads(raw))
-            except Exception as exc:
-                raise AttachmentContextError(f"Tool payload unavailable: {path}: {exc}") from exc
+            except (OSError, ValueError) as exc:
+                if strict:
+                    raise AttachmentContextError(f"Tool payload unavailable: {path}: {exc}") from exc
+                content[index] = {'type': 'text', 'text': (
+                    f'[Historical tool attachment temporarily unavailable / 历史工具附件暂不可用]\n'
+                    f'Original snapshot: {path}\nReason: {exc}\n'
+                    'This attachment content was not supplied. Keep the recorded tool result; '
+                    'continue with the remaining conversation without pretending to read this file.')}
     return result
 
 

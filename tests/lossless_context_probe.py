@@ -89,13 +89,11 @@ async def tool_replay(bot, root):
             assert assets
             Path(assets[0]['path']).write_bytes(b'corrupted')
             count = len(h.requests)
-            try:
-                await h.call(fmt)
-            except AttachmentContextError:
-                pass
-            else:
-                raise AssertionError('changed retained payload silently dropped')
-            assert len(h.requests) == count
+            await h.call(fmt)
+            assert len(h.requests) == count + 1
+            texts, images, _ = unpack_request(h.requests[-1])
+            assert any('历史工具附件暂不可用' in text for text in texts)
+            assert raw not in images
             results[fmt] = True
     return results
 

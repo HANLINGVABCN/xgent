@@ -530,15 +530,13 @@ async def check_generated_limits(bot, root):
             else:
                 path.write_bytes(content)
             before = len(h.requests)
-            try:
-                await h.call()
-            except AttachmentContextError as exc:
-                assert path.name in str(exc)
-            else:
-                raise AssertionError("missing or damaged original silently omitted")
-            assert len(h.requests) == before
+            await h.call()
+            assert len(h.requests) == before + 1
+            texts, supplied, _ = unpack_request(h.requests[-1])
+            assert any('附件暂不可用' in text and path.name in text for text in texts)
+            assert original not in supplied
             path.write_bytes(original)
-        result["missing_and_damaged_originals_block"] = True
+        result["missing_and_damaged_originals_are_explicit_without_blocking"] = True
         return result
 
 
