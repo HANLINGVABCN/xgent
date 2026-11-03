@@ -33,6 +33,38 @@ let drawerOpen = false, drawerReturn = null, previousInert = null;
 let renameTarget = null, renameReturn = null, renameSaving = false;
 let feedbackTimer = null;
 const controllers = new Set();
+const locationParams = () => new URLSearchParams(location.hash.split('?')[1] || '');
+let localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
+function conversationHref(id) { return id ? '#/chat?conversation=' + encodeURIComponent(id) : '#/chat'; }
+function keepConversationUrl() {
+  if (!localCurrent || locationParams().has('message')) return;
+  const route = location.hash.replace(/^#\/?/, '').split('?')[0] || 'chat';
+  const params = locationParams(); params.set('conversation', localCurrent);
+  const hash = '#/' + route + '?' + params.toString();
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+function selectLocal(id, writeUrl = true) {
+  if (!id) return false;
+  const previous = state.current_chat_id;
+  localCurrent = id;
+  state = {...state, current_chat_id: id, running: runningFor(id)};
+  if (writeUrl && locationParams().get('conversation') !== id) history.pushState(null, '', conversationHref(id));
+  if (!writeUrl) keepConversationUrl();
+  revealAncestors(id); render();
+  window.dispatchEvent(new CustomEvent('xgent-conversation-state', {detail: state}));
+  if (previous !== id) window.dispatchEvent(new CustomEvent('xgent-conversation-changed', {
+    detail: {previous, conversation_id: id},
+  }));
+  return true;
+}
+function followConversationLocation() {
+  if (locationParams().has('message')) return;
+  const id = locationParams().get('conversation');
+  if (id && id !== localCurrent && state.items.length) selectLocal(id, false);
+  else keepConversationUrl();
+}
+window.addEventListener('hashchange', followConversationLocation);
+window.addEventListener('popstate', followConversationLocation);
 
 function node(tag, attributes = {}, ...children) {
   const element = document.createElement(tag);
@@ -132,9 +164,11 @@ function accept(next) {
   if (!next?.current_chat_id || !Array.isArray(next.items) || Number(next.revision) < state.revision) return;
   $('conversation-sync-error').hidden = true;
   const previous = state.current_chat_id;
-  const combined = {...state, ...next};
+  localCurrent ||= next.current_chat_id;
+  const combined = {...state, ...next, current_chat_id: localCurrent};
   if (JSON.stringify(combined) === JSON.stringify(state)) return;
   state = {...combined, running: combined.runs ? combined.runs[combined.current_chat_id] || null : combined.running};
+  keepConversationUrl();
   itemIndex = new Map(state.items.map(item => [item.id, item]));
   for (const id of expandedChildren) if (!itemIndex.has(id)) expandedChildren.delete(id);
   saveExpandedChildren();
@@ -174,19 +208,24 @@ async function mutate(name, data = {}) {
   try {
     const result = await api('/api/workbench/conversations/' + name, data);
     accept(result);
+    if (name === 'create' || name === 'create_child') selectLocal(result.conversation_id || result.current_chat_id);
+    else if ((name === 'archive' && data.id === localCurrent) ||
+             (name === 'delete' && (result.deleted_conversation_ids || [data.id]).includes(localCurrent))) {
+      selectLocal(result.current_chat_id || result.items?.[0]?.id);
+    }
     return result;
   } finally { mutation = null; render(); }
 }
 async function prepareChat() {
   if (window.XGentWorkbench) return window.XGentWorkbench.prepareChat();
   document.body.dataset.page = 'chat';
-  location.hash = '/chat';
+  location.hash = conversationHref(localCurrent || state.current_chat_id);
   return true;
 }
 async function selectConversation(id) {
   if (mutation || !await prepareChat()) return;
   try {
-    if (id !== state.current_chat_id && !await mutate('switch', {id})) return;
+    selectLocal(id);
     closeMenu(false);
     setDrawer(false);
   } catch (error) { if (error.name !== 'AbortError') notify('切换失败：' + error.message, {error: true, retry: () => selectConversation(id)}); }
@@ -226,7 +265,7 @@ async function archiveConversation(id) {
     const fallback = result.current_chat_id;
     notify('已归档「' + title(item) + '」', {label: '撤销', undo: async () => {
       if (!await mutate('restore', {id})) return;
-      if (wasCurrent && state.current_chat_id === fallback) await mutate('switch', {id});
+      if (wasCurrent && state.current_chat_id === fallback) selectLocal(id);
       notify('已恢复对话');
     }});
   } catch (error) { if (error.name !== 'AbortError') notify('归档失败：' + error.message, {error: true, retry: () => archiveConversation(id)}); }
@@ -268,11 +307,15 @@ function createRow(item) {
   const name = node('span', {class: 'conv-row-title'});
   const bot = node('span', {class: 'conv-bot-badge', hidden: '', title: 'Telegram 当前使用此对话，不代表正在执行任务'}, 'Bot 当前');
   const dot = node('span', {class: 'conv-running-dot', 'aria-label': '正在生成', hidden: ''});
-  const open = button([branch, childBadge, name, bot, dot], () => {
+  const open = node('a', {href: conversationHref(item.id), draggable: 'true',
+    class: 'conv-open', 'data-focus': 'open:' + item.id}, branch, childBadge, name, bot, dot);
+  open.addEventListener('click', event => {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
     const current = itemById(item.id);
     if (current && isArchived(current)) restoreConversation(item.id, true);
     else selectConversation(item.id);
-  }, {class: 'conv-open', 'data-focus': 'open:' + item.id});
+  });
   const more = button(icon('more'), event => openMenu(item.id, event.currentTarget), {
     class: 'conv-more conv-icon-button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'data-focus': 'more:' + item.id,
   });
@@ -350,7 +393,7 @@ function renderList() {
     entry.open.setAttribute('aria-label', (isArchived(item) ? '已归档：' : '打开对话：') + title(item));
     if (current) entry.open.setAttribute('aria-current', 'true'); else entry.open.removeAttribute('aria-current');
     entry.dot.hidden = !runningFor(item.id);
-    entry.open.disabled = !!mutation || isArchived(item);
+    entry.open.setAttribute('aria-disabled', String(!!mutation));
     entry.restore.hidden = !isArchived(item);
     entry.restore.disabled = !!mutation;
     entry.restore.title = '恢复对话';
@@ -693,7 +736,9 @@ document.addEventListener('keydown', event => {
 
 window.XGentConversations = {
   accept, refresh, get items(){return state.items;},
-  async select(id){if(mutation)throw new Error('正在切换对话，请稍后重试');if(id!==state.current_chat_id)await mutate('switch',{id});closeMenu(false);setDrawer(false);return state.current_chat_id===id;},
+  async select(id){if(mutation)throw new Error('正在切换对话，请稍后重试');if(!itemById(id))throw new Error('对话已不存在');selectLocal(id);closeMenu(false);setDrawer(false);return state.current_chat_id===id;},
+  href: conversationHref, followLocation: followConversationLocation,
+  get readOnly(){const item=itemById(state.current_chat_id);return !!state.items.length && (!item || isArchived(item));},
   get current() { return state.current_chat_id; }, get running() { return runningFor(state.current_chat_id); }, get runs() { return activeRuns(); },
 };
 const groupSelect = $('conversation-group-select');
@@ -733,6 +778,7 @@ window.addEventListener('xgent-auth-expired', () => {
   $('conversation-rename-input').value = '';
   $('conversation-sync-error').hidden = true;
   state = {current_chat_id: null, revision: -1, items: [], running: null};
+  localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
   rows.clear(); itemIndex.clear(); listSignature = ''; view = 'recent'; search.value = '';
   list.replaceChildren(); render();
 });

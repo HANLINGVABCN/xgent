@@ -69,7 +69,7 @@ async def main():
     await ns['GlobalRecorder'].record_user_message('A history')
     created=await w.handle('POST','conversations/create',{'name':'B'})
     b=created['current_chat_id']; rejected=[]
-    for body in ({'confirm':'清空当前会话'}, {'conversation_id':'global_memory','confirm':'清空当前会话'}):
+    for body in ({'confirm':'清空当前会话'}, {'conversation_id':'missing-conversation','confirm':'清空当前会话'}):
         try: await w.handle('POST','memory/clear',body)
         except WorkbenchError as exc: rejected.append(exc.status)
     a=await w.handle('GET','history',{'conversation_id':'global_memory'})

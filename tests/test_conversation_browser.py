@@ -19,7 +19,14 @@ def select(page, conversation_id):
 def create(context, url, name):
     response = context.request.post(url + '/api/workbench/conversations/create', data={'name': name})
     assert response.ok
-    return response.json()['current_chat_id']
+    cid = response.json()['current_chat_id']
+    # Test setup represents creation in this page; server defaults no longer
+    # switch every already-open browser tab.
+    if context.pages:
+        page = context.pages[0]
+        page.evaluate('window.XGentConversations.refresh()')
+        page.evaluate('(id)=>window.XGentConversations.select(id)', cid)
+    return cid
 
 
 @pytest.fixture
@@ -82,7 +89,7 @@ def test_rename_inactive_chat_stays_bound_while_other_tab_switches(conversation_
     page.get_by_role('button', name='保存', exact=True).click()
     page.locator('#conversation-rename-dialog').wait_for(state='hidden')
     assert row(page, a).locator('.conv-row-title').inner_text() == '部署任务 · 中文与标点 / <script>'
-    assert current(page) == 'global_memory'
+    assert current(page) == b
     assert page.locator('.conv-row-title script').count() == 0
     row(page, a).locator('.conv-more').click()
     page.keyboard.press('Escape')
@@ -235,7 +242,7 @@ def test_mobile_drawer_keyboard_backdrop_and_resize(conversation_page, tmp_path)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth+1')
 
 
-def test_cross_tab_switch_updates_sidebar_without_stealing_search(browser_context, workspace_url):
+def test_cross_tab_new_chat_updates_list_without_switching_other_tab(browser_context, workspace_url):
     first = browser_context.new_page(); second = browser_context.new_page()
     ready(first, workspace_url['url']); ready(second, workspace_url['url'])
     first.locator('.conv-row').first.wait_for(); second.locator('.conv-row').first.wait_for()
@@ -244,7 +251,9 @@ def test_cross_tab_switch_updates_sidebar_without_stealing_search(browser_contex
     second.get_by_role('button', name='新对话', exact=True).click()
     second.wait_for_function('(id)=>window.XGentConversations.current!==id', arg=original)
     selected = current(second)
-    first.wait_for_function('(id)=>window.XGentConversations.current===id', arg=selected)
+    first.evaluate('window.XGentConversations.refresh()')
+    first.wait_for_function('(id)=>window.XGentConversations.items.some(item=>item.id===id)', arg=selected)
+    assert current(first) == original
     assert first.get_by_role('searchbox', name='搜索对话名称和内容').input_value() == '保留搜索输入'
     first.close(); second.close()
 
@@ -264,22 +273,18 @@ def test_sidebar_survives_optional_workbench_script_failure(browser_context, wor
 
 
 
-def test_failed_switch_keeps_current_chat_and_draft(conversation_page, browser_context, workspace_url):
+def test_tab_switch_is_local_and_keeps_draft_when_server_switch_is_unavailable(conversation_page, browser_context, workspace_url):
     page = conversation_page
     target = create(browser_context, workspace_url['url'], '切换失败不会误投')
-    browser_context.request.post(workspace_url['url'] + '/api/workbench/conversations/switch', data={'id': 'global_memory'})
-    page.evaluate('window.XGentConversations.refresh()')
+    select(page, 'global_memory')
     page.locator('#input').fill('绝不能丢失的草稿')
     page.route('**/api/workbench/conversations/switch', lambda route: route.fulfill(status=503, json={'error': '网络暂时不可用'}))
     row(page, target).locator('.conv-open').click()
-    page.locator('#conversation-feedback').get_by_text('切换失败：网络暂时不可用', exact=True).wait_for()
-    assert current(page) == 'global_memory'
-    assert page.locator('#input').input_value() == '绝不能丢失的草稿'
-    page.unroute('**/api/workbench/conversations/switch')
-    page.locator('#conversation-feedback').get_by_role('button', name='重试', exact=True).click()
     page.wait_for_function('(id)=>window.XGentConversations.current===id', arg=target)
+    assert page.url.endswith('conversation=' + target)
     select(page, 'global_memory')
     assert page.locator('#input').input_value() == '绝不能丢失的草稿'
+    page.unroute('**/api/workbench/conversations/switch')
 
 
 def test_initial_list_error_has_retry_without_breaking_chat(browser_context, workspace_url):

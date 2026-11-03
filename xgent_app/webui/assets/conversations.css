@@ -39,6 +39,7 @@ body.dark { --conv-hover: #262f39; --conv-selected: #303b47; }
 .conv-restore { color: var(--wb-muted); }
 .conv-open { display: flex; gap: 7px; align-items: center; min-width: 0; flex: 1; height: 100%; padding: 0 8px 0 12px; background: transparent; border: 0; color: inherit; font-size:calc(var(--web-ui-font-size,13px) * 1.00000); font-weight: 400; text-align: left; border-radius: 8px; }
 .conv-open:focus-visible { outline-offset: -2px; }
+.conv-open { text-decoration: none; cursor: pointer; }
 .conv-row-title { display: block; min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.5; }
 .conv-more { margin-right: 4px; width: 27px; height: 28px; opacity: 0; }
 .conv-children-toggle { width: 22px; height: 22px; align-self: flex-end; margin-bottom: 4px; }

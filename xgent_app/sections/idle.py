@@ -264,8 +264,9 @@ async def submit_ordinary_text(text, *, chat_id, request_key=None):
 async def _web_accept_text(text, *, conversation_id=None, request_id=None, generation=None):
     from xgent_app.interaction import interaction
     from xgent_app.message_queue import public_item
+    # Each browser tab supplies its target; the shared selection is a fallback.
     with interaction('web', 'management'):
-        async with conversation_operation(conversation_id, fresh=True, expected=conversation_id is not None, selector='shared'):
+        async with conversation_operation(conversation_id, fresh=True, selector='shared'):
             await UserDataManager.init()
             db = await BotMemoryDB.get_instance()
             request_key = 'web:' + request_id if request_id else None
@@ -1721,7 +1722,7 @@ def _web_submit_callback(callback_data: str, message_id: int, outbox: Any, *, co
         outbox.put({"type": "turn_error", "text": "服务未就绪"})
         return
     asyncio.run_coroutine_threadsafe(
-        _web_scoped_call(_web_handle_callback(callback_data, message_id, outbox), None if callback_data.startswith('act_stop_generation') else conversation_id, outbox), loop,
+        _web_scoped_call(_web_handle_callback(callback_data, message_id, outbox), conversation_id, outbox), loop,
     )
 
 
@@ -2208,7 +2209,7 @@ async def _web_scoped_call(coro, conversation_id, outbox, *, execution=False, re
     started = False
     try:
         with interaction('web', 'management'):
-            async with conversation_operation(conversation_id, expected=conversation_id is not None,
+            async with conversation_operation(conversation_id,
                                                fresh=True, selector='shared') as scope:
                 await UserDataManager.init()
                 expired = UserDataManager.bind_ui_state()
@@ -2220,8 +2221,8 @@ async def _web_scoped_call(coro, conversation_id, outbox, *, execution=False, re
                 purpose = purpose or ('chat' if user_input and UserDataManager.get('state') == BotState.IDLE else 'management')
                 execute = execution() if callable(execution) else execution
                 with interaction('web', purpose):
-                    admitted = await get_conversations().resolve(scope.conversation_id, expected=conversation_id is not None, selector='shared')
-                    async with conversation_operation(admitted, execution=execute, expected=conversation_id is not None):
+                    admitted = await get_conversations().resolve(scope.conversation_id, selector='shared')
+                    async with conversation_operation(admitted, execution=execute):
                         started = True
                         await coro
     except ConversationError as exc:

@@ -5,7 +5,7 @@
 一件事拥有一份独立上下文，复用同一套模型调用、Agent 执行和 SQLite 数据库。每个对话有独立执行槽：同一对话按序运行，不同对话可同时生成回复和执行命令。
 
 - **Telegram 独立保持当前会话。** 使用 Bot 的 `/chats`、`/new [名称]` 主动选择；网页或 CLI 切换不改变 Bot 的下一条消息归属，也不再向 Bot 广播切换通知。
-- **Web、Bot 和每个终端独立选择。** 每个 CLI/TUI 进程首次打开以当时 Web 当前会话为起点，之后只跟随本终端操作；不把终端选择写成全局配置。网页会话列表继续用小型「Bot 当前」标记显示 Bot 选择，不改变排序或代表忙碌。
+- **每个 Web 标签页、Bot 和每个终端独立选择。** 侧栏对话为真实链接，可复制网址、Ctrl／中键打开或拖到新标签页。网址包含对话 ID，普通点击只切换当前标签；刷新、前进后退和其他标签页的操作不会覆盖此标签的选择与草稿。每个 CLI/TUI 进程首次打开以服务端默认会话为起点，之后只跟随本终端操作；不把终端选择写成全局配置。网页会话列表继续用小型「Bot 当前」标记显示 Bot 选择，不改变排序或代表忙碌。
 - 聊天记录仍按会话共享。Web／CLI 在 Bot 当前会话里发起普通聊天时，正文、附件和回复继续同步到 Telegram；其他会话的普通聊天以及网页菜单、配置等管理回执不主动投递。
 - 初始镜像决定在回合接纳时固定。**Web 发起的运行中回合**另有投递订阅：Bot 切入时，补齐当前尚未结束回复的已有片段，随后沿相同逻辑消息 ID 编辑；不补过去回复，重复切入不重新建消息。已订阅的回合完整结束，切走后按原规则标明来源；CLI 初始路由规则不变。
 - 定时任务仍按原会话执行并主动通知，包括已归档会话；不自动改变两端选择。被永久删除会话的任务会终止并删除。
@@ -77,7 +77,7 @@
 
 ## 实现与接口
 
-- `current_chat_id` 保留 Web 选择；可为空的 `telegram_conversation_id` 保存 Bot 选择。`GET /api/workbench/conversations` 和 `conversation_state` 事件返回两者，沿用修订号与现有轮询。Bot 标记变化只更新列表，不重载聊天或丢弃草稿。
+- `current_chat_id` 保留服务端默认选择，供没有指定对话的入口初始化；各 Web 标签页以网址和本页状态保存自己的选择。可为空的 `telegram_conversation_id` 保存 Bot 选择。`GET /api/workbench/conversations` 和 `conversation_state` 事件继续同步列表、运行状态与 Bot 标记，不覆盖已打开标签的对话。网页请求按明确的对话 ID 接纳，继续验证对话存在、会话版本及表单／消息归属。
 - 原有 `POST /api/workbench/conversations/{create,switch,rename,archive,restore,reset_context,delete}` 保持原行为；新增 `conversations/set_bot` 只响应「⋯ → 设为 Bot 当前对话」的明确操作。参数 `id`、目标 `generation`、`expected_bot` 校验原 Bot 选择，事务中只更新 `telegram_conversation_id`；不切换 Web/CLI、不移动任务、不改变暂停队列。未配置 Bot、目标已归档或已失效时拒绝。
 - `ConversationManager` 的终端选择仅在该进程内保存，通过显式 `selector="terminal"` 管理；schema v4 新增的是共享待发消息表，不增加全局终端选择指针。
 - `ConversationScope` 在记录、附件处理之前绑定；除会话、版本、回合外，保存操作来源、用途与固定的初始 Telegram 投递决定。Web 的 `WebRunDelivery` 只物化当前未结束回复，订阅后将**新操作**的投递许可写进既有出站 Op 快照；先入队创建再入队编辑，断线继续走异步出站队列，旧禁止投递记录不重新解禁。回合结束即清理订阅，模型引擎与工具接口不重新实现。

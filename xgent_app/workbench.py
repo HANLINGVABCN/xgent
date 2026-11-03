@@ -121,7 +121,9 @@ class Workbench:
         from xgent_app.interaction import interaction
         try:
             with interaction('web', 'management'):
-                async with conversation_operation(cid, expected=method != 'GET' and not navigation and not version_operation and resource != 'ask', allow_archived=conversation_export or method=='GET' and (version_operation or resource in {'history','search','artifacts/preview','artifacts/cover'}), fresh=True, selector='shared'):
+                # A tab's explicit target is independent of the shared default.
+                # Scope generation, callback ownership and mutation guards remain.
+                async with conversation_operation(cid, allow_archived=conversation_export or method=='GET' and (version_operation or resource in {'history','search','artifacts/preview','artifacts/cover'}), fresh=True, selector='shared'):
                     return await self._handle_scoped(method, resource, data)
         except ConversationError as exc:
             raise WorkbenchError(str(exc), exc.status) from exc
@@ -1181,7 +1183,9 @@ class Workbench:
             else:
                 await self.ns['reset_conversation_context'](str(data['id']))
         else:
-            await get_conversations().manage(action, data.get('id'), data.get('name'))
+            changed = await get_conversations().manage(action, data.get('id'), data.get('name'))
+            if action == 'create':
+                result['conversation_id'] = changed['conversation_id']
         return {**await self.conversations({}), **result}
 
     async def conversation_delete_info(self, data):

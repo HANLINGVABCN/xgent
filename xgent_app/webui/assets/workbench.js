@@ -101,12 +101,12 @@ function clearSourceReader(keepBanner=false){
 }
 async function followSource(){
   const params=new URLSearchParams(location.hash.split('?')[1]||''),cid=params.get('conversation'),anchor=params.get('message');
-  if(!cid){clearSourceReader();sourceVisit='';return;}
+  if(!cid || !anchor){clearSourceReader();sourceVisit='';window.XGentConversations?.followLocation();return;}
   const signature=cid+'|'+(anchor||'');if(sourceVisit===signature)return;sourceVisit=signature;
   const sequence=++sourceNavigationSequence,stillHere=()=>sequence===sourceNavigationSequence&&state.route==='chat'&&sourceVisit===signature;
   const banner=$('source-navigation');
   const close=el('button',{type:'button',class:'wb-source-close','aria-label':'关闭来源定位提示',title:'关闭',onclick:()=>{
-    sourceVisit='';sourceNavigationSequence++;history.replaceState(null,'','#/chat');
+    sourceVisit='';sourceNavigationSequence++;history.replaceState(null,'',window.XGentConversations?.href(window.XGentConversations.current)||'#/chat');
     clearSourceReader();window.XGentChat?.dismissLocation();
   }},'×');
   const showBanner=(...children)=>{banner.hidden=false;banner.replaceChildren(close,el('div',{class:'wb-source-content'},...children));};
@@ -695,7 +695,7 @@ window.XGentWorkbench={
   attachmentVersions,
   previewFile:fileDetail,
   dialog,closeDialog,
-  prepareChat:async()=>{if(state.route!=='chat'||location.hash.includes('?')){location.hash='/chat';await route();}return state.route==='chat';},
+  prepareChat:async()=>{if(state.route!=='chat'||new URLSearchParams(location.hash.split('?')[1]||'').has('message')){location.hash=window.XGentConversations?.href(window.XGentConversations.current)||'/chat';await route();}return state.route==='chat';},
   commands:()=>state.boot?.commands,
   confirmCommand:cmd=>confirmAction('执行 '+cmd,'此命令可能改变共享数据或重启服务，是否继续？',async()=>window.XGentChat.command(cmd)),
   beforeLogout:()=>{if(state.submitting||state.detailSaving)return false;if((state.dirty||state.detailDirty)&&!confirm('尚有未保存修改，确定退出登录？'))return false;state.dirty=false;state.detailDirty=false;return true;}

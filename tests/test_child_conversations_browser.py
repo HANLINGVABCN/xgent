@@ -56,6 +56,10 @@ def test_child_arrow_position_expansion_refresh_and_current_child(browser_contex
     assert page.evaluate('window.XGentConversations.current') == parent
     assert browser_context.request.post(base + '/api/workbench/conversations/switch', data={'id': nested}).ok
     page.evaluate('window.XGentConversations.refresh()')
+    assert page.evaluate('window.XGentConversations.current') == parent
+    page.evaluate('(id)=>window.XGentConversations.select(id)', nested)
+    if width == 390:
+        page.locator('#conversation-drawer-toggle').click()
     row(page, nested).wait_for(state='visible')
     assert row(page, nested).locator('.conv-open').get_attribute('aria-current') == 'true'
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')

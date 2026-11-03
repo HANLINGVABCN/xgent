@@ -73,7 +73,7 @@ def test_source_hint_does_not_overlap_bottom_arrow_and_close_stays_visible(brows
     page.locator('#input').fill('当前位置草稿保留')
     before=page.locator('#log').evaluate('node=>({scroll:node.scrollTop,count:node.querySelectorAll(".msg-row").length})')
     close.click()
-    assert banner.is_hidden() and page.evaluate('location.hash')=='#/chat'
+    assert banner.is_hidden() and page.evaluate('location.hash')=='#/chat?conversation='+source_record['id']
     assert page.locator('#input').input_value()=='当前位置草稿保留'
     assert page.evaluate('window.XGentConversations.current')==source_record['id']
     assert page.locator('#log').evaluate('node=>({scroll:node.scrollTop,count:node.querySelectorAll(".msg-row").length})')==before
@@ -96,7 +96,7 @@ def test_source_hint_can_be_closed_while_loading_or_after_failure(browser_contex
     if state=='loading':
         page.evaluate('()=>{window.__sourceRelease();}')
     assert page.locator('#source-navigation').is_hidden()
-    assert page.evaluate('location.hash')=='#/chat'
+    assert page.evaluate('location.hash')=='#/chat?conversation=global_memory'
     assert page.evaluate('window.XGentConversations.current')=='global_memory'
     assert page.locator('#input').input_value()=='不应被跳转清除'
     page.close()
@@ -116,7 +116,7 @@ def test_touch_can_close_source_hint_without_hover(browser_context,workspace_url
         assert close.is_visible()
         close.tap()
         assert page.locator('#source-navigation').is_hidden()
-        assert page.evaluate('location.hash')=='#/chat'
+        assert page.evaluate('location.hash')=='#/chat?conversation='+source_record['id']
         assert page.evaluate('window.XGentConversations.current')==source_record['id']
     finally:
         phone.close()

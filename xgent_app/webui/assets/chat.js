@@ -12,7 +12,8 @@ import {installCommandSeries} from './command-series.js';
 
   var log = document.getElementById("log");
   var input = document.getElementById("input");
-  var selectedConversationId = null;
+  var initialConversationParams = new URLSearchParams(location.hash.split('?')[1] || '');
+  var selectedConversationId = initialConversationParams.has('message') ? null : initialConversationParams.get('conversation');
   const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun,
     captureAnchor:scrollAnchor,restoreAnchor:restoreScrollAnchor,scrollAdjusted:noteScrollAdjustment});
   var conversationDrafts = Object.create(null);
@@ -2420,7 +2421,7 @@ import {installCommandSeries} from './command-series.js';
     }
   }
   document.getElementById('history-retry').onclick=function(){const direction=!!historyError?.forward;historyPreloads.forEach(item=>item.controller.abort());historyPreloads.clear();historyPage(direction);};
-  function returnToLatest(){if(location.hash.includes('?conversation=')){history.replaceState(null,'','#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true,true).then(scrollDown).catch(function(){});}
+  function returnToLatest(){if(location.hash.includes('?conversation=')){history.replaceState(null,'',window.XGentConversations?.href(selectedConversationId)||'#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true,true).then(scrollDown).catch(function(){});}
   function loadHistory(replaceView=false) {
     const visible=scrollAnchor(),row=visible?.row;
     const readingAnchor=!replaceView&&(viewingPast||!isNearBottom())&&
@@ -2550,7 +2551,7 @@ import {installCommandSeries} from './command-series.js';
 
   function updateSendAvailability(){
     var queueable=queueEnabled&&!pendingFiles.length&&!input.value.trim().startsWith('/');
-    btnSend.disabled=!!textSubmitting||!!uploadQueue||!historyReady||!!currentConnState||(conversationBusy&&!queueable);
+    btnSend.disabled=!!textSubmitting||!!uploadQueue||!historyReady||!!currentConnState||!!window.XGentConversations?.readOnly||(conversationBusy&&!queueable);
     btnSend.classList.toggle('hidden',conversationBusy&&!queueEnabled);
     btnSend.title=conversationBusy&&queueable?'加入待发队列 (Enter)':'发送消息 (Enter)';
   }
@@ -3054,11 +3055,13 @@ import {installCommandSeries} from './command-series.js';
   var dropOverlay = document.getElementById("drop-overlay");
   var dragCounter = 0;
   window.addEventListener("dragenter", function (e) {
+    if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return;
     e.preventDefault();
     dragCounter++;
     dropOverlay.classList.add("active");
   });
   window.addEventListener("dragleave", function (e) {
+    if (!dragCounter) return;
     e.preventDefault();
     dragCounter--;
     if (dragCounter <= 0) {
@@ -3066,8 +3069,9 @@ import {installCommandSeries} from './command-series.js';
       dropOverlay.classList.remove("active");
     }
   });
-  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("dragover", function (e) { if(Array.from(e.dataTransfer?.types || []).includes('Files'))e.preventDefault(); });
   window.addEventListener("drop", function (e) {
+    if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return;
     e.preventDefault();
     dragCounter = 0;
     dropOverlay.classList.remove("active");
@@ -3866,6 +3870,7 @@ import {installCommandSeries} from './command-series.js';
       Object.values(state.runs).forEach(rememberRun);
     }else if(state.running)rememberRun(state.running);
     setBusy(!!currentRun());
+    syncSendState();
   });
   window.addEventListener('xgent-conversation-deleted',function(event){
     const cid=event.detail.conversation_id;delete conversationDrafts[cid];try{sessionStorage.removeItem(draftKey(cid));}catch{}

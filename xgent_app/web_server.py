@@ -790,11 +790,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.config.read_conversations is None:
             return {}
         cid = str(data.get('conversation_id') or '')
-        state = self._run_coro(self.config.read_conversations())
-        if not cid or (not background and cid != state['current_chat_id']):
-            self._send_json({'error': '当前会话已变化，请刷新会话后重新提交；输入未发送。',
+        if not cid:
+            state = self._run_coro(self.config.read_conversations())
+            self._send_json({'error': '缺少目标会话；输入未发送。',
                              'current_chat_id': state['current_chat_id']}, status=409)
             return None
+        # The scoped entry checks existence, archive state and generation. The
+        # shared default selection is not a tab's admission requirement.
         return {'conversation_id': cid}
 
     def _handle_chat(self) -> None:
