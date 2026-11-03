@@ -2686,29 +2686,52 @@ class SelfTriggerManager:
         process_task: Optional[asyncio.Task] = None
         wait_notice_task: Optional[asyncio.Task] = None
         try:
+            from xgent_app.trigger_presentation import build_trigger_result_display
+            from xgent_app.presentation import message_presentation
+            from xgent_app.web_display import web_display_scope
+            from xgent_app.message_policy import MessagePolicy, CHANNELS
+            # One record owns the human receipt and the unchanged model context.
+            # Live delivery and refresh must never expose different bodies.
+            result_display = build_trigger_result_display(visible_notice, run)
+            result_policy = MessagePolicy('status', 'assistant', CHANNELS, True, 'task').to_dict()
+            result_record_id = await GlobalRecorder.record_user_message(
+                internal_result, MessageType.USER_TEXT, int(task['chat_id']), metadata={
+                    **result_display, 'message_policy': result_policy,
+                    'trigger_result': {'version': 1, 'task_id': task['id'], 'run_id': run_id},
+                },
+            )
             if run.get('notice_started_at') is None:
                 await db.finish_trigger_run(run_id, notice_started_at=time.time())
                 try:
-                    await bot.send_message(
-                        chat_id=int(task['chat_id']),
-                        text=visible_notice,
-                    )
+                    with message_presentation({
+                        'kind': MessageType.USER_TEXT, 'record_id': result_record_id,
+                        'purpose': 'status', 'message_policy': result_policy,
+                    }), web_display_scope(result_display['web_display']):
+                        notice_message = await bot.send_message(
+                            chat_id=int(task['chat_id']),
+                            text=result_display['display']['content'], parse_mode='HTML',
+                        )
+                    if result_record_id is not None:
+                        from xgent_app.telegram_records import bind_record
+                        row = await db.get_display_message(result_record_id)
+                        if row is not None:
+                            await bind_record(db, row, [notice_message.message_id])
+                            outbox = getattr(bot, 'outbox', None)
+                            if outbox is not None:
+                                await db.patch_display_metadata(result_record_id, {'web_live': {
+                                    'epoch': outbox.snapshot()['epoch'], 'message_ids': [notice_message.message_id],
+                                }})
                 except Exception as exc:
                     logger.warning(f"发送 trigger 可见提醒失败 {run_id}: {exc}")
                 else:
                     await db.finish_trigger_run(run_id, notice_sent_at=time.time())
 
+            await publish_saved_reply(context, result_record_id)
+
             latest_task = await db.get_trigger_task(task['id'])
             if latest_task is None or latest_task['status'] == 'cancelled':
                 await db.finish_trigger_run(run_id, delivered_at=time.time())
                 return
-            # 🔔 可见提醒只发 Telegram 界面，不写入 AI 历史：任务概述/状态/ID 已全部包含在 internal_result 中，
-            # 避免每次触发在历史里产生 "[系统操作] 🔔" + "[后台任务结果]" 两条重复记录。
-            await GlobalRecorder.record_user_message(
-                internal_result,
-                MessageType.USER_TEXT,
-                int(task['chat_id']),
-            )
             process_task = asyncio.create_task(process_conversation(
                 update,
                 context,

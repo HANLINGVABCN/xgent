@@ -331,6 +331,11 @@ def history_web_display(content: str, display=None):
 
 def apply_history_presentation(message, record, metadata, *, namespace=None, mode_override=None):
     """Use the live semantic renderers for dynamic history; snapshots are legacy fallback."""
+    trigger_result = metadata.get('trigger_result')
+    if isinstance(trigger_result, dict) and trigger_result.get('version') == 1:
+        # A system receipt has its own frozen display, not an AI/tool reply.
+        message['presentation_mode'] = 'folded'
+        return
     from .presentation import normalize_mode, ai_html, operation_html, footer_html, metadata_dict, current_turn
     from .agent_status import compact_agent_round_status
     from .web_display import build_web_display, build_operation_display, web_footer_html
@@ -458,6 +463,12 @@ def build_history_message(
     except (ValueError, TypeError):
         metadata = {}
         message["media_error"] = "\u5386\u53f2\u9644\u4ef6\u5143\u6570\u636e\u635f\u574f"
+    trigger_result = metadata.get('trigger_result')
+    if isinstance(trigger_result, dict) and trigger_result.get('version') == 1:
+        message['role'] = 'assistant'
+        message.pop('conversation_actions', None)
+        if isinstance(metadata.get('web_display'), dict):
+            message['web_display'] = metadata['web_display']
     if kind == 'agent_result' and 'file_delivery' not in metadata and 'file_write' not in metadata:
         delivery = delivered_file_display(content)
         if delivery:
