@@ -1162,15 +1162,18 @@ class ConversationBranchService:
         metadata = _metadata(draft.get('metadata'))
         media = []
         with bind_conversation(ConversationScope(conversation_id, session['generation'], origin='web', purpose='management')):
-            for key in ('attachments', 'server_uploads'):
-                for index, ref in enumerate(metadata.get(key, [])):
-                    item = _describe_media(ref, self.storage, attachment=True)
-                    item.update(draft_key=f'{key}:{index}', ingress_mode='server_upload' if key == 'server_uploads' else 'attachment',
-                                conversation_id=conversation_id)
-                    if item.get('path') and not item.get('error'):
-                        token = MEDIA_TOKEN_REGISTRY.register(item['path'], item['filename'])
-                        item['download_url'] = f'/api/media/{token}?conversation_id={conversation_id}'
-                    media.append(item)
+            refs = [(key, index, ref) for key in ('attachments', 'server_uploads')
+                    for index, ref in enumerate(metadata.get(key, []))]
+            refs = sorted(enumerate(refs), key=lambda entry: entry[1][2].get('order')
+                          if isinstance(entry[1][2], dict) and type(entry[1][2].get('order')) is int else entry[0])
+            for _, (key, index, ref) in refs:
+                item = _describe_media(ref, self.storage, attachment=True)
+                item.update(draft_key=f'{key}:{index}', ingress_mode='server_upload' if key == 'server_uploads' else 'attachment',
+                            conversation_id=conversation_id)
+                if item.get('path') and not item.get('error'):
+                    token = MEDIA_TOKEN_REGISTRY.register(item['path'], item['filename'])
+                    item['download_url'] = f'/api/media/{token}?conversation_id={conversation_id}'
+                media.append(item)
         return {'text': draft['text'], 'metadata': metadata, 'media': media,
                 'send_text': draft['text'] or '[附件] ' + '、'.join(item['filename'] for item in media),
                 'source_record_id': draft['source_record_id'], 'revision': draft['created_at']}

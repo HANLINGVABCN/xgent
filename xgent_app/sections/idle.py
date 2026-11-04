@@ -205,7 +205,7 @@ async def publish_queued_users(context, batch):
             relay_conversation_event(frame)
             relay_user_message(item['text'], queue_origin=item['origin'], queue_id=item['id'], record_id=row['id'])
         elif item['origin'] != 'telegram':
-            mirror_user_line_to_telegram(('🖥 [CLI]' if item['origin'] == 'cli' else '💬 [网页]') + '\n' + item['text'], record_id=row['id'])
+            await mirror_user_record_to_telegram(('🖥 [CLI]' if item['origin'] == 'cli' else '💬 [网页]') + '\n' + item['text'], record_id=row['id'], metadata=row['metadata'])
 
 
 async def _dispatch_queued_batch(batch):
@@ -537,6 +537,49 @@ def mirror_user_line_to_telegram(text: str, *, record_id: Optional[int] = None) 
                              payload={"text": chunk, **({'_record_id': record_id} if record_id is not None else {})}))
 
 
+async def mirror_user_record_to_telegram(text, *, record_id=None, metadata=None, queued=True):
+    """Queue the complete user record, including reused server originals."""
+    from xgent_app.interaction import telegram_delivery_allowed
+    from xgent_app.presentation import metadata_dict
+    from xgent_app.attachments import resolve_upload_path
+    if queued and (not _web_external_tg_mirror_enabled() or not telegram_delivery_allowed()):
+        return
+    if record_id is not None and metadata is None:
+        row = await (await BotMemoryDB.get_instance()).get_display_message(record_id)
+        if row is None:
+            return
+        metadata = row['metadata']
+    metadata = metadata_dict(metadata)
+    refs = [(ref, mode) for key, mode in (('attachments', 'attachment'), ('server_uploads', 'server_upload'))
+            for ref in (metadata.get(key) or []) if isinstance(ref, dict)]
+    refs = sorted(enumerate(refs), key=lambda item: item[1][0].get('order')
+                  if type(item[1][0].get('order')) is int else item[0])
+    if not refs:
+        mirror_user_line_to_telegram(text, record_id=record_id)
+        return
+    display_text = text.partition('\n')[2] if text.startswith(('💬 [网页]\n', '🖥 [CLI]\n')) else text
+    file_message = metadata.get('web_file_message')
+    if isinstance(file_message, dict) and isinstance(file_message.get('text'), str):
+        display_text = file_message['text']
+    for index, (_, (ref, mode)) in enumerate(refs):
+        caption = str(ref.get('caption') or '')
+        if index == 0 and display_text:
+            caption = display_text + ('\n\n' + caption if caption and caption != display_text else '')
+        try:
+            storage = ref.get('storage', 'uploads')
+            if storage not in {'uploads', 'generated_media'}:
+                raise ValueError('附件存储位置无效')
+            root = ArtifactManager.UPLOAD_DIR if storage == 'uploads' else ArtifactManager.GENERATED_MEDIA_DIR
+            path = resolve_upload_path(ref['path'], root)
+            await sync_web_attachment_to_telegram(str(path), ref['name'], caption,
+                ingress_mode=mode, record_id=record_id, queued=queued)
+        except (OSError, ValueError, KeyError) as exc:
+            if caption:
+                mirror_user_line_to_telegram(caption, record_id=record_id)
+            mirror_user_line_to_telegram(f"⚠️ 附件 {ref.get('name', '文件')} 未同步到 Telegram：{exc}", record_id=record_id)
+            logger.warning('附件同步准备失败: %s', exc)
+
+
 # 每个 CLI 会话一个 MirrorBot。它持有 CLI 的 message_id -> 真实 Telegram
 # message_id 的映射，回放 edit/delete 时靠它定位目标消息；丢了映射，流式回复
 # 的每一次编辑都会变成新发一条消息（历史上的"无限刷屏"）。
@@ -626,7 +669,7 @@ async def _replay_relay_op_with_presentation(mirror: Any, op: str, payload: Dict
                 item = await (await BotMemoryDB.get_instance()).queue_item(payload['queue_id'])
                 if item is not None and item['conversation_id'] == current_scope().conversation_id:
                     record_id = item.get('record_id')
-            mirror_user_line_to_telegram(f"{prefix}\n{text}", record_id=record_id)
+            await mirror_user_record_to_telegram(f"{prefix}\n{text}", record_id=record_id)
         outbox = _web_external_outbox
         if outbox is not None and not payload.get('queue_id'):
             # user_message 帧让网页渲染成用户气泡（右侧），而不是 AI 气泡。
@@ -1183,7 +1226,7 @@ async def _web_run_conversation(text: str, outbox: Any, *, expected_state=None) 
             async with db._write() as conn:
                 await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=? AND created_at=?',
                     (current_scope().conversation_id, draft['created_at']))
-        mirror_user_line_to_telegram(f"💬 [网页]\n{text}", record_id=record_id)
+        await mirror_user_record_to_telegram(f"💬 [网页]\n{text}", record_id=record_id)
         await process_conversation(update, context, text)
         outbox.put({"type": "turn_end"})
     except Exception as e:
@@ -1329,11 +1372,54 @@ async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) ->
 
 @_without_reverse_mirror
 async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_id=None, transport_capabilities=None,
-                                          ingress_mode='attachment', record_id=None):
+                                          ingress_mode='attachment', record_id=None, queued=False):
     """Mirror Web files in either mode without changing their AI input policy."""
     from xgent_app.interaction import telegram_delivery_allowed
-    if _web_real_bot is None or not telegram_delivery_allowed():
+    if (_web_real_bot is None and not queued) or not telegram_delivery_allowed():
         return  # Filter before touching Telegram or creating a deferred upload.
+
+    if queued:
+        from xgent_app.fanout import OP_DOCUMENT
+        from xgent_app.file_ingress import FileTransportCapabilities
+        from xgent_app.web_bridge import _allocate_web_message_id
+        from xgent_app.telegram_presentation import telegram_label, presentation_mode
+        channel = telegram_channel()
+        channel.ensure_started()
+        source = '网页上传' if ingress_mode == 'server_upload' else '网页附件'
+        summary = (f'[{source}] 仅向 AI 提供路径，未发送文件内容。' if ingress_mode == 'server_upload'
+                   else f'[{source}] 按类型向 AI 提供内容或路径。')
+        try:
+            size = os.path.getsize(abs_path)
+            capabilities = transport_capabilities or FileTransportCapabilities.configured(BotConfig.API_BASE_URL)
+            if size > capabilities.document_upload_limit:
+                if caption:
+                    mirror_user_line_to_telegram(str(caption), record_id=record_id)
+                mirror_user_line_to_telegram(f'⚠️ {filename} 已存服务器，超过 Bot 文件发送上限，未同步原文件。', record_id=record_id)
+                return
+            value = str(caption or '') + ('\n\n' if caption else '') + summary
+            from xgent_app.telegram_presentation import render_telegram_caption
+            _, overflow = await render_telegram_caption(value)
+            if overflow is not None or len(value.encode('utf-16-le')) // 2 > 900:
+                mirror_user_line_to_telegram(str(caption or ''), record_id=record_id)
+                value = summary
+            payload = {'path': str(abs_path), 'filename': filename, 'caption': value,
+                       'kwargs': {'read_timeout': 120, 'write_timeout': 120},
+                       **({'_record_id': record_id} if record_id is not None else {})}
+            if size > 50 * 1024 * 1024 and capabilities.mode == 'local_bot_api':
+                payload['local_api'] = {'host_data_dir': _LOCAL_API_HOST_DATA_DIR,
+                                        'container_data_dir': _LOCAL_API_CONTAINER_DATA_DIR}
+                timeout = max(120, min(1800, int(size / (50 * 1024 * 1024) * 60)))
+                payload['kwargs'].update(read_timeout=timeout, write_timeout=timeout,
+                                         connect_timeout=30, pool_timeout=30)
+            with telegram_label(presentation_mode()):
+                channel.offer(Op(OP_DOCUMENT, logical_id=_allocate_web_message_id(),
+                    chat_id=chat_id or BotConfig.AUTHORIZED_USER_ID, payload=payload))
+        except OSError as exc:
+            if caption:
+                mirror_user_line_to_telegram(str(caption), record_id=record_id)
+            mirror_user_line_to_telegram(f'⚠️ {filename} 原文件不存在或无法读取，未同步到 Telegram：{exc}', record_id=record_id)
+            logger.warning('附件同步准备失败: %s', exc)
+        return
 
     # 这条路径刻意绕过出站通道（要处理 file:// 容器路径与硬链清理），所以必须
     # 自己看一眼熔断状态：这里的上传超时最高开到 1800s，通道明摆着不通时还硬试
@@ -1633,11 +1719,14 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
                 draft_metadata = {}
             if not isinstance(draft_metadata, dict):
                 draft_metadata = {}
+        restored_refs = [*draft_metadata.get('attachments', []), *draft_metadata.get('server_uploads', [])]
+        next_order = max((ref.get('order') if type(ref.get('order')) is int else i
+                          for i, ref in enumerate(restored_refs) if isinstance(ref, dict)), default=-1) + 1
         for i, item in enumerate(data['files']):
             item_mode = modes[i] if modes else mode
             payloads.append(await asyncio.to_thread(ArtifactManager.adopt_upload,
                 item['filename'], item['path'], captions[i] if i < len(captions) else '',
-                order=i, backup=item_mode == 'attachment', path_only=item_mode == 'server_upload'))
+                order=next_order + i, backup=item_mode == 'attachment', path_only=item_mode == 'server_upload'))
             payloads[-1]['mode'] = item_mode
         refs = [p['attachment'] for p in payloads]
         content = '\n\n'.join(filter(None, [data.get('text', ''), *[
@@ -1675,13 +1764,8 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
         receipt.set_result({'ok': True, 'record_id': row_id, 'message': message})
         update, context, _ = build_web_mirror_objects(BotConfig.AUTHORIZED_USER_ID, outbox, _web_real_bot,
                                                      channel=telegram_channel())
-        for index, p in enumerate(payloads):
-            caption = p['attachment'].get('caption', '')
-            if index == 0 and data.get('text'):
-                caption = data['text'] + ('\n\n' + caption if caption and caption != data['text'] else '')
-            # Complete the user message's Telegram delivery before AI can reply.
-            await sync_web_attachment_to_telegram(p['saved_file']['abs_path'],
-                p['attachment']['name'], caption, ingress_mode=p['mode'], record_id=row_id)
+        await mirror_user_record_to_telegram('💬 [网页]\n' + data.get('text', ''),
+                                             record_id=row_id, metadata=row['metadata'], queued=False)
         await process_conversation(update, context, content)
         outbox.put({'type': 'turn_end'})
     except Exception as exc:

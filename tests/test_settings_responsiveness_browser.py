@@ -64,7 +64,7 @@ def test_deferred_health_panel_refreshes_and_retries_with_cached_bootstrap(brows
 
 
 @pytest.mark.parametrize('width',[1440,390])
-def test_error_and_normal_headers_align_name_with_body_and_keep_avatar_inline(full_output_server,width,tmp_path):
+def test_error_and_normal_headers_keep_original_layout_and_avatar_inline(full_output_server,width,tmp_path):
     server=full_output_server[0]
     error='⚠️ {"error":{"reason":"prohibited_content","original":"ORIGINAL_ERROR"}}'
     generation={'provider':'fixture-provider','model':'fixture-model'}
@@ -90,7 +90,7 @@ def test_error_and_normal_headers_align_name_with_body_and_keep_avatar_inline(fu
                   return {name:name.x,body:body.x,iconRight:icon.right,iconLeft:icon.left,logLeft:log.left,
                     modelX:model.x,nameRight:name.right,line:Math.abs((model.y+model.height/2)-(name.y+name.height/2))};
                 }''')
-                assert abs(metrics['name']-metrics['body'])<1
+                assert abs(metrics['iconLeft']-metrics['body'])<1
                 assert metrics['iconRight']<metrics['name'] and metrics['iconLeft']>=metrics['logLeft']
                 assert abs(metrics['modelX']-metrics['nameRight']-8)<1 and metrics['line']<1
             assert page.locator('[data-record-id="704"] .body').inner_text()==error
