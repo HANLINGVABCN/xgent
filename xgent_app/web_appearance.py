@@ -1,6 +1,6 @@
 """Shared, validated Web typography and branding in SQLite configuration."""
 import json
-from .web_branding import BRANDING_KEY, branding_for_revision, validate_branding
+from .web_branding import BRANDING_KEY, BRANDING_REVISION_KEY, branding_for_revision, validate_branding
 
 FONT_SETTINGS = {
     'web_message_font_size': (16, 12, 24),
@@ -16,11 +16,12 @@ def validate_font(key, value):
     return int(value)
 
 
-async def read_appearance(db):
+async def read_appearance(db, *, include_branding=True):
     conn = await db._get_conn()
-    keys = [*FONT_SETTINGS, 'web_settings_revision']
+    keys = [*FONT_SETTINGS, 'web_settings_revision', BRANDING_REVISION_KEY]
     cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (' + ','.join('?' for _ in keys) + ')', keys)
     raw = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
+    await cursor.close()
     values = {}
     for key, (default, _, _) in FONT_SETTINGS.items():
         try:
@@ -28,17 +29,23 @@ async def read_appearance(db):
         except (ValueError, TypeError, OverflowError):
             values[key] = default
     revision = int(raw.get('web_settings_revision') or 0)
-    values[BRANDING_KEY] = await branding_for_revision(db, conn, revision)
-    return {'revision': revision, 'values': values}
+    branding_revision = int(raw.get(BRANDING_REVISION_KEY, revision) or 0)
+    if include_branding:
+        values[BRANDING_KEY] = await branding_for_revision(db, conn, branding_revision)
+    return {'revision': revision, 'branding_revision': branding_revision, 'values': values}
 
 
 async def write_appearance(db, key, value):
     value = validate_branding(value) if key == BRANDING_KEY else validate_font(key, value)
     async with db._transaction() as conn:
-        cursor = await conn.execute("SELECT value FROM config WHERE key='web_settings_revision'")
-        row = await cursor.fetchone()
-        revision = int(json.loads(row['value'])) + 1 if row else 1
-        for field, result in ((key,value),('web_settings_revision',revision)):
+        cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (?,?)',
+                                    ('web_settings_revision', BRANDING_REVISION_KEY))
+        raw = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
+        await cursor.close()
+        previous = int(raw.get('web_settings_revision') or 0)
+        revision = previous + 1
+        branding_revision = int(raw.get(BRANDING_REVISION_KEY, previous) or 0) + (key == BRANDING_KEY)
+        for field, result in ((key,value),('web_settings_revision',revision),(BRANDING_REVISION_KEY,branding_revision)):
             await conn.execute('INSERT INTO config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (field,json.dumps(result)))
     db._config_cache.pop(key, None)
     if key == BRANDING_KEY:

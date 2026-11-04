@@ -11,8 +11,10 @@ import tarfile
 import time
 import zipfile
 import zlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 try:
     import zstandard
@@ -274,7 +276,41 @@ class ArchiveWriter:
             self.archive.addfile(info, io.BytesIO(data))
 
 
-def estimate_formats(entries, total, count, *, samples=()):
+def _compress_sample(sample):
+    compressors = {"zip": lambda: zlib.compress(sample, 6),
+                   "tar.zst": lambda: zstd_codec().ZstdCompressor(level=1).compress(sample),
+                   "tar.xz": lambda: lzma.compress(sample, filters=XZ_FILTERS)}
+    results = {}
+    for key in compressors:
+        if key == 'tar.zst' and zstandard is None:
+            continue
+        started = time.perf_counter()
+        packed = compressors[key]()
+        results[key] = (min(1.05, len(packed) / max(1, len(sample))), time.perf_counter() - started)
+    return results
+
+
+class CompressionSamples:
+    """Bounded per-service cache of ratios/timings, never source or archive bytes."""
+
+    def __init__(self):
+        self.results = OrderedDict()
+        self.lock = Lock()
+
+    def measure(self, sample):
+        signature = (hashlib.sha256(sample).digest(), zstandard is not None,
+                     tuple(tuple(sorted(item.items())) for item in XZ_FILTERS))
+        # Concurrent estimates of the same sample share one compression pass.
+        with self.lock:
+            if signature not in self.results:
+                self.results[signature] = _compress_sample(sample)
+                if len(self.results) > 8:
+                    self.results.popitem(last=False)
+            self.results.move_to_end(signature)
+            return self.results[signature]
+
+
+def estimate_formats(entries, total, count, *, samples=(), sample_cache=None):
     """Bounded, real compression samples; estimates are never promises."""
     budget = 1024 * 1024
     fragments = []
@@ -303,9 +339,7 @@ def estimate_formats(entries, total, count, *, samples=()):
                 fragments.append(chunk)
                 remaining -= len(chunk)
     sample = b"".join(fragments)
-    compressors = {"zip": lambda: zlib.compress(sample, 6),
-                   "tar.zst": lambda: zstd_codec().ZstdCompressor(level=1).compress(sample),
-                   "tar.xz": lambda: lzma.compress(sample, filters=XZ_FILTERS)}
+    measured = sample_cache.measure(sample) if sample_cache is not None else _compress_sample(sample)
     results = []
     for key, spec in FORMATS.items():
         if spec.get('legacy'):
@@ -314,10 +348,7 @@ def estimate_formats(entries, total, count, *, samples=()):
             results.append({'id': key, **spec, 'available': False, 'error': 'Zstd 依赖未安装',
                             'estimated_size': None, 'estimated_seconds': None, 'is_estimate': True})
             continue
-        started = time.perf_counter()
-        packed = compressors[key]()
-        elapsed = time.perf_counter() - started
-        ratio = min(1.05, len(packed) / max(1, len(sample)))
+        ratio, elapsed = measured[key]
         overhead = 1024 + count * (120 if key == "zip" else 80)
         seconds = 0.1 + count * 0.001 + total / (80 * CHUNK) * 3
         if sample:

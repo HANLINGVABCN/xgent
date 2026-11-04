@@ -55,6 +55,33 @@ def save(page):
     page.get_by_text('品牌设置已保存，其他网页设备同步生效。', exact=True).wait_for()
 
 
+def test_save_supersedes_an_older_branding_read(branding_page,browser_context,workspace_url):
+    page=branding_page
+    page.evaluate('''()=>{
+      window.__brandFetch=window.fetch.bind(window);window.__oldBrandRead=false;
+      window.fetch=async function(input,options){
+        if(String(input).includes('/api/branding')&&window.__savedBrandingSettings){
+          window.XGentAppearance.accept(window.__savedBrandingSettings);
+          if(options.signal?.aborted)throw new DOMException('Current save read was aborted','AbortError');
+        }
+        const response=await window.__brandFetch(input,options);
+        if(String(input)==='/api/config'&&options?.method==='POST')window.__savedBrandingSettings=(await response.clone().json()).settings;
+        if(String(input).includes('/api/branding')&&!window.__oldBrandRead){
+          window.__oldBrandRead=true;await new Promise(resolve=>window.__releaseBrandRead=resolve);
+        }
+        return response;
+      };
+      window.XGentBranding.refresh(true).catch(()=>{});
+    }''')
+    page.wait_for_function("typeof window.__releaseBrandRead==='function'")
+    name(page).fill('最新保存名称')
+    save(page)
+    page.evaluate('window.__releaseBrandRead()')
+    assert current_brand(browser_context,workspace_url['url'])['name']=='最新保存名称'
+    assert page.locator('.wb-brand [data-brand-name]').inner_text()=='最新保存名称'
+    assert page.evaluate('window.XGentBranding.state.values.name')=='最新保存名称'
+
+
 def test_six_presets_exact_geometry_and_default_github_logo(branding_page, browser_context, workspace_url, tmp_path):
     page = branding_page
     assert preset(page, '4-B').get_attribute('aria-checked') == 'true'

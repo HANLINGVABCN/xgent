@@ -319,18 +319,29 @@ class Workbench:
         await self.refresh_providers([])
         self.ns['_ensure_web_command_map']()
         db = await self.db()
-        missing = object()
-        for key in self.ns.get('WEB_EDITABLE_SETTINGS', set()):
+        from .web_branding import BRANDING_KEY
+        keys = [key for key in self.ns.get('WEB_EDITABLE_SETTINGS', set())
+                if key not in {'hide_protocol_blocks', BRANDING_KEY}]
+        conn = await db._get_conn()
+        cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (' + ','.join('?' for _ in keys) + ')', keys)
+        stored = {row['key']: row['value'] for row in await cursor.fetchall()}
+        await cursor.close()
+        for key in keys:
             # The retired boolean is a write-through API alias, not another
             # stored source of truth. Replaying both rows from an unordered set
             # made the selected mode depend on PYTHONHASHSEED.
-            if key == 'hide_protocol_blocks':
+            if key not in stored:
+                db._config_cache.pop(key, None)
                 continue
-            value = await db.get_config_fresh(key, missing)
+            try:
+                value = json.loads(stored[key])
+            except (ValueError, TypeError):
+                value = stored[key]
+            db._config_cache[key] = value
             # Missing rows (including virtual settings such as chat_model/skill_state)
             # must not create None entries that suppress runtime getter defaults.
             # Explicit 0/False/empty collections are real settings, not missing values.
-            if value is not missing and value is not None:
+            if value is not None:
                 self.ns['UserDataManager'].set(key, value)
         settings = await self.ns['_web_read_settings']()
         visible_names = self.ns.get('visible_command_names', lambda names: names)(self.ns['_WEB_COMMAND_MAP'])

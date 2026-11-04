@@ -26,6 +26,9 @@ const tags=new Set(('div span p b strong i em small br section img style svg g d
 const attributes=new Set(('id class role aria-label aria-hidden alt title style src width height viewbox preserveaspectratio fill fill-opacity fill-rule stroke stroke-width stroke-linecap stroke-linejoin stroke-opacity stroke-dasharray stroke-dashoffset opacity d x y x1 y1 x2 y2 cx cy r rx ry points transform gradientunits gradienttransform offset stop-color stop-opacity filter filterunits stddeviation in in2 result type values operator k1 k2 k3 k4 mode dx dy flood-color flood-opacity clippathunits clip-path mask maskunits maskcontentunits patternunits patterncontentunits patterntransform href xlink:href xmlns color font-family font-size font-weight text-anchor dominant-baseline').split(' '));
 const templates=new Map(), rendered=new WeakMap();
 let saved={...defaultBranding}, revision=-1, preview=null, authenticated=false;
+let brandingRequest=null,brandingController=null,brandingRequestVersion=0;
+let privateLibraryReady=false;
+let brandingRequestedRevision=-1;
 export function activeBranding(){return preview||saved;}
 export function brandingSource(config){return config.mode==='preset'?brandingPresets.find(p=>p.id===config.preset)?.source||brandingPresets[1].source:String(config.source||config.avatars?.find(item=>item.id===config.avatar_id)?.source||'');}
 export function imageSource(value) {
@@ -109,10 +112,13 @@ function applyBranding() {
 }
 export function acceptBranding(data) {
   const next=data?.branding||data?.values?.web_branding;
-  if(!next||!Number.isSafeInteger(data.revision)||data.revision<revision)return;
+  if(!next){const value=data?.branding_revision;if(Number.isSafeInteger(value)&&value>revision)refreshBranding(value>brandingRequestedRevision,value).catch(()=>{});return;}
+  const incomingRevision=data?.values?.web_branding?(data.branding_revision??data.revision):data.revision;
+  if(!Number.isSafeInteger(incomingRevision)||incomingRevision<revision)return;
   if(typeof next.name!=='string'||!['preset','custom','upload'].includes(next.mode))return;
-  const changed=data.revision!==revision||saved.name!==next.name||saved.avatar_id!==next.avatar_id||brandingSource(saved)!==brandingSource(next);
-  saved={...defaultBranding,...next};revision=data.revision;
+  if(data?.values?.web_branding)privateLibraryReady=true;
+  const changed=incomingRevision!==revision||saved.name!==next.name||saved.avatar_id!==next.avatar_id||brandingSource(saved)!==brandingSource(next);
+  saved={...defaultBranding,...next};revision=incomingRevision;
   if(changed&&!preview)applyBranding();
 }
 export function previewBranding(value) {
@@ -123,20 +129,29 @@ export async function saveBranding(value) {
   sourceKind(brandingSource(value));
   const response=await fetch('/api/config',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'web_branding',value})});
   const result=await response.json();if(!response.ok)throw new Error(result.error||'品牌设置保存失败');
-  acceptBranding(result.settings);preview=null;applyBranding();return {...saved};
+  if(result.settings?.values?.web_branding)acceptBranding(result.settings);else await refreshBranding(true,result.settings?.branding_revision);preview=null;applyBranding();return {...saved};
 }
 export async function deleteBrandingAvatar(id) {
   const response=await fetch('/api/config',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'web_branding_delete_avatar',value:id})});
   const result=await response.json();if(!response.ok)throw new Error(result.error||'头像删除失败');
-  acceptBranding(result.settings);preview=null;applyBranding();return {...saved};
+  if(result.settings?.values?.web_branding)acceptBranding(result.settings);else await refreshBranding(true,result.settings?.branding_revision);preview=null;applyBranding();return {...saved};
 }
-export async function refreshBranding(fresh=false) {
-  const response=await fetch('/api/branding'+(!fresh&&revision>=0?'?revision='+revision:''),{credentials:'same-origin',cache:'no-store'});
-  if(response.ok)acceptBranding(await response.json());
+export function refreshBranding(fresh=false,targetRevision=revision) {
+  if(brandingRequest&&!fresh)return brandingRequest;
+  brandingController?.abort();const controller=brandingController=new AbortController(),version=++brandingRequestVersion;
+  brandingRequestedRevision=targetRevision;
+  const params=new URLSearchParams();const privateRequest=authenticated;
+  if(privateRequest)params.set('library','1');
+  if(!fresh&&revision>=0&&(!privateRequest||privateLibraryReady))params.set('revision',revision);
+  const request=fetch('/api/branding'+(params.size?'?'+params:''),{credentials:'same-origin',cache:'no-store',signal:controller.signal})
+    .then(async response=>{if(!response.ok)throw new Error('头像设置暂时无法读取');const data=await response.json();if(version===brandingRequestVersion){if(privateRequest)privateLibraryReady=true;acceptBranding(data);}})
+    .catch(error=>{if(error.name==='AbortError'&&version!==brandingRequestVersion)return brandingRequest;throw error;})
+    .finally(()=>{if(brandingRequest===request)brandingRequest=null;});
+  brandingRequest=request;return request;
 }
-window.XGentBranding={decorateAuthor:decorateBrandAuthor,refresh:refreshBranding,cancelPreview:cancelBrandingPreview,get name(){return activeBranding().name;},get state(){return {revision,values:{...saved,avatars:(saved.avatars||[]).map(item=>({...item}))}};}};
-window.addEventListener('xgent-authenticated',()=>{authenticated=true;refreshBranding(true).catch(()=>{});});
-window.addEventListener('xgent-auth-expired',()=>{authenticated=false;cancelBrandingPreview();refreshBranding(true).catch(()=>{});});
+window.XGentBranding={decorateAuthor:decorateBrandAuthor,refresh:refreshBranding,cancelPreview:cancelBrandingPreview,get name(){return activeBranding().name;},get state(){return {revision,ready:revision>=0&&(!authenticated||privateLibraryReady),values:{...saved,avatars:(saved.avatars||[]).map(item=>({...item}))}};}};
+window.addEventListener('xgent-authenticated',()=>{authenticated=true;privateLibraryReady=false;refreshBranding(true).catch(()=>{});});
+window.addEventListener('xgent-auth-expired',()=>{authenticated=false;privateLibraryReady=false;cancelBrandingPreview();refreshBranding(true).catch(()=>{});});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshBranding().catch(()=>{});});
 applyBranding();refreshBranding().catch(()=>{});
 setInterval(()=>{if(!document.hidden&&(!authenticated||!window.XGentAppearance))refreshBranding().catch(()=>{});},15000);

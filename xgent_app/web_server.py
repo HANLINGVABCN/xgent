@@ -778,14 +778,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _handle_read_branding(self) -> None:
         # Public login appearance is an explicit allowlist, not general config.
         from .web_branding import DEFAULT_BRANDING, saved_branding, public_branding
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if query.get('library') == ['1'] and not self._require_auth():
+            return
         result = self._run_coro(self.config.read_branding()) if self.config.read_branding else {}
+        revision = int(result.get('revision') or 0)
+        if query.get('revision') == [str(revision)]:
+            self._send_json({'revision': revision, 'unchanged': True}, extra_headers={'Cache-Control': 'no-store'})
+            return
         branding = saved_branding(result.get('branding', DEFAULT_BRANDING))
         if not self._is_authenticated():
             branding = public_branding(branding)
-        revision = int(result.get('revision') or 0)
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        payload = ({'revision': revision, 'unchanged': True} if query.get('revision') == [str(revision)]
-                   else {'revision': revision, 'branding': branding})
+        payload = {'revision': revision, 'branding': branding}
         self._send_json(payload, extra_headers={'Cache-Control': 'no-store'})
 
     def _handle_write_config(self) -> None:

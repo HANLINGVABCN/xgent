@@ -913,9 +913,10 @@ async def _web_read_settings() -> Dict[str, Any]:
         else str(stats_auto_merge_val).lower() in {'1', 'true', 'yes', 'on'}
     stats_metric = UserDataManager.get('stats_metric', 'token') or 'token'
 
-    appearance = await read_appearance(await BotMemoryDB.get_instance())
+    appearance = await read_appearance(await BotMemoryDB.get_instance(), include_branding=False)
     return {
         'revision': appearance['revision'],
+        'branding_revision': appearance['branding_revision'],
         'values': {
             **appearance['values'],
             'thinking_level': normalize_thinking_level(UserDataManager.get('thinking_level')),
@@ -2270,7 +2271,7 @@ async def _web_read_branding():
 
 async def _sync_web_appearance(db, force=False):
     global _web_appearance_revision
-    appearance = await read_appearance(db)
+    appearance = await read_appearance(db, include_branding=False)
     if force or appearance['revision'] != _web_appearance_revision:
         _web_appearance_revision = appearance['revision']
         frame = {'type': 'settings_state', **appearance}

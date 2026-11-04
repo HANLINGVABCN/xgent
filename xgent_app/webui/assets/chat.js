@@ -520,9 +520,9 @@ import {decorateBrandAuthor} from './branding.js';
 
   function syncTurnAuthors(root){
     if(!root)return;
+    const relationships=new Map(Array.from(root.children,row=>[row,new Set()]));
     let seenReply=false,turnId=null,runId=null,groupId=null,conversationId=null,previous=null;
     for(const row of root.children){
-      row.classList.remove('followed-by-output','attached-output','followed-by-round','round-followup');
       if(!row.classList.contains('msg-row')||row.classList.contains('presentation-hidden'))continue;
       const cid=row.dataset.presentationConversationId||null,id=row.dataset.turnId||null,run=row.dataset.runId||null;
       const group=row.dataset.replyGroupId||null;
@@ -545,11 +545,14 @@ import {decorateBrandAuthor} from './branding.js';
         seenReply=true;
       }
       if(row.classList.contains('cmd')&&previous?.matches('.ai,.cmd')){
-        row.classList.add('attached-output');previous.classList.add('followed-by-output');
+        relationships.get(row).add('attached-output');relationships.get(previous).add('followed-by-output');
       }
-      if(row.classList.contains('agent-round-message')&&previous?.classList.contains('cmd'))previous.classList.add('followed-by-round');
-      if(row.classList.contains('ai')&&previous?.classList.contains('agent-round-message'))row.classList.add('round-followup');
+      if(row.classList.contains('agent-round-message')&&previous?.classList.contains('cmd'))relationships.get(previous).add('followed-by-round');
+      if(row.classList.contains('ai')&&previous?.classList.contains('agent-round-message'))relationships.get(row).add('round-followup');
       previous=row;
+    }
+    for(const [row,flags] of relationships)for(const name of ['followed-by-output','attached-output','followed-by-round','round-followup']){
+      if(row.classList.contains(name)!==flags.has(name))row.classList.toggle(name,flags.has(name));
     }
   }
   // Paging, pruning and live-to-durable adoption can change the first visible
@@ -894,7 +897,7 @@ import {decorateBrandAuthor} from './branding.js';
       entry.footer.hidden=!hasFooterText&&!entry.actions.childElementCount;
     }else entry.footer.hidden=!hasFooterText;
     entry.row.dataset.presentationMode='folded';
-    syncTurnAuthors(entry.row.parentNode);
+    if(!renderingHistory)syncTurnAuthors(entry.row.parentNode);
   }
 
   function messageCopyText(entry){
@@ -1860,7 +1863,7 @@ import {decorateBrandAuthor} from './branding.js';
     var anchor=scrollAnchor(),follow=isNearBottom()&&!viewingPast;
     renderingHistory++;
     try{handleFrameContent(frame);}finally{
-      renderingHistory--;
+      renderingHistory--;if(!renderingHistory)syncTurnAuthors(log);
       if(follow)scrollDown();else restoreScrollAnchor(anchor);
     }
   }

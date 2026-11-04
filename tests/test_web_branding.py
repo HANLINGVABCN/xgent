@@ -116,6 +116,7 @@ def test_login_branding_exposes_only_public_fields_and_writes_still_need_auth(fu
     assert b'NEVER_EXPOSE' not in body
     assert json.loads(request(server, 'GET', '/api/branding?revision=8')[2]) == {'revision': 8, 'unchanged': True}
     assert request(server, 'GET', '/api/config')[0] == 401
+    assert request(server, 'GET', '/api/branding?library=1')[0] == 401
     assert request(server, 'POST', '/api/config', {'key': BRANDING_KEY, 'value': DEFAULT_BRANDING})[0] == 401
     svg = request(server, 'GET', '/assets/logo.svg')
     assert svg[0] == 200 and svg[1]['Content-Type'] == 'image/svg+xml'

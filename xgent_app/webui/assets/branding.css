@@ -8,7 +8,9 @@
 #wb-nav .wb-brand{min-width:0;max-width:100%}
 .wb-brand [data-brand-name]{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .login-card [data-brand-name]{overflow-wrap:anywhere}
-.bubble-header:has(.brand-logo) .ai-generation-meta{padding-left:28px}
+.bubble-header:has(.brand-logo) .ai-generation-meta{padding-left:0}
+.bubble.ai>.body,.bubble.ai>.thinking-block,.bubble.ai>.message-footer,.bubble.ai>.message-media,
+.msg-row.model-error>.bubble>.body,.msg-row.model-error>.bubble>.thinking-block,.msg-row.model-error>.bubble>.message-footer{margin-left:30px}
 .brand-editor-preview{width:64px;height:64px;border-radius:14px;flex-shrink:0}
 .branding-card{grid-column:1/-1;min-width:0}
 .wb-preferences-page .wb-settings-grid>.branding-card:first-child{grid-column:1/-1}

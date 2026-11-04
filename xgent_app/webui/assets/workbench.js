@@ -5,6 +5,7 @@ import {openGlobalSearch} from './global-search.js';
 import {$,el,button,fmt,stamp,bytes,message,empty,field,select,check,table,formData,api,wb,download,query,tag,copyText,requestId,safeLocalUrl,inlineState} from './components.js';
 const pages=[['chat','对话','M4 4h16v12H8l-4 4V4'],['tasks','任务','M8 5h12M8 12h12M8 19h12M3 5h1M3 12h1M3 19h1'],['files','文件与输出','M3 5h7l2 3h9v12H3V5'],['models','模型与技能','M12 3l9 5v8l-9 5-9-5V8l9-5M3 8l9 5 9-5M12 13v8'],['usage','用量','M4 20V10M10 20V4M16 20v-8M22 20H2'],['settings','设置','M4 6h16M4 12h16M4 18h16M9 3v6M16 9v6M8 15v6']];
 const state={routed:false,authEpoch:0,route:'chat',boot:null,request:null,detailRequest:null,filters:{},scroll:{},dirty:false,authenticated:false,dialogReturn:null};
+state.bootUpdatedAt=0;
 const root=$('wb-page');
 const pageCache=new PageCache(12);
 state.pageKey=null;
@@ -34,6 +35,7 @@ function cacheNotice(text,retry=false){
 }
 window.addEventListener('xgent-workbench-change',event=>{
   pageCache.invalidate(event.detail.pages);state.retryAfter=0;
+  if(event.detail.pages.some(page=>page==='settings'||page==='models'))state.bootUpdatedAt=0;
 });
 window.addEventListener('xgent-turn-finished',()=>{
   pageCache.invalidate(['tasks','files','usage']);state.retryAfter=0;
@@ -77,7 +79,7 @@ function closeDetail(force=false){if(!force&&state.detailSaving)return false;if(
 $('wb-detail-close').onclick=()=>closeDetail();
 function errorOr(node,fn){return async()=>{try{await fn();}catch(e){showError(node,e);}};}
 async function outputViewer(path,title='完整输出',onBack,source){let current=0,previous=[];const area=el('div');detail(title,area);const signal=state.detailRequest.signal;async function load(offset,back){area.replaceChildren(message('正在读取完整输出…','loading'));try{const page=await api('/api/output/page',{data:{path,offset},signal});current=offset;previous=back;area.replaceChildren(el('p',{class:'wb-note'},`${page.filename} · ${bytes(page.offset)} — ${bytes(page.next_offset)} / ${bytes(page.size)}`),actions(button('上一页',()=>load(previous.at(-1),previous.slice(0,-1))),button('下一页',()=>load(page.next_offset,[...previous,current])),button('复制本页',()=>copyText(page.text).catch(e=>showError(area,e)))),el('pre',{class:'wb-pre wb-output-text'},page.text));area.querySelectorAll('button')[0].disabled=!previous.length;area.querySelectorAll('button')[1].disabled=page.eof;area.append(el('div',{class:'wb-file-path'},el('code',{},page.path||path),button('复制完整路径',()=>copyText(page.path||path).catch(e=>showError(area,e)))));if(source)area.prepend(sourceLink(source));area.prepend(button('收起完整输出',()=>closeDetail()));if(onBack)area.prepend(button('返回任务详情',onBack));}catch(e){area.replaceChildren(message(e.message),button('重试读取',()=>load(offset,back)),onBack?button('返回任务详情',onBack):null);}}await load(0,[]);}
-async function refreshBootstrap(){const epoch=state.authEpoch,previous=state.boot?.asset_version;const boot=await wb('bootstrap');if(epoch!==state.authEpoch)throw new DOMException('登录状态已改变','AbortError');if(previous&&boot.asset_version&&previous!==boot.asset_version){const key='xgent-assets-reloaded:'+boot.asset_version;if(sessionStorage.getItem(key)!=='1'){sessionStorage.setItem(key,'1');location.reload();throw new DOMException('前端已更新','AbortError');}}state.boot=boot;window.XGentAppearance?.accept(boot.settings);window.XGentChat?.commands(state.boot.commands||[]);chatControls();return state.boot;}
+async function refreshBootstrap(){const epoch=state.authEpoch,previous=state.boot?.asset_version;const boot=await wb('bootstrap');if(epoch!==state.authEpoch)throw new DOMException('登录状态已改变','AbortError');if(previous&&boot.asset_version&&previous!==boot.asset_version){const key='xgent-assets-reloaded:'+boot.asset_version;if(sessionStorage.getItem(key)!=='1'){sessionStorage.setItem(key,'1');location.reload();throw new DOMException('前端已更新','AbortError');}}state.boot=boot;state.bootUpdatedAt=Date.now();window.XGentAppearance?.accept(boot.settings);window.XGentChat?.commands(state.boot.commands||[]);chatControls();return state.boot;}
 function chatControls(){if(!state.boot)return;window.XGentConversations?.accept(state.boot.conversations);updateComposerControls(state.boot.settings,changeQuick);}
 async function changeQuick(key,value){await wb('settings',{data:{key,value}});await refreshBootstrap();}
 function logout(){return window.XGentChat?.logout();}
@@ -242,13 +244,15 @@ async function render(options={}){
     dataVersions.push(JSON.stringify([name.split('?')[0],stable]));
   };
   const read=async name=>{assertCurrent();const value=await wb(name,{signal:controller.signal});assertCurrent();signature(name,value);return value;};
+  read.cached=(name,value)=>{assertCurrent();signature(name,value);return value;};
   read.api=async path=>{assertCurrent();const value=await api(path,{signal:controller.signal});assertCurrent();signature(path,value);return value;};
   try{
     const content=await ({tasks:taskPage,files:filePage,models:modelPage,usage:usagePage,settings:settingsPage}[active])(read);
+    if(entry&&content.deferredPanelsReady)await content.deferredPanelsReady;
     assertCurrent();
     if(revision!==pageCache.revision(active))return; // A concurrent mutation owns the next refresh.
     const dataVersion=JSON.stringify(dataVersions.sort());
-    if(entry && entry.dataVersion===dataVersion){
+    if(entry && entry.dataVersion===dataVersion&&!content.dataset.deferredPanels){
       entry.updatedAt=Date.now();entry.revision=revision;state.retryAfter=0;cacheNotice('');return;
     }
     if(entry && (state.dirty||entry.interaction!==interaction||passive&&pageInteracting())){
@@ -657,10 +661,11 @@ function priceSettings(){
   form.onsubmit=e=>{e.preventDefault();submit(form,async()=>{const prices={},merge={};for(const row of priceRows.children){const name=row.querySelector('[name=model]').value.trim();if(!name)throw new Error('请填写模型名称');if(prices[name])throw new Error('模型价格名称重复：'+name);prices[name]=Object.fromEntries(['input','output','cached'].map(key=>{const n=Number(row.querySelector('[name='+key+']').value);if(!Number.isFinite(n)||n<0)throw new Error('单价必须是非负数');return [key,n];}));}for(const row of mergeRows.children){const name=row.querySelector('[name=model]').value.trim();if(!name||merge[name])throw new Error('合并名称为空或重复');merge[name]=row.querySelector('[name=aliases]').value.split('\n').map(s=>s.trim()).filter(Boolean);}await wb('settings',{data:{key:'model_price_table',value:prices}});await wb('settings',{data:{key:'model_merge_map',value:merge}});state.dirty=false;closeDialog();await refreshBootstrap();render();});};dialog('价格与合并规则',form);
 }
 
-async function settingsPage(read){const {settingsView}=await managementModule('settings');
-  const boot=await read('bootstrap');state.boot=boot;
-  const health=filter('section')==='health'?await read.api('/api/health'):{};
-  return settingsView({logout,boot,health,state,render,dialog,closeDialog,submit,dirtyForm,confirmAction,refreshBootstrap,setTheme,filter,heading,card,actions});
+async function settingsPage(read){
+  const cached=state.boot&&Date.now()-state.bootUpdatedAt<60000;
+  const [{settingsView},boot]=await Promise.all([managementModule('settings'),cached?Promise.resolve(read.cached('bootstrap',state.boot)):read('bootstrap')]);
+  state.boot=boot;if(!cached)state.bootUpdatedAt=Date.now();
+  return settingsView({logout,boot,health:{},state,render,dialog,closeDialog,submit,dirtyForm,confirmAction,refreshBootstrap,setTheme,filter,heading,card,actions});
 }
 function setTheme(value){pageCache.invalidate(['settings']);if(value==='system')localStorage.removeItem('xgent-theme');else localStorage.setItem('xgent-theme',value);const dark=value==='dark'||value==='system'&&matchMedia('(prefers-color-scheme:dark)').matches;document.body.classList.toggle('dark',dark);const frame=$('terminal-iframe');frame?.contentWindow?.postMessage({type:'xgent-theme',dark},location.origin);}
 const media=matchMedia('(prefers-color-scheme:dark)');media.addEventListener('change',()=>{if(!localStorage.getItem('xgent-theme'))setTheme('system');});document.body.classList.toggle('wb-reduce-motion',localStorage.getItem('xgent-reduce-motion')==='1');
@@ -675,7 +680,7 @@ let started=false;async function start(){if(started)return;const epoch=state.aut
 window.addEventListener('xgent-authenticated',start);
 window.addEventListener('xgent-auth-expired',()=>{
   state.authEpoch++;started=false;state.authenticated=false;state.request?.abort();state.renderSequence++;
-  state.boot=null;state.pendingKey=null;state.pageKey=null;state.dirty=false;state.retryAfter=0;
+  state.boot=null;state.bootUpdatedAt=0;state.pendingKey=null;state.pageKey=null;state.dirty=false;state.retryAfter=0;
   pageCache.clear();root.replaceChildren();closeDetail(true);
   if($('wb-dialog').open)$('wb-dialog').close();$('wb-dialog-body').replaceChildren();
   $('login').showModal();

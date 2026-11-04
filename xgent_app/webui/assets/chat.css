@@ -1134,7 +1134,9 @@
 .command-series-toggle:hover{background:var(--surface-2)}
 .command-series-close{position:fixed;z-index:34;min-height:28px;padding:4px 6px;border:1px solid var(--line-2);border-radius:4px;background:var(--surface);color:var(--text-2);font:11px/17px var(--font);cursor:pointer}
 .command-series-control.series-open{height:0;margin:0}.stop-notice{font:12px/17px var(--font);color:var(--text-2)}
-#wb-chat .msg-row.model-error:not(.turn-continuation)>.bubble>.bubble-header{display:grid!important;grid-template-columns:minmax(0,1fr);gap:3px}
+#wb-chat .msg-row.model-error:not(.turn-continuation)>.bubble>.bubble-header{display:flex!important;justify-content:flex-start;align-items:center;gap:8px;border-bottom:0;margin-bottom:4px;padding-bottom:0}
+#wb-chat .msg-row.model-error>.bubble>.bubble-header .bubble-author{flex:0 1 auto}
+#wb-chat .msg-row.model-error>.bubble>.bubble-header .ai-generation-meta{margin:0;padding:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11px/17px var(--font);color:var(--text-3)}
 #wb-chat .msg-row.model-error.turn-continuation>.bubble>.bubble-header{display:none!important}
 #wb-chat #log{overflow-anchor:none}
 .fc-preview{border:0;background:transparent;color:var(--accent);font:inherit;font-size:12px;padding:5px 8px;white-space:nowrap;cursor:pointer}

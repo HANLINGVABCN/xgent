@@ -7,6 +7,7 @@ import re
 from urllib.parse import unquote_to_bytes, urlsplit
 
 BRANDING_KEY = 'web_branding'
+BRANDING_REVISION_KEY = 'web_branding_revision'
 BRANDING_DELETE_KEY = 'web_branding_delete_avatar'
 PRESET_IDS = ('4-A', '4-B', '4-C', '4-D', '4-E', '4-F')
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -143,7 +144,7 @@ async def branding_for_revision(db, conn, revision):
 async def read_branding(db):
     from .web_appearance import read_appearance
     appearance = await read_appearance(db)
-    return {'revision': appearance['revision'], 'branding': appearance['values'][BRANDING_KEY]}
+    return {'revision': appearance['branding_revision'], 'branding': appearance['values'][BRANDING_KEY]}
 
 
 async def delete_avatar(db, identifier):
@@ -154,8 +155,8 @@ async def delete_avatar(db, identifier):
         raise ValueError('默认头像不能删除。')
     changed = False
     async with db._transaction() as conn:
-        cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (?,?)',
-                                    (BRANDING_KEY, 'web_settings_revision'))
+        cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (?,?,?)',
+                                    (BRANDING_KEY, 'web_settings_revision', BRANDING_REVISION_KEY))
         raw = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
         await cursor.close()
         value = saved_branding(raw.get(BRANDING_KEY))
@@ -164,9 +165,11 @@ async def delete_avatar(db, identifier):
             if value['avatar_id'] == identifier:
                 value.update(mode='preset', preset='4-B', source='', avatar_id='')
             revision = int(raw.get('web_settings_revision') or 0) + 1
+            branding_revision = int(raw.get(BRANDING_REVISION_KEY, raw.get('web_settings_revision')) or 0) + 1
             await conn.executemany('INSERT INTO config(key,value) VALUES(?,?) '
                 'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                [(BRANDING_KEY, json.dumps(value)), ('web_settings_revision', json.dumps(revision))])
+                [(BRANDING_KEY, json.dumps(value)), ('web_settings_revision', json.dumps(revision)),
+                 (BRANDING_REVISION_KEY, json.dumps(branding_revision))])
             changed = True
     if changed:
         db._config_cache.pop(BRANDING_KEY, None)

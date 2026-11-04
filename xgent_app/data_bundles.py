@@ -23,7 +23,7 @@ from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .data_archives import ArchiveReader, ArchiveWriter, FORMATS, estimate_formats, normalize_format
+from .data_archives import ArchiveReader, ArchiveWriter, CompressionSamples, FORMATS, estimate_formats, normalize_format
 from .data_contents import (ARCHIVE_CATEGORY_MAP, CATEGORY_MAP, CATEGORIES, category_for, inventory,
                             manifest_categories, normalize_categories, replacement_paths,
                             PART_CATEGORIES, RECOMMENDED_CATEGORIES, validate_independent_selection,
@@ -203,6 +203,7 @@ class DataBundles:
         self.paths = paths
         self._parts_inventory = None
         self._parts_signature = None
+        self._compression_samples = CompressionSamples()
 
     def files(self, outputs=False, *, migration=False, categories=None):
         root = self.paths.root
@@ -307,7 +308,8 @@ class DataBundles:
             "selected_categories": selected, "recommended_categories": list(RECOMMENDED_CATEGORIES),
             "recommended_groups": selected_groups(RECOMMENDED_CATEGORIES),
             "formats": estimate_formats(chosen, total, count,
-                samples=[self._parts_inventory[key]["sample"] for key in selected if key in PART_CATEGORIES]) if compare_formats else [],
+                samples=[self._parts_inventory[key]["sample"] for key in selected if key in PART_CATEGORIES],
+                sample_cache=self._compression_samples) if compare_formats else [],
             "estimate_note": "基于最多 1 MiB 的实际抽样压缩，时间包含打包、快照与校验估算；结果受数据分布、磁盘和 CPU 影响。",
         }
 

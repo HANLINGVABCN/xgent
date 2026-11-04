@@ -102,10 +102,13 @@ def test_history_is_paged_search_locates_unloaded_messages_and_draft_survives(br
     page=browser_context.new_page();responses=[]
     page.on('response',lambda r:responses.append(r) if '/api/workbench/history?' in r.url else None)
     ready(page,workspace_url['url'])
-    page.wait_for_function('document.querySelectorAll("#log .msg-row").length>0')
+    page.locator('#log>.msg-row[data-record-id]').first.wait_for(state='attached')
     assert not any('/api/history?limit=0' in r.url for r in responses)
-    assert len(responses[0].json()['messages'])==50
+    cid=page.evaluate('window.XGentConversations.current')
+    payload=browser_context.request.get(workspace_url['url']+'/api/workbench/history?limit=50&conversation_id='+cid).json()
+    assert len(payload['messages'])==50
     assert page.locator('#log>.msg-row').count()<=200
+    original_ids=set(page.locator('#log>.msg-row[data-record-id]').evaluate_all('rows=>rows.map(row=>row.dataset.recordId)'))
     page.locator('#input').fill('跨页保留的输入草稿')
     page.evaluate('location.hash="/tasks"');page.locator('#wb-page h1').wait_for()
     page.evaluate('location.hash="/chat"')
@@ -114,10 +117,14 @@ def test_history_is_paged_search_locates_unloaded_messages_and_draft_survives(br
         with page.expect_response('**/api/workbench/history?limit=50&before=*'):
             page.locator('#log').evaluate('(e)=>e.scrollTop=400')
         page.wait_for_timeout(80)
-    assert page.locator('#log>.msg-row').count()<=200
+    # Reading preserves loaded pages; a hard 200-row cap previously lost history.
+    loaded_ids=page.locator('#log>.msg-row[data-record-id]').evaluate_all('rows=>rows.map(row=>row.dataset.recordId)')
+    assert original_ids<=set(loaded_ids) and len(loaded_ids)==len(set(loaded_ids))
+    assert len(loaded_ids)>len(original_ids)
     before=page.locator('#log').inner_text()
     page.locator('#log').evaluate('(e)=>e.scrollTop=e.scrollHeight')
-    page.wait_for_function('(before)=>document.querySelector("#log").innerText!==before',arg=before)
+    page.wait_for_function('()=>{const log=document.querySelector("#log");return log.scrollTop+log.clientHeight>=log.scrollHeight-2;}')
+    assert page.locator('#log').inner_text()==before
     page.locator('#workspace-settings').click();page.locator('#btn-search').click()
     page.get_by_placeholder('搜索全部对话名称和消息内容…').fill('历史记录 1234：')
     page.locator('#global-search-dialog .global-search-hit').first.wait_for()
