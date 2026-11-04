@@ -17,7 +17,7 @@ def detach_delivery_metadata(metadata):
                 'telegram_logical_instance', 'telegram_source_bot_id', 'source_message_id',
                 'source_message_ids', 'web_live'):
         value.pop(key, None)
-    for ref in value.get('attachments') or []:
+    for ref in [*(value.get('attachments') or []), *(value.get('server_uploads') or [])]:
         if isinstance(ref, dict):
             ref.pop('source_message_id', None)
     return value
@@ -85,10 +85,26 @@ async def delivery_allowed(op):
         return True
     db = await ns['BotMemoryDB'].get_instance()
     conn = await db._get_conn()
-    cursor = await conn.execute('SELECT withdrawn FROM global_messages WHERE id=?', (record_id,))
+    cursor = await conn.execute('SELECT withdrawn,session_id FROM global_messages WHERE id=?', (record_id,))
     row = await cursor.fetchone()
     await cursor.close()
-    return row is not None and not row['withdrawn']
+    owner = (op.conversation_context or {}).get('conversation_id')
+    return row is not None and not row['withdrawn'] and owner in {None, row['session_id']}
+
+
+async def bind_native_delivery(db, row_id, bot, chat_id, message):
+    """Associate a direct file/caption send without downloading or replaying it."""
+    mid = getattr(message, 'message_id', None)
+    if row_id is None or type(mid) is not int:
+        return
+    row = await db.get_display_message(row_id)
+    if row is not None:
+        await db.patch_display_metadata(row_id, {'telegram_delivery': {
+            'bot_id': _bot_id(bot), 'chat_id': chat_id, 'conversation_id': row['session_id'],
+            'record_id': row_id, 'ids': [mid]}})
+        row = await db.get_display_message(row_id)
+    if row is None:
+        await bot.delete_message(chat_id=chat_id, message_id=mid)
 
 
 async def delivered(bot, op, result):
@@ -102,7 +118,8 @@ async def delivered(bot, op, result):
     while len(_deliveries) > 5000:
         _deliveries.popitem(last=False)
     entry = _records.get(op.logical_id)
-    record_id = op.payload.get('telegram_native', {}).get('record_id') or (entry[0] if entry else None)
+    record_id = (op.payload.get('telegram_native', {}).get('record_id') or
+                 op.payload.get('_record_id') or (entry[0] if entry else None))
     ns = _namespace()
     if not ns or not record_id:
         return
@@ -110,7 +127,8 @@ async def delivered(bot, op, result):
     row = await db.get_display_message(record_id)
     if row:
         await bind_record(db, row, [op.logical_id])
-    else:
+        row = await db.get_display_message(record_id)
+    if row is None:
         # A withdrawal won while an upload was in flight: delete that exact result.
         for mid in ids:
             await bot.delete_message(chat_id=op.chat_id, message_id=mid)

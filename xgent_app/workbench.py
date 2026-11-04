@@ -223,6 +223,7 @@ class Workbench:
             'conversations/branch/preview', 'conversations/branch', 'conversations/lineage',
             'conversations/branch/apply-preview', 'conversations/branch/apply',
             'conversations/withdraw/preview', 'conversations/withdraw',
+            'conversations/draft',
         }
         if resource in branch_resources:
             from .conversation_branching import ConversationBranchService, BranchingError
@@ -238,6 +239,8 @@ class Workbench:
                     return await service.lineage(cid)
                 if method != 'POST':
                     raise WorkbenchError('此操作需要 POST', 405)
+                if resource == 'conversations/draft':
+                    return await service.update_draft(cid, data)
                 record_id = data.get('record_id')
                 if resource in {'conversations/branch/preview', 'conversations/branch',
                                 'conversations/withdraw/preview', 'conversations/withdraw'}:

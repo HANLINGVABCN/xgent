@@ -138,10 +138,13 @@ def test_images_and_caption_stay_in_one_bubble_before_and_after_refresh(browser_
     message['conversation_id'] = 'global_memory'
     stored.append(message)
     frame = {**message, 'type': 'record_snapshot', 'record_id': 900001, 'text': message['content'], 'ui_generation': 0}
+    frame.pop('id')  # Live transport may supply record_id before its history id.
     frame.pop('content')
     events.append({'epoch': 'file-bubble-test', 'id': 1, 'frame': frame})
     # SSE/poll confirmation may reach the page before the HTTP acknowledgment.
     expect(page.locator('[data-record-id="900001"]')).to_have_count(1)
+    expect(row.get_by_role('button', name='分支到新聊天', exact=True)).to_have_count(1)
+    expect(row.locator('button[aria-label="撤回此消息及之后"]')).to_have_count(1)
     assert page.evaluate('uploadPreviewNodes.every((node,index)=>node===document.querySelectorAll("#log .media-img")[index] && node.src===uploadPreviewUrls[index])')
     assert page.evaluate('Math.abs(previewBubbleWidth-document.querySelector("#log .bubble").getBoundingClientRect().width)<1')
     assert page.evaluate('uploadPreviewNodes.every((node,index)=>Math.abs(node.getBoundingClientRect().width-previewDimensions[index].width)<1 && Math.abs(node.getBoundingClientRect().height-previewDimensions[index].height)<1)')

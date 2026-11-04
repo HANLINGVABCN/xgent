@@ -7,6 +7,7 @@ object directory only stores checksum-addressed bytes referenced by snapshot row
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import contextlib
 import contextvars
 import hashlib
@@ -1151,7 +1152,58 @@ class ConversationBranchService:
         return {'conversation_id': conversation_id, 'branch_mode': session.get('branch_mode'),
                 'parent': {'id': parent['id'], 'name': parent['name'], 'turn_id': session.get('parent_turn_id')}
                 if parent else None, 'children': children,
-                'draft': {'text': draft['text'], 'metadata': _metadata(draft['metadata'])} if draft else None}
+                'draft': await self._draft_payload(conversation_id, dict(draft)) if draft else None}
+
+    async def _draft_payload(self, conversation_id, draft):
+        from .web_history import _describe_media
+        from .web_bridge import MEDIA_TOKEN_REGISTRY
+        from .conversations import ConversationScope, bind_conversation
+        session = await self._session(conversation_id)
+        metadata = _metadata(draft.get('metadata'))
+        media = []
+        with bind_conversation(ConversationScope(conversation_id, session['generation'], origin='web', purpose='management')):
+            for key in ('attachments', 'server_uploads'):
+                for index, ref in enumerate(metadata.get(key, [])):
+                    item = _describe_media(ref, self.storage, attachment=True)
+                    item.update(draft_key=f'{key}:{index}', ingress_mode='server_upload' if key == 'server_uploads' else 'attachment',
+                                conversation_id=conversation_id)
+                    if item.get('path') and not item.get('error'):
+                        token = MEDIA_TOKEN_REGISTRY.register(item['path'], item['filename'])
+                        item['download_url'] = f'/api/media/{token}?conversation_id={conversation_id}'
+                    media.append(item)
+        return {'text': draft['text'], 'metadata': metadata, 'media': media,
+                'send_text': draft['text'] or '[附件] ' + '、'.join(item['filename'] for item in media),
+                'source_record_id': draft['source_record_id'], 'revision': draft['created_at']}
+
+    async def update_draft(self, conversation_id, data):
+        """Select existing draft references; client paths never become capabilities."""
+        session = await self._session(conversation_id)
+        if session.get('archived'):
+            raise BranchingError('对话已归档，请先恢复后再修改附件草稿')
+        keep = data.get('keep')
+        if not isinstance(keep, list) or any(not isinstance(key, str) for key in keep):
+            raise BranchingError('附件选择无效')
+        async with self.db._transaction() as conn:
+            cursor = await conn.execute('SELECT * FROM conversation_branch_drafts WHERE conversation_id=?', (conversation_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None or row['source_record_id'] != data.get('source_record_id') or row['created_at'] != data.get('revision'):
+                raise BranchingError('附件草稿已变化，请刷新后重试')
+            metadata = _metadata(row['metadata'])
+            available = {f'{key}:{index}' for key in ('attachments', 'server_uploads') for index, _ in enumerate(metadata.get(key, []))}
+            if set(keep) - available:
+                raise BranchingError('附件不属于当前草稿')
+            for key in ('attachments', 'server_uploads'):
+                metadata[key] = [ref for index, ref in enumerate(metadata.get(key, [])) if f'{key}:{index}' in keep]
+                if not metadata[key]:
+                    metadata.pop(key)
+            if not keep:
+                await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=?', (conversation_id,))
+                return {'ok': True, 'draft': None}
+            revision = time.time()
+            await conn.execute('UPDATE conversation_branch_drafts SET metadata=?,created_at=? WHERE conversation_id=?',
+                               (json.dumps(metadata, ensure_ascii=False), revision, conversation_id))
+        return {'ok': True, 'draft': await self._draft_payload(conversation_id, {**dict(row), 'metadata': metadata, 'created_at': revision})}
 
     async def apply_preview(self, conversation_id: str) -> dict:
         branch = await self._session(conversation_id)
@@ -1385,6 +1437,15 @@ class ConversationBranchService:
         kept_logical_ids = {mid for mid in logical_ids if logical_message_belongs_to(mid, conversation_id)}
         invalid_delivery = invalid_delivery or kept_logical_ids != logical_ids
         logical_ids = kept_logical_ids
+        source_metadata = _metadata(record['metadata'])
+        draft_metadata = {key: deepcopy(source_metadata[key]) for key in
+                          ('attachments', 'server_uploads', 'file_ingress_mode', 'web_file_message') if key in source_metadata}
+        from .telegram_records import detach_delivery_metadata
+        draft_metadata = detach_delivery_metadata(draft_metadata)
+        file_message = source_metadata.get('web_file_message')
+        draft_text = file_message.get('text', record['content']) if isinstance(file_message, dict) else record['content']
+        if not isinstance(draft_text, str):
+            draft_text = record['content']
         async with self.db._transaction() as conn:
             await conn.execute('UPDATE global_messages SET withdrawn=1 WHERE session_id=? AND id>=?',
                                (conversation_id, record_id))
@@ -1406,9 +1467,14 @@ class ConversationBranchService:
                     await conn.execute('INSERT INTO chat_messages(session_id,role,content,timestamp) VALUES(?,?,?,?)',
                                        (conversation_id, message['role'], message['content'], now))
             await conn.execute('UPDATE chat_sessions SET last_active=? WHERE id=?', (now, conversation_id))
+            if draft_metadata.get('attachments') or draft_metadata.get('server_uploads'):
+                await conn.execute('INSERT INTO conversation_branch_drafts VALUES(?,?,?,?,?) '
+                    'ON CONFLICT(conversation_id) DO UPDATE SET source_record_id=excluded.source_record_id,text=excluded.text,metadata=excluded.metadata,created_at=excluded.created_at',
+                    (conversation_id, record_id, draft_text, json.dumps(draft_metadata, ensure_ascii=False), now))
         response = {'ok': True, 'withdrawn_turns': len(ids), 'withdrawn_messages': preview['message_count'],
                     'restored_files': 0, 'conversation_id': conversation_id,
-                    'draft': {'text': record['content']},
+                    'draft': await self._draft_payload(conversation_id, {'text': draft_text, 'metadata': draft_metadata,
+                        'source_record_id': record_id, 'created_at': now}) if draft_metadata.get('attachments') or draft_metadata.get('server_uploads') else {'text': draft_text},
                     'warnings': preview['warnings'],
                     'telegram_sync_warning': '部分电报关联不属于当前对话或Bot，未删除对应消息。' if invalid_delivery else ('部分旧记录没有可靠的电报消息关联，电报里可能有残留。' if missing_delivery else None),
                     'telegram_native_message_ids': sorted(native_ids),

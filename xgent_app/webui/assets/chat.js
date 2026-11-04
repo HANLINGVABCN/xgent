@@ -19,6 +19,8 @@ import {decorateBrandAuthor} from './branding.js';
     captureAnchor:scrollAnchor,restoreAnchor:restoreScrollAnchor,scrollAdjusted:noteScrollAdjustment});
   var conversationDrafts = Object.create(null);
   var conversationFiles = Object.create(null);
+  var serverDrafts = Object.create(null);
+  const seenAccessNotices = new Set();
   function draftKey(cid) { return 'xgent-draft:' + (cid || selectedConversationId || 'global_memory'); }
 
   var btnSend = document.getElementById("btn-send");
@@ -1612,6 +1614,7 @@ import {decorateBrandAuthor} from './branding.js';
       if(frame.message_id!=null)byMessageId[frame.message_id]=entry;
     }
     if (frame.media) appendHistoryMedia(entry, frame, role);
+    if(frame.conversation_actions)setConversationActions(entry,{...frame,id:frame.record_id??frame.id});
     if (frame.message_id != null && !frame.ui_message_id) byMessageId[frame.message_id] = entry;
     return entry;
   }
@@ -1669,6 +1672,7 @@ import {decorateBrandAuthor} from './branding.js';
   }
 
   function setConversationActions(entry,message){
+    if(message&&message.id==null&&Number.isSafeInteger(message.record_id))message={...message,id:message.record_id};
     if(!entry?.bubble||!message?.conversation_actions||!Number.isSafeInteger(message.id))return;
     var bar=entry.bubble.querySelector('.msg-actions');if(!bar)return;
     var actions=message.conversation_actions;
@@ -1746,6 +1750,7 @@ import {decorateBrandAuthor} from './branding.js';
           var requestId=confirm.dataset.requestId||(confirm.dataset.requestId=queueRequestId());
           var result=await api('/api/workbench/conversations/withdraw',{method:'POST',body:JSON.stringify({conversation_id:cid,record_id:message.id,turn_id:preview.turn_id,current_digest:preview.current_digest,confirm:true,request_id:requestId})});
           restoreQueuedDraft(cid,result.draft?.text??message.content??message.text??'','withdraw:'+requestId);
+          setServerDraft(cid,result.draft);
           closeAction();if(cid===selectedConversationId)await resync(true,true);toast(result.telegram_sync_warning||'消息已撤回，原文已放回输入框',!!result.telegram_sync_warning);
         }finally{confirm.disabled=false;}
       },'danger');controls.append(actionButton('取消',closeAction),confirm);box.append(controls);
@@ -1790,9 +1795,10 @@ import {decorateBrandAuthor} from './branding.js';
       }
       if(data.draft){
         if(!input.value){input.value=data.draft.text||'';syncSendState();}
+        setServerDraft(cid,data.draft);
         var refs=[...(data.draft.metadata?.attachments||[]),...(data.draft.metadata?.server_uploads||[])];
         if(refs.length){var files=actionNode('div',null,'branch-draft-files');refs.forEach(ref=>files.append(actionNode('span','引用附件 · '+(ref.name||'文件'),'branch-draft-file')));bar.append(files);}
-      }
+      }else setServerDraft(cid,null);
       var hasLineage=Boolean(bar.childNodes.length);
       if(optBtn)optBtn.classList.toggle('has-lineage',hasLineage);
       bar.hidden=!(hasLineage&&optBtn?.getAttribute('aria-expanded')==='true');
@@ -1875,6 +1881,13 @@ import {decorateBrandAuthor} from './branding.js';
       syncThinking(byMessageId[frame.message_id],frame.thinking);return;
     }
     if(frame.type==='withdrawal_sync'){toast(frame.text,true);return;}
+    if(frame.type==='access_notice'){
+      if(!seenAccessNotices.has(frame.notice_id)){
+        seenAccessNotices.add(frame.notice_id);if(seenAccessNotices.size>1000)seenAccessNotices.delete(seenAccessNotices.values().next().value);
+        if(!frame.conversation_id||frame.conversation_id!==selectedConversationId)toast(frame.text,true);
+      }
+      return;
+    }
     if(frame.type==='queue_state'){refreshQueue();return;}
     if(frame.queue_id)refreshQueue();
     if(frame.type==='settings_state'){window.XGentAppearance?.accept(frame);return;}
@@ -2546,7 +2559,7 @@ import {decorateBrandAuthor} from './branding.js';
   }
 
   function syncSendState() {
-    btnSend.classList.toggle("ready", input.value.trim().length > 0 || pendingFiles.length > 0);
+    btnSend.classList.toggle("ready", input.value.trim().length > 0 || pendingFiles.length > 0 || !!serverDrafts[selectedConversationId]?.media?.length);
     updateSendAvailability();
   }
 
@@ -2658,6 +2671,7 @@ import {decorateBrandAuthor} from './branding.js';
     var submission=textSubmission;textSubmitting=true;updateSendAvailability();
     try{
       var result=await api('/api/chat',{method:'POST',body:JSON.stringify({text,conversation_id:cid,generation:submission.generation,request_id:submission.request_id})});
+      if(result.ok||result.queued||result.management)setServerDraft(cid,null);
       if(cid===selectedConversationId&&input.value===draft){input.value='';input.style.height='auto';conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
       else if(cid!==selectedConversationId&&conversationDrafts[cid]===draft){conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
       if(!result.queued&&!result.management&&cid===selectedConversationId)makeBubble('user',text);
@@ -2668,11 +2682,11 @@ import {decorateBrandAuthor} from './branding.js';
 
   function send() {
     if(queueEnabled&&!pendingFiles.length&&!input.value.trim().startsWith('/')){
-      var queuedText=input.value.trim();if(!queuedText||btnSend.disabled)return;
+      var queuedText=input.value.trim()||serverDrafts[selectedConversationId]?.send_text||'';if(!queuedText||btnSend.disabled)return;
       sendQueuedText(queuedText);return;
     }
     if(viewingPast){historyAnchor=null;viewingPast=false;newFrames=0;newerAvailable=false;updateHistoryState();}
-    var text = input.value.trim();
+    var text = input.value.trim()||serverDrafts[selectedConversationId]?.send_text||'';
     var hasFiles = pendingFiles.length > 0;
     if ((!text && !hasFiles) || btnSend.disabled) return;
 
@@ -2694,7 +2708,7 @@ import {decorateBrandAuthor} from './branding.js';
     var path = isCmd ? "/api/command" : "/api/chat";
     var submittedCid=selectedConversationId;
     var body = isCmd ? { command: text, conversation_id:submittedCid } : { text: text, conversation_id:submittedCid };
-    api(path, { method: "POST", body: JSON.stringify(body) }).catch(function (err) {
+    api(path, { method: "POST", body: JSON.stringify(body) }).then(function(){setServerDraft(submittedCid,null);}).catch(function (err) {
       if(submittedCid!==selectedConversationId){
         conversationDrafts[submittedCid]=text;
         try{sessionStorage.setItem(draftKey(submittedCid),text);}catch(e){}
@@ -2844,6 +2858,11 @@ import {decorateBrandAuthor} from './branding.js';
           }
           progress.textContent='已接收，正在处理';
           if(body.message&&batch.conversation_id===selectedConversationId)putHistoryFrame(body.message,streamEpoch);
+          else if(Number.isSafeInteger(body.record_id)&&batch.conversation_id===selectedConversationId){
+            const saved=await api('/api/workbench/history?presentation_ids='+body.record_id+'&conversation_id='+encodeURIComponent(batch.conversation_id));
+            if(batch.conversation_id===selectedConversationId)for(const row of saved.messages||[])putHistoryFrame(row,streamEpoch);
+          }
+          if(body.ok||body.record_id)setServerDraft(batch.conversation_id,null);
           if(body.duplicate){batch.next=batch.files.length;batch.awaitingTurn=false;reconcileAfterTurn=true;return;}
         } catch (err) {
           if(entry.durable){batch.next=batch.files.length;await turnDone;return;}
@@ -3459,7 +3478,7 @@ import {decorateBrandAuthor} from './branding.js';
     loggedOut=false;
     window.dispatchEvent(new CustomEvent("xgent-authenticated"));
     loginDlg.close();
-    resync().catch(function(){});
+    resync().then(()=>loadConversationLineage()).catch(function(){});
     connectStream();
   }
   var loginChallenge = null;
@@ -3623,8 +3642,33 @@ import {decorateBrandAuthor} from './branding.js';
       }
       pendingFilesEl.appendChild(chip);
     });
-    pendingFilesEl.classList.toggle("hidden", pendingFiles.length === 0);
+    const serverDraft=serverDrafts[selectedConversationId];
+    for(const media of serverDraft?.media||[]){
+      const chip=document.createElement('div');chip.className='pending-file server-draft-file';chip.dataset.mode=media.ingress_mode||'attachment';
+      if(media.download_url&&(media.kind==='photo'||media.kind==='video')){
+        const open=document.createElement('button');open.type='button';open.className='pending-media-preview';open.setAttribute('aria-label','预览 '+media.filename);
+        open.onclick=()=>previewMedia(media.download_url,media.filename,media.kind);
+        const preview=document.createElement(media.kind==='photo'?'img':'video');preview.src=media.download_url;
+        if(media.kind==='photo'){preview.alt=media.filename;preview.decoding='async';}
+        else{preview.preload='metadata';preview.muted=true;preview.playsInline=true;preview.tabIndex=-1;const play=document.createElement('span');play.textContent='▶';open.append(play);}
+        open.append(preview);chip.append(open);
+      }
+      const name=document.createElement('span');name.className='pending-file-name';name.textContent=(media.ingress_mode==='server_upload'?'↑ 上传：':'📎 附件：')+media.filename;
+      const remove=document.createElement('button');remove.type='button';remove.className='pf-del';remove.textContent='×';remove.setAttribute('aria-label','移除 '+media.filename);
+      remove.onclick=async()=>{const cid=selectedConversationId;remove.disabled=true;try{
+        const result=await api('/api/workbench/conversations/draft',{method:'POST',body:JSON.stringify({conversation_id:cid,source_record_id:serverDraft.source_record_id,revision:serverDraft.revision,
+          keep:serverDraft.media.filter(item=>item.draft_key!==media.draft_key).map(item=>item.draft_key)})});setServerDraft(cid,result.draft);
+      }catch(error){toast(error.message,true);}finally{remove.disabled=false;}};
+      chip.append(name,remove);pendingFilesEl.append(chip);
+    }
+    pendingFilesEl.classList.toggle("hidden", pendingFiles.length === 0 && !serverDraft?.media?.length);
     syncSendState();
+  }
+
+  function setServerDraft(cid,draft){
+    if(!cid)return;
+    if(draft?.media?.length)serverDrafts[cid]=draft;else delete serverDrafts[cid];
+    if(cid===selectedConversationId)renderPendingFiles();
   }
 
   function clearPendingFiles() {

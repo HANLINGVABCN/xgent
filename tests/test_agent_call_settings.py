@@ -31,6 +31,7 @@ def test_web_call_mode_choices_save_and_preserve_composer_draft(browser_context,
     trigger = page.get_by_role('button', name='生成选项', exact=True)
     for name, value in [('正则围栏', 'fence'), ('Tool call', 'toolcall')]:
         trigger.click()
+        page.get_by_role('button', name='工具调用方式', exact=True).click()
         page.get_by_role('radiogroup', name='工具调用方式').get_by_role('radio', name=name, exact=True).click()
         page.locator('#composer-options-popover').wait_for(state='hidden')
         settings = browser_context.request.get(workspace_url['url'] + '/api/workbench/bootstrap').json()

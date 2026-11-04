@@ -73,7 +73,8 @@ def test_mobile_generation_panel_switch_and_resize(browser_context,workspace_url
     page.wait_for_function('(old)=>document.getElementById("composer-agent").getAttribute("aria-pressed")===String(!old)',arg=original)
     assert page.locator('#composer-options-popover').is_hidden()
     trigger.click()
-    assert page.locator('#composer-options-popover .composer-option').count()==4
+    assert page.locator('#composer-options-popover .composer-setting-button').count()==5
+    page.get_by_role('button',name='回复方式',exact=True).click()
     assert page.get_by_role('radio',name='前台流式',exact=True).is_visible()
     assert page.get_by_role('radio',name='后台流式',exact=True).count()==0
     assert page.get_by_role('radio',name='非流式',exact=True).is_visible()
@@ -111,9 +112,10 @@ def test_web_generation_choices_preserve_independent_bot_setting(browser_context
     for value,label,enabled,style in [('nonstream','非流式',False,'foreground'),
                                       ('foreground','前台流式',True,'foreground')]:
         page.get_by_role('button',name='生成选项',exact=True).click()
-        assert page.get_by_role('radiogroup',name='回复方式').is_visible()
         assert page.get_by_role('switch',name='Agent 模式',exact=True).is_visible()
         assert page.get_by_role('switch',name='Agent 自动执行',exact=True).count()==0
+        page.get_by_role('button',name='回复方式',exact=True).click()
+        assert page.get_by_role('radiogroup',name='回复方式').is_visible()
         page.get_by_role('radio',name=label,exact=True).click()
         page.locator('#composer-options-popover').wait_for(state='hidden')
         data=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']
@@ -121,8 +123,34 @@ def test_web_generation_choices_preserve_independent_bot_setting(browser_context
         assert data['telegram_response_mode']==bot_mode
         assert page.locator('#input').input_value()=='保留草稿'
         page.get_by_role('button',name='生成选项',exact=True).click()
+        page.get_by_role('button',name='回复方式',exact=True).click()
         assert page.get_by_role('radio',name=label,exact=True).get_attribute('aria-checked')=='true'
         bounds=page.locator('#composer-options-popover').bounding_box()
         assert bounds['x']>=0 and bounds['x']+bounds['width']<=width+1
         page.keyboard.press('Escape')
     page.close()
+
+
+@pytest.mark.parametrize('width',[1440,390,320])
+def test_generation_menu_uses_compact_buttons_and_saves_rounds_and_memory(browser_context,workspace_url,width,tmp_path):
+    page=browser_context.new_page();page.set_viewport_size({'width':width,'height':844});ready(page,workspace_url['url'])
+    page.locator('#input').fill('设置不能丢掉草稿')
+    page.get_by_role('button',name='生成选项',exact=True).click()
+    menu=page.locator('.composer-setting-grid')
+    metrics=menu.evaluate('''node=>{const buttons=[...node.children];return {width:node.clientWidth,buttons:buttons.map(n=>n.getBoundingClientRect().width),rows:buttons.map(n=>n.getBoundingClientRect().y)};}''')
+    assert len(metrics['buttons'])==5 and all(size<metrics['width']*.6 for size in metrics['buttons'])
+    assert metrics['rows'][0]==metrics['rows'][1]
+    assert page.get_by_role('radio').count()==0
+    for key,label,value in [('agent_max_iterations','Agent 轮数',17),('global_depth','记忆深度',123)]:
+        page.get_by_role('button',name=label,exact=True).click()
+        number=page.get_by_role('spinbutton',name=label,exact=True)
+        number.fill(str(value))
+        page.locator('.composer-number-save').click()
+        page.locator('#composer-options-popover').wait_for(state='hidden')
+        settings=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']
+        assert settings[key]==value
+        assert page.locator('#input').input_value()=='设置不能丢掉草稿'
+        page.get_by_role('button',name='生成选项',exact=True).click()
+        assert page.locator('[data-setting="'+key+'"] .composer-setting-value').inner_text()==str(value)
+    page.screenshot(path=str(tmp_path/f'compact-settings-{width}.png'))
+    page.keyboard.press('Escape');page.close()

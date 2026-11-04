@@ -203,9 +203,9 @@ async def publish_queued_users(context, batch):
         if cli:
             from xgent_app.cli_bridge import relay_conversation_event, relay_user_message
             relay_conversation_event(frame)
-            relay_user_message(item['text'], queue_origin=item['origin'], queue_id=item['id'])
+            relay_user_message(item['text'], queue_origin=item['origin'], queue_id=item['id'], record_id=row['id'])
         elif item['origin'] != 'telegram':
-            mirror_user_line_to_telegram(('🖥 [CLI]' if item['origin'] == 'cli' else '💬 [网页]') + '\n' + item['text'])
+            mirror_user_line_to_telegram(('🖥 [CLI]' if item['origin'] == 'cli' else '💬 [网页]') + '\n' + item['text'], record_id=row['id'])
 
 
 async def _dispatch_queued_batch(batch):
@@ -514,7 +514,7 @@ def telegram_channel_stats() -> Dict[str, Any]:
     return worker.stats() if worker is not None else {"configured": False}
 
 
-def mirror_user_line_to_telegram(text: str) -> None:
+def mirror_user_line_to_telegram(text: str, *, record_id: Optional[int] = None) -> None:
     """把用户在网页/CLI 里说的那句话镜像到 Telegram。同步、非阻塞。
 
     走出站通道而不是直接 await：原先两处都是 `await _web_real_bot.send_message(...)`
@@ -530,10 +530,11 @@ def mirror_user_line_to_telegram(text: str) -> None:
     channel = telegram_channel()
     channel.ensure_started()
     from xgent_app.telegram_presentation import telegram_label, presentation_mode
+    from xgent_app.web_bridge import _allocate_web_message_id
     for index, chunk in enumerate(split_text_for_telegram(text)):
         with telegram_label(presentation_mode()):
-            channel.offer(Op(OP_SEND, chat_id=BotConfig.AUTHORIZED_USER_ID,
-                             payload={"text": chunk}))
+            channel.offer(Op(OP_SEND, logical_id=_allocate_web_message_id(), chat_id=BotConfig.AUTHORIZED_USER_ID,
+                             payload={"text": chunk, **({'_record_id': record_id} if record_id is not None else {})}))
 
 
 # 每个 CLI 会话一个 MirrorBot。它持有 CLI 的 message_id -> 真实 Telegram
@@ -620,7 +621,12 @@ async def _replay_relay_op_with_presentation(mirror: Any, op: str, payload: Dict
         # await 真实 bot——那样 TG 不通时每条都要等满一个超时，把整条回放流拖住。
         if mirror.real_bot is not None and payload.get('queue_origin') != 'telegram':
             prefix = '💬 [网页]' if payload.get('queue_origin') == 'web' else '🖥 [CLI]'
-            mirror_user_line_to_telegram(f"{prefix}\n{text}")
+            record_id = payload.get('record_id')
+            if record_id is None and payload.get('queue_id'):
+                item = await (await BotMemoryDB.get_instance()).queue_item(payload['queue_id'])
+                if item is not None and item['conversation_id'] == current_scope().conversation_id:
+                    record_id = item.get('record_id')
+            mirror_user_line_to_telegram(f"{prefix}\n{text}", record_id=record_id)
         outbox = _web_external_outbox
         if outbox is not None and not payload.get('queue_id'):
             # user_message 帧让网页渲染成用户气泡（右侧），而不是 AI 气泡。
@@ -1157,12 +1163,26 @@ async def _web_run_conversation(text: str, outbox: Any, *, expected_state=None) 
             outbox.put({"type": "turn_end"})
         return
     try:
-        # 先把用户消息镜像到 Telegram，再记录到记忆、跑对话。走出站通道：非阻塞，
-        # 且 TG 断连期间说的话恢复后会补投过去。
-        mirror_user_line_to_telegram(f"💬 [网页]\n{text}")
-        await GlobalRecorder.record_user_message(
-            text, MessageType.USER_TEXT, BotConfig.AUTHORIZED_USER_ID
-        )
+        # Persist identity before asynchronous delivery; withdrawal can suppress
+        # a pending send or delete the exact IDs returned after reconnect.
+        db = await BotMemoryDB.get_instance()
+        cursor = await (await db._get_conn()).execute('SELECT * FROM conversation_branch_drafts WHERE conversation_id=?', (current_scope().conversation_id,))
+        draft = await cursor.fetchone()
+        await cursor.close()
+        from xgent_app.presentation import metadata_dict
+        draft_metadata = metadata_dict(draft['metadata']) if draft else {}
+        if draft_metadata.get('attachments'):
+            record_id = await GlobalRecorder.record_attachment_message(text, MessageType.USER_FILE,
+                BotConfig.AUTHORIZED_USER_ID, draft_metadata['attachments'], await db.get_attachment_generation(),
+                metadata={**draft_metadata, 'web_file_message': {'version': 1, 'text': text}})
+        else:
+            record_id = await GlobalRecorder.record_user_message(text, MessageType.USER_TEXT, BotConfig.AUTHORIZED_USER_ID,
+                metadata={**draft_metadata, **({'web_file_message': {'version': 1, 'text': text}} if draft else {})})
+        if draft and record_id is not None:
+            async with db._write() as conn:
+                await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=? AND created_at=?',
+                    (current_scope().conversation_id, draft['created_at']))
+        mirror_user_line_to_telegram(f"💬 [网页]\n{text}", record_id=record_id)
         await process_conversation(update, context, text)
         outbox.put({"type": "turn_end"})
     except Exception as e:
@@ -1308,7 +1328,7 @@ async def _web_deliver_file_to_tg(abs_path: str, filename: str, caption: str) ->
 
 @_without_reverse_mirror
 async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_id=None, transport_capabilities=None,
-                                          ingress_mode='attachment'):
+                                          ingress_mode='attachment', record_id=None):
     """Mirror Web files in either mode without changing their AI input policy."""
     from xgent_app.interaction import telegram_delivery_allowed
     if _web_real_bot is None or not telegram_delivery_allowed():
@@ -1329,6 +1349,10 @@ async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_i
         return
 
     chat_id = chat_id or BotConfig.AUTHORIZED_USER_ID
+    async def remember(message):
+        if record_id is not None:
+            from xgent_app.telegram_records import bind_native_delivery
+            await bind_native_delivery(await BotMemoryDB.get_instance(), record_id, _web_real_bot, chat_id, message)
     # Telegram-only status; never append these transport notes to the AI input.
     source = '网页上传' if ingress_mode == 'server_upload' else '网页附件'
     ai_notice = ('仅向 AI 提供路径，未发送文件内容。' if ingress_mode == 'server_upload'
@@ -1344,8 +1368,8 @@ async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_i
     async def send_text(text):
         # Leave room for a conversation label, including astral Unicode text.
         for offset in range(0, len(text), 1900):
-            await _web_real_bot.send_message(chat_id=chat_id,
-                text=await render_telegram_text(text[offset:offset + 1900]))
+            await remember(await _web_real_bot.send_message(chat_id=chat_id,
+                text=await render_telegram_text(text[offset:offset + 1900])))
     try:
         file_size = os.path.getsize(abs_path)
         # AgentExecutor.MAX_FILE_SIZE 与发送侧同源（50MB），通过共享命名空间可见。
@@ -1359,7 +1383,7 @@ async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_i
             limit_mb = capabilities.document_upload_limit // 1024 // 1024
             notice = (f'[{source}] {filename}（{file_size / 1024 / 1024:.2f} MB）已存服务器，'
                       f'超过 Bot 的 {limit_mb} MB 上限，未同步文件。\n{ai_notice}\n路径：{abs_path}')
-            await _web_real_bot.send_message(chat_id=chat_id, text=await render_telegram_text(notice))
+            await remember(await _web_real_bot.send_message(chat_id=chat_id, text=await render_telegram_text(notice)))
             return
 
         if overflow_caption is not None:
@@ -1386,7 +1410,7 @@ async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_i
             try:
                 container_path = f"file://{_LOCAL_API_CONTAINER_DATA_DIR}/{unique_name}"
                 read_timeout = max(120, min(1800, int(file_size / (50 * 1024 * 1024) * 60)))
-                await _web_real_bot.send_document(
+                await remember(await _web_real_bot.send_document(
                     chat_id=chat_id,
                     document=container_path,
                     filename=filename,
@@ -1395,7 +1419,7 @@ async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_i
                     write_timeout=read_timeout,
                     connect_timeout=30,
                     pool_timeout=30,
-                )
+                ))
             finally:
                 try:
                     await asyncio.to_thread(
@@ -1408,14 +1432,14 @@ async def sync_web_attachment_to_telegram(abs_path, filename, caption, *, chat_i
 
         # 小文件：原生上传。
         with open(abs_path, "rb") as f:
-            await _web_real_bot.send_document(
+            await remember(await _web_real_bot.send_document(
                 chat_id=chat_id,
                 document=f,
                 filename=filename,
                 caption=tg_caption,
                 read_timeout=120,
                 write_timeout=120,
-            )
+            ))
     except Exception as exc:
         # TG 同步失败不阻断网页对话，与 MirrorBot._tg_call 容错策略一致。
         # 用 message 帧显示在 AI 侧（系统告警），不用 user_message 误显示在用户侧。
@@ -1631,7 +1655,7 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
                 BotConfig.AUTHORIZED_USER_ID, attachment_refs, generation, metadata=metadata)
         else:
             row_id = await GlobalRecorder.record_user_message(content, MessageType.USER_TEXT,
-                BotConfig.AUTHORIZED_USER_ID, metadata={**metadata, 'server_uploads': refs,
+                BotConfig.AUTHORIZED_USER_ID, metadata={**metadata, 'server_uploads': upload_refs,
                                                       'attachment_generation': generation})
             if row_id is None:
                 raise ValueError('上传记录未保存')
@@ -1656,7 +1680,7 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
                 caption = data['text'] + ('\n\n' + caption if caption and caption != data['text'] else '')
             # Complete the user message's Telegram delivery before AI can reply.
             await sync_web_attachment_to_telegram(p['saved_file']['abs_path'],
-                p['attachment']['name'], caption, ingress_mode=p['mode'])
+                p['attachment']['name'], caption, ingress_mode=p['mode'], record_id=row_id)
         await process_conversation(update, context, content)
         outbox.put({'type': 'turn_end'})
     except Exception as exc:

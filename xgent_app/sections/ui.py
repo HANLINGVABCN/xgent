@@ -1124,7 +1124,7 @@ async def handle_unauthorized_user(update: Update, context: ContextTypes.DEFAULT
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     report = (
-        f"🚨 <b>访问控制通知：未授权请求</b> 🚨\n"
+        f"🚨 <b>访问控制通知：来自电报端的未授权请求</b> 🚨\n"
         f"━━━━━━━━━━━━━━\n"
         f"⏰ <b>时间:</b> {current_time}\n"
         f"👤 <b>用户ID:</b> <code>{user.id}</code>\n"
@@ -1140,31 +1140,8 @@ async def handle_unauthorized_user(update: Update, context: ContextTypes.DEFAULT
         f"该请求已被拦截。"
     )
 
+    # Access logs are global; store them even when the owner has no selected chat.
     try:
-        await context.bot.send_message(
-            chat_id=BotConfig.AUTHORIZED_USER_ID,
-            text=report,
-            parse_mode=constants.ParseMode.HTML
-        )
-        logger.info(f"已拦截未授权用户 {user.id} 并向用户汇报。")
-    except Exception as e:
-        logger.error(f"向用户汇报失败: {e}")
-    
-    # 记录到全局表和未授权用户专用表 - 防御性包装，避免DB失败导致主流程崩溃
-    try:
-        await GlobalRecorder.record(
-            msg_type=MessageType.SYSTEM_OP,
-            role='system',
-            content=f"[未授权用户警报] 用户 {user.full_name}(@{user.username or '无'}) ID:{user.id} 尝试{action_type}: {unauthorized_input}",
-            chat_id=BotConfig.AUTHORIZED_USER_ID
-        )
-        await GlobalRecorder.record(
-            msg_type=MessageType.AI_REPLY,
-            role='assistant',
-            content=f"[对未授权用户的回复] {rejection_msg}",
-            chat_id=BotConfig.AUTHORIZED_USER_ID
-        )
-        
         db = await BotMemoryDB.get_instance()
         await db.record_unauthorized_access(
             user_id=user.id,
@@ -1176,6 +1153,61 @@ async def handle_unauthorized_user(update: Update, context: ContextTypes.DEFAULT
         )
     except Exception as e:
         logger.error(f"记录未授权用户信息失败: {e}")
+
+    from types import SimpleNamespace
+    from xgent_app.interaction import interaction
+    from xgent_app.presentation import presentation_turn, message_presentation
+    from xgent_app.web_bridge import MirrorBot
+    from xgent_app.telegram_records import bind_record
+    try:
+        # An intercepted update never owns a conversation or execution slot.
+        # Resolve the owner's Telegram choice explicitly; Web tabs stay independent.
+        with interaction('telegram', 'notification'), presentation_turn(None), message_presentation(None):
+            async with conversation_operation(selector='telegram', fresh=True):
+                raw = (f"🚨 访问控制通知：来自电报端的未授权请求 🚨\n时间: {current_time}\n"
+                       f"用户: {user.full_name} (@{user.username or '无'}) ID:{user.id}\n"
+                       f"行为: {action_type}\n被拦截的内容（仅作为记录）:\n{unauthorized_input}\n"
+                       f"已发送回复: {rejection_msg}\n该请求已被拦截。")
+                record_id = await GlobalRecorder.record_system_message(raw, BotConfig.AUTHORIZED_USER_ID,
+                    metadata={'security_notice': {'sender_user_id': user.id, 'action': action_type},
+                              'display': {'content': report, 'parse_mode': 'HTML'}})
+                outbox = get_web_outbox() or globals().get('_web_external_outbox')
+                bot = MirrorBot(outbox, BotConfig.AUTHORIZED_USER_ID, real_bot=context.bot)
+                bot._is_xgent_telegram_bot = True  # Native access alerts ignore CLI mirror preferences.
+                notify_context = SimpleNamespace(bot=bot)
+                with message_presentation({'kind': MessageType.SYSTEM_OP, 'record_id': record_id}):
+                    sent = await safe_send_message(notify_context, BotConfig.AUTHORIZED_USER_ID,
+                        report, parse_mode=constants.ParseMode.HTML)
+                ids = [item.message_id for item in sent]
+                if record_id is not None:
+                    db = await BotMemoryDB.get_instance()
+                    row = await db.get_display_message(record_id)
+                    if row is not None:
+                        await bind_record(db, row, ids)
+                        if outbox is not None:
+                            await db.patch_display_metadata(record_id, {'web_live': {
+                                'epoch': outbox.snapshot()['epoch'], 'message_ids': ids}})
+                    await publish_saved_reply(notify_context, record_id)
+                if outbox is not None:
+                    outbox.put({'type': 'access_notice', 'notice_id': str(record_id) if record_id is not None else uuid.uuid4().hex,
+                        'text': '🚨 访问控制通知：来自电报端的未授权请求 🚨'})
+                logger.info(f"已拦截未授权用户 {user.id}，告警已记录并交付通知通道。")
+    except ConversationError as exc:
+        # No owner chat: retain the global security log and notify Telegram,
+        # without assigning the alert to an arbitrary Web conversation.
+        logger.warning('未授权告警没有可用的 Bot 会话: %s', exc)
+        with bind_conversation(None):
+            outbox = get_web_outbox() or globals().get('_web_external_outbox')
+            if outbox is not None:
+                outbox.put({'type': 'access_notice', 'notice_id': uuid.uuid4().hex,
+                    'text': '🚨 访问控制通知：来自电报端的未授权请求 🚨'})
+            try:
+                await context.bot.send_message(chat_id=BotConfig.AUTHORIZED_USER_ID,
+                    text=report, parse_mode=constants.ParseMode.HTML)
+            except Exception as error:
+                logger.error('未授权告警投递失败: %s', error)
+    except Exception as exc:
+        logger.error('未授权告警同步失败: %s', exc, exc_info=True)
 
 async def check_authorized_user_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """中间件：检查是否是用户"""

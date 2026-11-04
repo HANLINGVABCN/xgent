@@ -1,6 +1,8 @@
 .brand-logo{display:inline-flex!important;flex-shrink:0;overflow:hidden;contain:layout paint style;isolation:isolate;pointer-events:none;background:transparent!important;border:0!important;box-shadow:none!important;vertical-align:middle}
 .brand-logo[hidden]{display:none!important}
-.bubble-author-icon.brand-logo{width:22px;height:22px;border-radius:6px}
+.bubble-author-icon.brand-logo{width:24px;height:24px;border-radius:6px}
+.bubble-author:has(.brand-logo){align-items:center}
+.bubble-author [data-brand-name]{font-size:15px;font-weight:700;line-height:24px;color:var(--wb-text,var(--text))}
 .bubble-author{min-width:0}
 .bubble-author [data-brand-name]{min-width:0;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #wb-nav .wb-brand{min-width:0;max-width:100%}
