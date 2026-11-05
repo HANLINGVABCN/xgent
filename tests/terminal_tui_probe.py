@@ -178,14 +178,26 @@ async def actual_tui(cli, scenario='routing'):
                         await wait_for(lambda: len(calls)==1)
                         assert calls[0] == (a,'旧上下文草稿')
                         await wait_for(lambda: not cli._turn_active)
-                        # Removal never sends an existing draft to a fallback conversation.
-                        await keys('删除前草稿')
+                        # Archival preserves a terminal that already entered the conversation.
+                        await keys('归档时保留的草稿')
+                        before_archive = work.snapshot()['generation']
                         await db.manage_conversation('archive', a)
+                        await manager.poll_once()
+                        await work.refresh_state()
+                        assert work.selected == a and work.snapshot()['generation'] == before_archive
+                        assert buf.text == '归档时保留的草稿'
+                        await keys('\r')
+                        await wait_for(lambda: len(calls)==2 and not cli._turn_active)
+                        assert calls[-1] == (a,'归档时保留的草稿')
+                        assert (await db.get_session(a))['archived']
+                        # Deletion never sends an existing draft to a fallback conversation.
+                        await keys('删除前草稿')
+                        await db.begin_conversation_delete(a)
                         await manager.poll_once()
                         await work.refresh_state()
                         assert work.selected is None
                         await keys('不能发送\r')
-                        assert len(calls)==1 and buf.text == '不能发送'
+                        assert len(calls)==2 and buf.text == '不能发送'
                     elif scenario == 'write_failure':
                         from unittest.mock import AsyncMock
                         await keys('失败时保留的草稿')

@@ -509,7 +509,10 @@ class WebServerHttpTests(unittest.TestCase):
     def test_index_served(self):
         with urllib.request.urlopen(self.base + "/", timeout=10) as resp:
             self.assertEqual(200, resp.status)
-            self.assertIn(b"XGent Web Chat", resp.read())
+            page = resp.read()
+            self.assertIn(b"<title>XGent</title>", page)
+            self.assertIn(b'id="input"', page)
+            self.assertIn(b'id="btn-send"', page)
 
     def test_durable_callbacks_route_by_identity_without_trusting_client_action(self):
         calls = []
