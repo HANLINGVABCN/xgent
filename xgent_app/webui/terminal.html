@@ -1,14 +1,19 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>XGent Terminal</title>
+<meta name="theme-color" content="#171d1a">
+<title>XGent · 终端</title>
 <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
-<script src="/vendor/telegram-web-app.js"></script>
+<script>try{const t=localStorage.getItem('xgent-theme'),p=localStorage.getItem('xgent-theme-palette');document.documentElement.dataset.theme=t==='light'||(!t&&!matchMedia('(prefers-color-scheme: dark)').matches)?'light':'dark';document.documentElement.dataset.palette=['neon','slate','gold','mono','duo','forest'].includes(p)?p:'neon';}catch{document.documentElement.dataset.palette='neon';}</script>
+<link rel="stylesheet" href="/assets/design-system.css">
+<link rel="stylesheet" href="/assets/themes.css">
+<!-- defer：按文档顺序仍先于末尾的 ES 模块执行，Terminal 全局可用时机不变。 -->
+<script defer src="/vendor/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/vendor/xterm.min.css">
-<script src="/vendor/xterm.min.js"></script>
-<script src="/vendor/addon-fit.min.js"></script>
+<script defer src="/vendor/xterm.min.js"></script>
+<script defer src="/vendor/addon-fit.min.js"></script>
 <link rel="stylesheet" href="/assets/terminal.css">
 <link rel="stylesheet" href="/assets/branding.css">
 </head>
@@ -27,20 +32,20 @@
   </defs>
 </svg>
 
-<div id="bar">
+<header id="bar" aria-label="终端工具栏">
   <button class="icon-btn" id="backBtn" title="返回聊天" aria-label="返回聊天"><svg class="icon" viewBox="0 0 24 24"><use href="#i-back"/></svg></button>
   <div class="brand">
     <div class="dot-mark" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="24" height="24" alt=""></div>
-    <span class="title" data-brand-name data-brand-suffix=" 终端">XGent 终端</span>
+    <div class="terminal-brand-text"><span class="terminal-eyebrow">TERMINAL</span><span class="title" data-brand-name data-brand-suffix=" 终端">XGent 终端</span></div>
   </div>
   <button class="icon-btn" id="fontMinusBtn" title="缩小字号" aria-label="缩小字号">A-</button>
   <button class="icon-btn" id="fontPlusBtn" title="放大字号" aria-label="放大字号">A+</button>
   <button class="icon-btn" id="copyBtn" title="复制终端内容" aria-label="复制"><svg class="icon" viewBox="0 0 24 24"><use href="#i-copy"/></svg></button>
   <button class="icon-btn" id="pasteBtn" title="粘贴到终端" aria-label="粘贴"><svg class="icon" viewBox="0 0 24 24"><use href="#i-paste"/></svg></button>
   <button class="icon-btn danger" id="closeBtn" title="关闭会话" aria-label="关闭会话"><svg class="icon" viewBox="0 0 24 24"><use href="#i-power"/></svg></button>
-</div>
+</header>
 
-<div id="keybar">
+<nav id="keybar" aria-label="终端虚拟按键">
   <button class="vkey" data-key="\x1b">ESC</button>
   <button class="vkey" data-key="\t">TAB</button>
   <button class="vkey" data-key="\x03">Ctrl+C</button>
@@ -54,13 +59,13 @@
   <button class="vkey" data-key="~">~</button>
   <button class="vkey" data-key="/">/</button>
   <button class="vkey" data-key="clear\r">clear</button>
-</div>
+</nav>
 
 <div id="sessionBar"><select id="sessionSelect" aria-label="终端会话"></select><button id="newSessionBtn">＋ 新终端</button><button id="refreshSessionsBtn">刷新会话</button><span id="sessionNote">切换页面不会结束命令</span></div>
 <div id="sessionTabs" role="tablist" aria-label="终端标签页"></div>
-<div id="term-wrap"><div id="term"></div></div>
-<div id="status"></div>
-<div id="toast"></div>
+<main id="term-wrap" aria-label="终端输出"><div id="term"></div></main>
+<footer id="status" role="status"></footer>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <div class="overlay" id="loginOverlay">
   <div class="card">
@@ -68,8 +73,8 @@
     <h2>终端登录验证</h2>
     <p class="sub">终端拥有系统级执行权限，仅授权用户可用。</p>
     <div id="err"></div>
-    <input id="pw" type="password" placeholder="访问密码" autocomplete="current-password">
-    <input id="otp" type="text" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
+    <input id="pw" type="password" aria-label="访问密码" placeholder="访问密码" autocomplete="current-password">
+    <input id="otp" type="text" aria-label="动态验证码或恢复码" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
     <button type="button" id="loginBack" hidden>返回密码登录</button>
     <button class="btn-primary" id="loginBtn">登录终端</button>
     <div class="muted">在 Telegram 菜单中打开时可自动免密。</div>

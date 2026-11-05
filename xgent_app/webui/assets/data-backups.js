@@ -142,10 +142,17 @@ export async function dataBackupCards({page,card,state={},dirtyForm=()=>{}}){
     for(const item of catalog.items||[]){
       const box=el('input',{type:'checkbox',checked:deleteNames.has(item.name),'data-backup-name':item.name,'aria-label':'删除选择 '+item.name});
       box.onchange=()=>{if(box.checked)deleteNames.add(item.name);else deleteNames.delete(item.name);syncDeleteSelection();};
-      const choose=button('',()=>selectStored(item.name));choose.classList.add('wb-backup-entry-select');
-      choose.append(el('strong',{},item.name),el('small',{},item.label+' · '+bytes(item.size)+' · '+new Date(item.created_at*1000).toLocaleString('zh-CN',{hour12:false})),el('small',{},(item.file_count==null?'文件数未知':item.file_count+' 个文件')+' · '+(item.archive_format||'ZIP').toUpperCase()),el('span',{class:'wb-backup-entry-types'},(item.categories||[]).slice(0,4).map(category=>el('span',{class:'wb-tag'},category.label)),(item.categories||[]).length>4?el('span',{class:'wb-tag'},'+'+(item.categories.length-4)+' 类'):null));
+      const choose=el('button',{type:'button',class:'wb-backup-entry-select',title:item.name,onclick:()=>selectStored(item.name)},
+        el('strong',{class:'wb-backup-entry-name'},item.name),
+        el('span',{class:'wb-backup-entry-meta'},el('span',{},item.label),el('span',{},bytes(item.size)),
+          el('span',{},new Date(item.created_at*1000).toLocaleString('zh-CN',{hour12:false}))),
+        el('span',{class:'wb-backup-entry-meta'},el('span',{},item.file_count==null?'文件数未知':item.file_count+' 个文件'),
+          el('span',{},(item.archive_format||'ZIP').toUpperCase())),
+        (item.categories||[]).length?el('span',{class:'wb-backup-entry-types'},(item.categories||[]).slice(0,4).map(category=>el('span',{class:'wb-tag'},category.label)),
+          (item.categories||[]).length>4?el('span',{class:'wb-tag'},'+'+(item.categories.length-4)+' 类'):null):null);
       choose.setAttribute('aria-pressed',String(selectedName===item.name));
-      entries.append(el('div',{class:'wb-backup-entry'+(selectedName===item.name?' is-selected':''),'data-archive-name':item.name},box,choose,el('a',{class:'wb-btn',href:'/api/workbench/data/backup-download?name='+encodeURIComponent(item.name),download:''},'下载')));
+      entries.append(el('article',{class:'wb-backup-entry'+(selectedName===item.name?' is-selected':''),'data-archive-name':item.name},box,choose,
+        el('a',{class:'wb-btn wb-backup-download',href:'/api/workbench/data/backup-download?name='+encodeURIComponent(item.name),download:'','aria-label':'下载 '+item.name},'下载')));
     }
     const remove=button('删除选中压缩包',async()=>{if(activating||deleting)return;const names=[...deleteNames];if(!names.length)return;if(!confirm('永久删除 '+names.length+' 个压缩包？此操作不可撤销。'))return;deleting=true;syncDeleteSelection();try{if(names.includes(selectedName))await beginSelection('');renderCatalog(await wb('data/backups/delete',{data:{names,confirm:true}}));listFeedback.replaceChildren(message('压缩包已删除。','success'));}catch(error){listFeedback.replaceChildren(message(error.message));}finally{deleting=false;renderCatalog(catalog);}},'danger');
     function syncDeleteSelection(){selectionCount.textContent='已选 '+deleteNames.size+' / '+available.size+' 个';remove.disabled=activating||deleting||!deleteNames.size;selectAll.disabled=selectNone.disabled=activating||deleting||!available.size;for(const box of entries.querySelectorAll('[data-backup-name]'))box.disabled=activating||deleting;}
@@ -180,32 +187,54 @@ export async function dataBackupCards({page,card,state={},dirtyForm=()=>{}}){
   function renderPreview(job){
     const preview=job.preview;if(!preview){previewBox.replaceChildren(message('此任务没有内容预览，请重新选择压缩包。'));return;}
     currentSource=currentSource||job.source_name;sourceText.textContent='当前压缩包：'+currentSource;
-    const rows=preview.groups||[];
-    const selected=new Set(preview.recommended_groups||rows.filter(item=>item.selected).map(item=>item.id));
+    const availableById=new Map((preview.groups||[]).map(item=>[item.id,item]));
+    const partNames=new Map((initialEstimate.categories||[]).map(item=>[item.id,item.label]));
+    const rows=categories.map(spec=>{
+      const included=availableById.get(spec.id);availableById.delete(spec.id);
+      return included?{...spec,...included,available:included.available!==false&&!!included.categories?.length,
+        all_categories:spec.categories}:{...spec,available:false,categories:[],all_categories:spec.categories,
+        files:[],file_count:0,size:0,item_count:undefined,replace_paths:[],entry_names:[]};
+    });
+    rows.push(...[...availableById.values()].map(item=>({...item,available:item.available!==false&&!!item.categories?.length,all_categories:item.categories})));
+    const availableRows=rows.filter(item=>item.available),availableIds=new Set(availableRows.map(item=>item.id));
+    const selected=new Set((preview.recommended_groups||availableRows.filter(item=>item.selected).map(item=>item.id)).filter(id=>availableIds.has(id)));
     const choiceInputs=new Map(),selectionSummary=el('strong',{class:'wb-import-selected-summary'}),warningText=el('p');
     const warning=el('div',{class:'wb-backup-overwrite-warning',role:'note'},el('strong',{},'只覆盖勾选的组；组内被导入的旧内容会删除。其余内容保留。'),warningText,el('p',{},'每组仅恢复压缩包中已有的部分。切换前自动备份；失败会尝试回滚。'));
     const groups=el('div',{class:'wb-import-content-groups'});
     for(const item of rows){
-      const input=el('input',{type:'checkbox',checked:selected.has(item.id),'data-import-category':item.id,'aria-label':'导入 '+item.label});choiceInputs.set(item.id,input);
-      input.onchange=()=>{if(input.checked)selected.add(item.id);else selected.delete(item.id);syncImport();};
-      const details=el('details',{class:'wb-import-content-group'},el('summary',{},el('strong',{},item.label),el('span',{},item.file_count+' 个文件 · '+bytes(item.size)+(item.item_count!=null?' · '+item.item_count+' 条记录':''))),item.description?el('p',{class:'wb-note'},item.description):null,el('p',{class:'wb-import-replacement'},'当前 '+(item.current_item_count!=null?item.current_item_count+' 条记录':item.current_file_count+' 个文件')+' / '+bytes(item.current_size)+' → 导入 '+item.file_count+' 个文件 / '+bytes(item.size)),el('p',{class:'wb-file-path'},'覆盖范围：'+(item.replace_paths||item.paths||[]).join(' · ')),item.entry_names?.length?el('p',{class:'wb-note'},'条目名称（不显示密钥值）：'+item.entry_names.join('、')):null,fileDetails(item));
-      groups.append(el('div',{class:'wb-import-select-row','data-import-row':item.id},input,details));
+      const input=el('input',{type:'checkbox',checked:selected.has(item.id),disabled:!item.available,'data-import-category':item.id,'aria-label':'导入 '+item.label});choiceInputs.set(item.id,input);
+      input.onchange=()=>{if(item.available&&input.checked)selected.add(item.id);else selected.delete(item.id);syncImport();};
+      const members=el('div',{class:'wb-import-members'},(item.all_categories||[]).map(id=>{
+        const included=item.categories.includes(id);
+        return el('div',{class:'wb-import-member'+(included?'':' is-unavailable'),'data-import-part':id},
+          el('span',{},partNames.get(id)||id),el('span',{},included?'已包含':'未包含'));
+      }));
+      const details=el('details',{class:'wb-import-content-group'},el('summary',{},el('strong',{},item.label),
+        el('span',{class:'wb-import-availability'},item.available?item.file_count+' 个文件 · '+bytes(item.size)+(item.item_count!=null?' · '+item.item_count+' 条记录':''):'压缩包未包含')),
+        item.description?el('p',{class:'wb-note'},item.description):null,members,
+        item.available?el('p',{class:'wb-import-replacement'},'当前 '+(item.current_item_count!=null?item.current_item_count+' 条记录':item.current_file_count+' 个文件')+' / '+bytes(item.current_size)+' → 导入 '+item.file_count+' 个文件 / '+bytes(item.size)):null,
+        item.available?el('p',{class:'wb-file-path'},'覆盖范围：'+(item.replace_paths||item.paths||[]).join(' · ')):null,
+        item.entry_names?.length?el('p',{class:'wb-note'},'条目名称（不显示密钥值）：'+item.entry_names.join('、')):null,
+        item.available?fileDetails(item):el('p',{class:'wb-note'},'此压缩包没有本组内容，无法选择导入。'));
+      groups.append(el('div',{class:'wb-import-select-row'+(item.available?'':' is-unavailable'),'data-import-row':item.id,'aria-disabled':String(!item.available)},input,details));
     }
     const activate=button('确认覆盖并导入',async()=>{
       if(activating||importId!==job.id)return;
       if(!selected.size)return;
       const effective=effectiveSelection();
-      const labels=rows.filter(item=>selected.has(item.id)).map(item=>item.label).join('、');
+      const labels=availableRows.filter(item=>selected.has(item.id)).map(item=>item.label).join('、');
       if(!confirm('将停止服务，并覆盖 '+labels+'。这些类型中的旧内容会删除，不会合并。切换前会自动备份旧数据，随后重启服务。确认导入？'))return;
       activating=true;activate.disabled=true;file.disabled=true;for(const input of choiceInputs.values())input.disabled=true;
       try{await wb('data/activate',{data:{id:job.id,categories:effective,confirm_replace:true}});previewBox.replaceChildren();pollImport(job.id,selectionSerial);}
-      catch(error){activating=false;file.disabled=false;for(const input of choiceInputs.values())input.disabled=false;importProgress.replaceChildren(message(error.message));syncImport();}
+      catch(error){activating=false;file.disabled=false;importProgress.replaceChildren(message(error.message));syncImport();}
     },'danger');
-    function effectiveSelection(){return [...new Set(rows.filter(item=>selected.has(item.id)).flatMap(item=>item.categories))];}
-    function syncImport(){const effective=effectiveSelection(),included=rows.filter(item=>selected.has(item.id));for(const item of rows){const input=choiceInputs.get(item.id),row=groups.querySelector('[data-import-row="'+item.id+'"]');input.checked=selected.has(item.id);input.disabled=activating;row.classList.toggle('is-selected',input.checked);}selectionSummary.textContent='已选导入 '+included.length+' 组 / 共 '+rows.length+' 组 · '+bytes(included.reduce((sum,item)=>sum+(item.size||0),0));warningText.textContent=included.length?'将覆盖：'+included.map(item=>item.label).join('、'):'尚未选择导入部分；当前数据不会修改。';activate.disabled=activating||!effective.length;}
-    const chooseAll=()=>{if(activating)return;selected.clear();rows.forEach(item=>selected.add(item.id));syncImport();};
+    function effectiveSelection(){return [...new Set(availableRows.filter(item=>selected.has(item.id)).flatMap(item=>item.categories))];}
+    function syncImport(){const effective=effectiveSelection(),included=availableRows.filter(item=>selected.has(item.id));for(const item of rows){const input=choiceInputs.get(item.id),row=groups.querySelector('[data-import-row="'+item.id+'"]');input.checked=item.available&&selected.has(item.id);input.disabled=activating||!item.available;row.classList.toggle('is-selected',input.checked);}selectionSummary.textContent='已选导入 '+included.length+' 组 / 可导入 '+availableRows.length+' 组 · '+bytes(included.reduce((sum,item)=>sum+(item.size||0),0));warningText.textContent=included.length?'将覆盖：'+included.map(item=>item.label).join('、'):'尚未选择导入部分；当前数据不会修改。';activate.disabled=activating||!effective.length;}
+    const chooseAll=()=>{if(activating)return;selected.clear();availableRows.forEach(item=>selected.add(item.id));syncImport();};
     const chooseNone=()=>{if(activating)return;selected.clear();for(const input of choiceInputs.values())input.checked=false;syncImport();};
-    previewBox.replaceChildren(el('div',{class:'wb-import-summary'},el('strong',{},'可导入 '+rows.length+' 组 · 压缩包 '+bytes(preview.size)),el('span',{class:'wb-tag'},(preview.archive_format||'ZIP').toUpperCase())),warning,el('div',{class:'wb-backup-section-head'},el('h4',{},'选择需要导入的内容'),el('div',{class:'wb-actions'},button('全选可导入部分',chooseAll),button('全不选导入部分',chooseNone))),groups,selectionSummary,activate);syncImport();
+    previewBox.replaceChildren(el('div',{class:'wb-import-summary'},el('strong',{},'可导入 '+availableRows.length+' / '+rows.length+' 组 · 压缩包 '+bytes(preview.size)),el('span',{class:'wb-tag'},(preview.archive_format||'ZIP').toUpperCase())),warning,
+      el('div',{class:'wb-backup-section-head'},el('h4',{},'选择需要导入的内容'),el('div',{class:'wb-actions'},button('全选可导入部分',chooseAll),button('全不选导入部分',chooseNone))),
+      el('p',{class:'wb-note'},'显示全部内容分组；压缩包未包含的组置灰且不能勾选，展开可逐项核对。'),groups,selectionSummary,activate);syncImport();
   }
   async function pollImport(id,serial){
     clearTimeout(importTimer);if(serial!==selectionSerial)return;

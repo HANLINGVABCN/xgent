@@ -8,8 +8,8 @@ from tests.test_workbench_browser import browser_context, workspace_url, ready  
 from xgent_app.web_branding import DEFAULT_BRANDING
 
 PATHS = ['M7.5 7.5L16 16L7.5 24.5', 'M16 16L24.5 7.5', 'M17.5 24.5H24.5']
-PRESETS = [('4-A', '极客黑客绿'), ('4-B', '电光赛博霓虹'), ('4-C', '终端窗口徽标'),
-           ('4-D', '黑曜石钛金'), ('4-E', '纯白极简反显'), ('4-F', '冷暖双色对撞')]
+PRESETS = [('4-B', '流光蓝紫'), ('4-C', '终端雾蓝'), ('4-D', '黑曜钛金'),
+           ('4-E', '黑白极简'), ('4-F', '冷暖对撞'), ('4-A', '黑客翠绿')]
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def name(page):
 
 
 def code(page):
-    return page.get_by_role('textbox', name='Logo 代码或图片链接', exact=True)
+    return page.get_by_role('textbox', name='Logo 代码或图片链接', exact=True, include_hidden=True)
 
 
 def preset(page, identifier):
@@ -87,9 +87,10 @@ def test_six_presets_exact_geometry_and_default_github_logo(branding_page, brows
     assert preset(page, '4-B').get_attribute('aria-checked') == 'true'
     assert page.locator('#bot-avatar').is_hidden()
     assert code(page).input_value().strip() == browser_context.request.get(workspace_url['url'] + '/assets/logo.svg').text().strip()
-    for identifier, title in PRESETS:
+    assert page.locator('.brand-avatar-strip .brand-avatar-label').all_text_contents()[:6]==list('abcdef')
+    for index,(identifier, title) in enumerate(PRESETS):
         preset(page, identifier).click()
-        assert preset(page, identifier).inner_text() == identifier[-1].lower()
+        assert preset(page, identifier).inner_text() == 'abcdef'[index]
         svg = logo(page).locator('svg')
         assert svg.get_attribute('viewBox') == '0 0 32 32'
         assert svg.locator('path').evaluate_all('(nodes)=>nodes.map(n=>n.getAttribute("d"))') == PATHS

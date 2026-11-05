@@ -78,6 +78,7 @@ async def serve(root, port, forever):
                 disabled(outbox)
 
         password = 'local-menu-fixture'
+        from xgent_app.workbench import Workbench
         server = WebChatServer(WebChatConfig(
             host='127.0.0.1', port=port, password_hash=hash_password(password),
             bot_token='', authorized_user_id=1, loop=loop,
@@ -88,6 +89,8 @@ async def serve(root, port, forever):
                 bot._web_handle_ui_callback(uid, revision, bid, outbox)),
             read_history=bot._web_read_history, read_history_message=bot._web_read_history_message,
             read_settings=bot._web_read_settings, write_setting=setting,
+            read_settings_revision=getattr(bot, '_web_read_settings_revision', None),
+            workbench=Workbench(bot.__dict__).handle,
             request_stop=bot._web_request_stop, is_busy=bot._web_is_busy,
         ))
         server.outbox = h.outbox

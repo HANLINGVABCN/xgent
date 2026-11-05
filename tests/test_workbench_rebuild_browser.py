@@ -34,9 +34,10 @@ def workspace_url():
 
 
 def open_launcher(page):
-    if page.locator('#workspace-settings').is_hidden():page.locator('#conversation-drawer-toggle').click()
+    # 启动器弹出菜单已取消：点「设置」直达设置页，工作台/账户入口在设置左导航。
+    if page.locator('#workspace-settings').is_hidden():page.locator('#conversation-mobile-toggle').click()
     page.locator('#workspace-settings').click()
-    page.locator('#workspace-menu').wait_for()
+    page.locator('.wb-settings-nav').wait_for()
 
 
 @pytest.mark.parametrize('width',[360,390,768,1440])
@@ -51,13 +52,9 @@ def test_requested_layout_and_launcher(browser_context,workspace_url,width):
     assert controls['y']>=text['y']+text['height']
     assert page.locator('#workspace-menu').is_hidden()
     open_launcher(page)
-    menu=page.locator('#workspace-menu').bounding_box();trigger=page.locator('#workspace-settings').bounding_box()
-    assert menu['width']<=260 and menu['y']+menu['height']<=trigger['y']+1
-    page.keyboard.press('Escape');assert page.locator('#workspace-menu').is_hidden()
-    page.locator('#workspace-settings').click()
-    page.locator('#wb-nav-links [data-route=tasks]').click();page.get_by_role('heading',name='任务中心',exact=True).wait_for()
-    assert page.locator('#workspace-menu').is_hidden()
-    assert page.locator('#wb-page-title').inner_text()=='任务'
+    assert page.locator('#wb-page-title').inner_text()=='设置'
+    page.locator('.wb-settings-nav [data-panel=tasks]').click();page.get_by_role('heading',name='任务中心',exact=True).wait_for()
+    assert page.locator('#wb-page-title').inner_text()=='设置'
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     if width<768:assert page.get_by_label('任务来源对话',exact=True).bounding_box()['width']>220
     page.close()
@@ -68,15 +65,15 @@ def test_file_filters_precise_source_location_and_return(browser_context,workspa
     source=workspace_url['demo']['source_conversation'];anchor=workspace_url['demo']['file_message']
     page.get_by_label('文件来源对话',exact=True).select_option(source)
     page.get_by_role('searchbox',name='按文件名搜索',exact=True).fill('来源验证')
-    page.locator('.wb-file-table .wb-source-link').first.wait_for()
-    page.wait_for_function('document.querySelectorAll(".wb-file-table tbody tr").length===1')
-    link=page.locator('.wb-file-table .wb-source-link').first
+    page.locator('.wb-file-grid .wb-source-link').first.wait_for()
+    page.wait_for_function('document.querySelectorAll(".wb-file-grid .wb-file-card").length===1')
+    link=page.locator('.wb-file-grid .wb-source-link').first
     assert 'message=history%3A'+str(anchor) in link.get_attribute('href')
     page.get_by_role('button',name='预览',exact=True).click()
     page.locator('.wb-document-preview').wait_for()
     assert '来自来源验证对话' in page.locator('.wb-document-preview').inner_text()
     page.locator('#wb-detail-close').click()
-    page.evaluate('window.savedFilePage=document.querySelector("#wb-page").firstElementChild')
+    page.evaluate('window.savedFilePage=document.querySelector("#settings-content").firstElementChild')
     link.click()
     page.locator('.msg-row[data-record-id="'+str(anchor)+'"]').wait_for()
     assert page.evaluate('window.XGentConversations.current')==source
@@ -107,24 +104,28 @@ def test_task_source_tokens_rounds_and_dark_code_unchanged(browser_context,works
     for dark in [False,True]:
         page.evaluate('(dark)=>document.body.classList.toggle("dark",dark)',dark)
         color=page.locator('.execution-code').first.evaluate('(e)=>getComputedStyle(e).backgroundColor')
-        assert color in ('rgb(24, 35, 52)','rgb(30, 41, 59)')
+        channels=[int(value.strip()) for value in color.removeprefix('rgb(').removesuffix(')').split(',')]
+        assert max(channels)<70  # Code keeps a dark surface in both themes.
     page.reload();ready(page,workspace_url['url']);token.first.wait_for()
     assert token.first.inner_text()==before
     page.close()
 
 
-def test_archived_source_is_read_only_without_restore(browser_context,workspace_url):
+def test_archived_chat_can_be_entered_from_settings_without_restore(browser_context,workspace_url):
     source=workspace_url['demo']['source_conversation'];anchor=workspace_url['demo']['file_message']
     assert browser_context.request.post(workspace_url['url']+'/api/workbench/conversations/archive',data={'id':source}).ok
     current=browser_context.request.get(workspace_url['url']+'/api/workbench/conversations').json()['current_chat_id']
-    page=browser_context.new_page();page.goto(workspace_url['url']+'/#/chat?conversation='+source+'&message=history:'+str(anchor)+'&archived=1')
-    page.locator('#source-reader .source-target').wait_for()
-    assert page.locator('#wb-shell > footer').is_hidden()
+    page=browser_context.new_page();ready(page,workspace_url['url'],'archive')
+    page.locator('.archive-row[data-conversation-id="'+source+'"]').get_by_role('button',name='进入对话',exact=True).click()
+    page.wait_for_function('(id)=>window.XGentConversations.current===id&&document.body.dataset.page==="chat"',arg=source)
+    page.wait_for_function('document.querySelector("#btn-send").disabled===false')
+    assert page.locator('#wb-shell > footer').is_visible()
+    assert page.locator('#btn-send').is_enabled()
     state=browser_context.request.get(workspace_url['url']+'/api/workbench/conversations').json()
     assert state['current_chat_id']==current
     assert next(item for item in state['items'] if item['id']==source)['archived']
     page.locator('#conversation-new').click()
-    page.wait_for_function('!document.body.classList.contains("source-readonly")')
+    page.wait_for_function('(id)=>window.XGentConversations.current!==id',arg=source)
     assert page.locator('#wb-shell > footer').is_visible()
     assert page.locator('#source-reader').count()==0
     page.close()
@@ -153,7 +154,7 @@ def test_complete_output_can_close_during_loading(full_output_server):
 
 def test_settings_blacklist_and_price_forms(browser_context,workspace_url):
     page=browser_context.new_page();ready(page,workspace_url['url'],'settings')
-    page.get_by_role('tab',name='Agent',exact=True).click()
+    page.get_by_role('button',name='Agent',exact=True).click()
     page.get_by_role('button',name='管理命令黑名单',exact=True).click()
     field=page.get_by_role('textbox',name='禁止片段（每行一条）',exact=True);field.wait_for();field.fill('fixture-only-blocked-command')
     page.get_by_role('button',name='保存黑名单',exact=True).click();page.get_by_text('黑名单已保存',exact=True).wait_for()

@@ -114,7 +114,7 @@ export function syncAskForm(entry,snapshot,options={}){
       if(q.type!=='secret'){
         const save=document.createElement('button');save.type='button';save.className='web-ask-save';save.textContent='保存';
         save.title='保存答案';save.setAttribute('aria-label','保存 '+q.prompt);field.save=save;
-        save.onclick=()=>request('save',{id:q.id,draft:structuredClone(state.draft[q.id]||{})});
+        save.onclick=()=>{notice.textContent='正在保存…';return request('save',{id:q.id,draft:structuredClone(state.draft[q.id]||{})});};
         const saved=document.createElement('span');saved.className='web-ask-saved';saved.textContent='✓';saved.title='已保存';saved.setAttribute('aria-hidden','true');field.saved=saved;
         controls.append(save,saved);
       }

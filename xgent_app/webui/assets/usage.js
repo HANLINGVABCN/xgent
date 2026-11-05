@@ -45,7 +45,8 @@ export async function usageView(read,{filter,render,heading,card,actions,priceSe
   if(range==='all')controls.append(el('p',{class:'wb-note'},a.count?'全部已存盘用量，从最早一条记录至当前时间。':'暂无用量记录，日期暂显示当前时间。'));
   page.append(controls);
   const stats=[['调用次数',fmt(a.count),'当前筛选内全部调用'],['总 Token',fmt(a.total),'沿用模型返回的总计'],['输入 Token',fmt(a.input),'按原报表计费口径'],['输出 Token',fmt(a.output),'包含上游报告的思考用量'],['缓存 Token',fmt(a.cached),'上游报告的缓存命中'],['其中思考',fmt(a.reasoning),'输出的子项，不重复相加'],['预估总费用',money(a.cost),'USD · 配置价格估算'],['单次均费',money(a.average_cost),'费用 ÷ 调用次数'],['缓存省下',money(a.cache_saved),'缓存量 × 输入与缓存价差']];
-  page.append(el('div',{class:'wb-usage-stats'},stats.map(([label,value,note])=>el('div',{class:'wb-stat'},el('label',{},label),el('strong',{},value),el('small',{},note)))));
+  const metricOrder=[6,1,0,4,2,3,5,7,8];
+  page.append(el('div',{class:'wb-usage-stats'},metricOrder.map(index=>{const [label,value,note]=stats[index];return el('div',{class:'wb-stat'+(index===6?' wb-stat-cost':'')},el('label',{},label),el('strong',{},value),el('small',{},note));})));
   if(data.missing_prices.length)page.append(message('以下模型价格未配置：'+data.missing_prices.join('、')+'。总费用、均费和缓存节省不冒充零值；已配置部分费用为 '+money(a.known_cost)+'。','error'));
   const charts=el('div',{class:'wb-usage-charts'});
   const trend=card('用量趋势'),distribution=card('模型分布');charts.append(trend,distribution);page.append(charts);

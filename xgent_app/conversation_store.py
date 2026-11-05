@@ -195,6 +195,8 @@ class ConversationStore(ChildConversationStore, QueueStore):
             version = int(await _config(conn, 'conversation_schema_version', 0))
             if version > SCHEMA_VERSION:
                 raise ConversationError('数据库版本较新，请升级程序。')
+            if version >= 4:
+                await migrate_queue(conn)
             if version >= 5:
                 await conn.execute("UPDATE conversation_groups SET name='默认分组' WHERE id='ungrouped' AND name='未分组'")
             if version == SCHEMA_VERSION:
@@ -369,17 +371,33 @@ class ConversationStore(ChildConversationStore, QueueStore):
             if version < 10:
                 await migrate_children(conn)
                 await _set_config(conn, 'conversation_schema_version', 10)
+            if version < 11:
+                from .archive_conversations import migrate_archives
+                await migrate_archives(conn)
+                for selected_key in ('current_chat_id', 'telegram_conversation_id'):
+                    selected = await _config(conn, selected_key)
+                    cursor = await conn.execute('SELECT archived FROM chat_sessions WHERE id=?', (selected,))
+                    session = await cursor.fetchone()
+                    await cursor.close()
+                    if session is not None and session['archived']:
+                        if selected_key == 'current_chat_id':
+                            await self._select_fallback(conn)
+                        else:
+                            await _set_config(conn, selected_key, None)
+                await _set_config(conn, 'conversation_schema_version', 11)
         self._config_cache.clear()
 
     async def get_conversation_groups(self):
+        from .archive_conversations import ARCHIVE_GROUP_ID
         conn = await self._get_conn()
-        cursor = await conn.execute('SELECT * FROM conversation_groups ORDER BY sort_order,created_at,id')
+        cursor = await conn.execute('SELECT * FROM conversation_groups WHERE id<>? ORDER BY sort_order,created_at,id', (ARCHIVE_GROUP_ID,))
         rows = [dict(row) for row in await cursor.fetchall()]
         await cursor.close()
         return rows
 
     async def organize_conversations(self, action, data):
         """Group and pin changes are metadata only; never rebind a live run."""
+        from .archive_conversations import ARCHIVE_GROUP_ID, ARCHIVE_GROUP_NAME
         name = str(data.get('name') or '').strip()
         if action in {'create_group', 'rename_group'} and (not name or len(name) > 80):
             raise ConversationError('分组名称需要 1–80 个字符。')
@@ -388,6 +406,8 @@ class ConversationStore(ChildConversationStore, QueueStore):
             if type(data.get('revision')) is not int or data['revision'] != revision:
                 raise ConversationError('对话列表已变化，请刷新后重试。')
             gid = str(data.get('group_id') or 'ungrouped')
+            if gid == ARCHIVE_GROUP_ID or action in {'create_group','rename_group'} and name == ARCHIVE_GROUP_NAME:
+                raise ConversationError('归档是隐藏的系统分组，请使用归档或恢复操作。')
             cursor = await conn.execute('SELECT id FROM conversation_groups WHERE id=?', (gid,))
             if not await cursor.fetchone():
                 raise ConversationError('分组不存在，请刷新列表。')
@@ -410,12 +430,14 @@ class ConversationStore(ChildConversationStore, QueueStore):
                 item = await cursor.fetchone()
                 if item is None:
                     raise ConversationError('对话不存在。')
+                if item['archived']:
+                    raise ConversationError('归档对话保留原分组和置顶信息，请恢复后再调整。')
                 if action == 'move':
                     if item['owner_conversation_id']:
                         raise ConversationError('子对话跟随父对话分组，请移动父对话。')
                     if item['group_id'] != gid:
                         targets = [cid, *await descendant_ids(conn, cid)]
-                        await conn.executemany('UPDATE chat_sessions SET group_id=?,pinned=0 WHERE id=?', [(gid, target) for target in targets])
+                        await conn.executemany('UPDATE chat_sessions SET group_id=?,pinned=0 WHERE id=? AND archived=0', [(gid, target) for target in targets])
                 elif action in {'pin', 'unpin'}:
                     # A stale UI cannot pin a conversation after it moved groups.
                     if item['group_id'] != gid:
@@ -602,6 +624,7 @@ class ConversationStore(ChildConversationStore, QueueStore):
                 'running': config.get('conversation_runs', {}).get(config.get('current_chat_id', DEFAULT_CONVERSATION_ID))}
 
     async def manage_conversation(self, action, conversation_id=None, name=None, *, selector='shared', select=True):
+        from .archive_conversations import archive_tree, restore_tree
         from xgent_app.interaction import selection_key
         selected_key = selection_key(selector)
         if action not in {'create', 'switch', 'rename', 'archive', 'restore'}:
@@ -610,6 +633,7 @@ class ConversationStore(ChildConversationStore, QueueStore):
             name = str(name or '').strip()
             if not name or len(name) > 80:
                 raise ConversationError('会话名称需要 1–80 个字符。')
+        changed_ids=[]
         async with self._transaction() as conn:
             active = await _config(conn, selected_key)
             cid = str(conversation_id or active or '')
@@ -622,18 +646,18 @@ class ConversationStore(ChildConversationStore, QueueStore):
                 if session is None or session['deleting']:
                     raise ConversationError('会话不存在，请刷新列表。')
                 if action == 'switch':
-                    if session['archived']:
-                        raise ConversationError('请先恢复已归档会话。')
                     active = cid
                 elif action == 'rename':
+                    if session['archived']:
+                        raise ConversationError('归档对话名称固定，恢复后可以重命名。')
                     await conn.execute('UPDATE chat_sessions SET name=?,title_auto_pending=0 WHERE id=?', (name, cid))
                 elif action == 'restore':
-                    await conn.execute('UPDATE chat_sessions SET archived=0 WHERE id=?', (cid,))
+                    changed_ids=await restore_tree(conn,cid)
                 elif action == 'archive':
-                    await conn.execute('UPDATE chat_sessions SET archived=1 WHERE id=?', (cid,))
-                    if await _config(conn, 'telegram_conversation_id') == cid:
+                    changed_ids=await archive_tree(conn,cid)
+                    if await _config(conn, 'telegram_conversation_id') in changed_ids:
                         await _set_config(conn, 'telegram_conversation_id', None)
-                    if await _config(conn, 'current_chat_id') == cid:
+                    if await _config(conn, 'current_chat_id') in changed_ids:
                         await self._select_fallback(conn)
                     active = await _config(conn, selected_key)
             if action in {'create', 'switch'}:
@@ -643,7 +667,8 @@ class ConversationStore(ChildConversationStore, QueueStore):
             await _set_config(conn, 'conversation_revision', int(await _config(conn, 'conversation_revision', 0)) + 1)
         self._config_cache.pop('current_chat_id', None)
         self._config_cache.pop('telegram_conversation_id', None)
-        return {'ok': True, 'conversation_id': cid, **await self.get_conversation_state()}
+        tree={'archived_conversation_ids':changed_ids} if action=='archive' else {'restored_conversation_ids':changed_ids} if action=='restore' else {}
+        return {'ok': True, 'conversation_id': cid, **tree, **await self.get_conversation_state()}
 
     async def set_bot_conversation(self, cid, generation, expected_bot):
         """Explicit Web action: CAS only the Bot selector, never the Web/CLI view.

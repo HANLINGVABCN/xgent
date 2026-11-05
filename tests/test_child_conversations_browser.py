@@ -29,7 +29,7 @@ def test_child_arrow_position_expansion_refresh_and_current_child(browser_contex
     ready(page, base)
     page.wait_for_function('(cid)=>window.XGentConversations.current===cid', arg=parent)
     if width == 390:
-        page.locator('#conversation-drawer-toggle').click()
+        page.locator('#conversation-mobile-toggle').click()
     arrow = row(page, parent).locator('.conv-children-toggle')
     arrow.wait_for(state='visible')
     assert arrow.get_attribute('aria-expanded') == 'false'
@@ -48,7 +48,7 @@ def test_child_arrow_position_expansion_refresh_and_current_child(browser_contex
     page.reload()
     ready(page, base)
     if width == 390:
-        page.locator('#conversation-drawer-toggle').click()
+        page.locator('#conversation-mobile-toggle').click()
     row(page, nested).wait_for(state='visible')
     page.screenshot(path=str(tmp_path / f'children-expanded-{width}.png'))
     row(page, parent).locator('.conv-children-toggle').click()
@@ -59,7 +59,7 @@ def test_child_arrow_position_expansion_refresh_and_current_child(browser_contex
     assert page.evaluate('window.XGentConversations.current') == parent
     page.evaluate('(id)=>window.XGentConversations.select(id)', nested)
     if width == 390:
-        page.locator('#conversation-drawer-toggle').click()
+        page.locator('#conversation-mobile-toggle').click()
     row(page, nested).wait_for(state='visible')
     assert row(page, nested).locator('.conv-open').get_attribute('aria-current') == 'true'
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')

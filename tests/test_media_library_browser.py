@@ -100,17 +100,18 @@ def test_library_uses_lightweight_covers_filename_first_and_full_media_only_afte
     ready(page, base, 'files')
     try:
         for name, _, _ in entries:
-            row = page.locator('.wb-file-table tbody tr').filter(has_text=name)
+            row = page.locator('.wb-file-grid .wb-file-card').filter(has_text=name)
+            row.scroll_into_view_if_needed()
             row.locator('.wb-file-cover.is-ready').wait_for()
-            assert row.locator('td').nth(0).locator('h3').inner_text() == name
-            assert row.locator('td').nth(1).locator('.wb-source-link').inner_text() == '媒体来源 · 较小链接'
+            assert row.locator('h3').inner_text() == name
+            assert row.locator('.wb-source-link').inner_text() == '媒体来源 · 较小链接'
             assert row.locator('h3').evaluate('(n)=>parseFloat(getComputedStyle(n).fontSize)') > row.locator('.wb-source-link').evaluate('(n)=>parseFloat(getComputedStyle(n).fontSize)')
         assert len(original_requests) == 0, 'Only bounded covers should be requested before opening a preview'
         assert page.locator('.wb-file-cover pre').filter(has_text='VISIBLE TEXT COVER').count() == 1
         assert page.evaluate('window.previewXss') is None
         assert page.locator('.wb-file-cover img').count() == 2
         page.screenshot(path=str(tmp_path / 'file-library.png'))
-        photo_row = page.locator('.wb-file-table tbody tr').filter(has_text=photo.name)
+        photo_row = page.locator('.wb-file-grid .wb-file-card').filter(has_text=photo.name)
         photo_row.get_by_role('button', name='预览', exact=True).click()
         page.wait_for_function('document.querySelector("#wb-detail img")?.naturalWidth===1200')
         assert '文件可能已移动' not in page.locator('#wb-detail').inner_text()
@@ -132,7 +133,8 @@ def test_library_uses_lightweight_covers_filename_first_and_full_media_only_afte
         page.get_by_role('button', name='关闭来源定位提示').click()
         assert browser_context.request.post(base + '/api/workbench/conversations/archive', data={'id': cid}).ok
         page.goto(base + '/#/files')
-        archived_row = page.locator('.wb-file-table tbody tr').filter(has_text=photo.name)
+        archived_row = page.locator('.wb-file-grid .wb-file-card').filter(has_text=photo.name)
+        archived_row.scroll_into_view_if_needed()
         archived_row.locator('.wb-file-cover.is-ready').wait_for()
         archived_row.get_by_role('button', name='预览', exact=True).click()
         page.wait_for_function('document.querySelector("#wb-detail img")?.naturalWidth===1200')
@@ -141,8 +143,12 @@ def test_library_uses_lightweight_covers_filename_first_and_full_media_only_afte
         page.wait_for_function('document.querySelector("#media-preview-dialog img").naturalWidth===1200')
         page.get_by_role('button', name='关闭媒体预览', exact=True).click()
         archived_row.locator('.wb-source-link').click()
-        page.locator('#source-reader .media-ingress-badge[data-mode=server_upload]').wait_for()
-        assert page.locator('#source-reader').get_by_role('button', name='加载更早消息').count() == 0
+        archive=page.locator('.archive-row[data-conversation-id="'+cid+'"]')
+        archive.wait_for()
+        archive.get_by_role('button',name='进入对话',exact=True).click()
+        page.locator('#log .media-ingress-badge[data-mode=server_upload]').wait_for()
+        assert page.locator('#input').is_visible()
+        assert page.locator('#source-reader').count() == 0
         assert all('conversation_id=' + cid in url for url in original_requests)
     finally:
         page.close()

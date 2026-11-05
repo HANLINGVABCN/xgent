@@ -42,6 +42,17 @@ async def bump(conn):
                        "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1")
 
 
+def item_metadata(item):
+    value=item.get('metadata') or '{}'
+    try:
+        result=json.loads(value) if isinstance(value,str) else value
+    except (TypeError,ValueError):
+        raise ConversationError('待发附件信息无法读取，消息仍保留在队列中。') from None
+    if not isinstance(result,dict):
+        raise ConversationError('待发附件信息格式无效，消息仍保留在队列中。')
+    return result
+
+
 async def migrate_queue(conn):
     await conn.execute('''CREATE TABLE IF NOT EXISTS message_queue (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
@@ -52,6 +63,9 @@ async def migrate_queue(conn):
         created_at REAL NOT NULL, updated_at REAL NOT NULL, run_id TEXT, record_id INTEGER,
         edit_request_id TEXT, receipt_id INTEGER, receipt_revision INTEGER NOT NULL DEFAULT 0,
         receipt_requested INTEGER NOT NULL DEFAULT 0)''')
+    columns=await rows(conn,'PRAGMA table_info(message_queue)')
+    if 'metadata' not in {column['name'] for column in columns}:
+        await conn.execute("ALTER TABLE message_queue ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
     await conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_pending ON message_queue(status,seq)')
     await conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_conversation ON message_queue(conversation_id,seq)')
     await conn.execute('''CREATE TABLE IF NOT EXISTS message_queue_controls (
@@ -93,34 +107,35 @@ class QueueStore:
         return await rows(await self._get_conn(), 'SELECT id FROM message_queue_instances')
 
     async def _queue_sync(self, conn):
-        """Never revive old generations, or auto-resume an unarchived conversation."""
+        """Never revive old generations or admit inputs for a deleting conversation."""
         changed = await conn.execute("UPDATE message_queue SET status='invalid',reason='generation',"
             "revision=revision+1,updated_at=? WHERE status IN ('pending','paused') AND EXISTS "
             '(SELECT 1 FROM chat_sessions s WHERE s.id=conversation_id AND s.generation<>message_queue.generation)',
             (time.time(),))
         archived = await conn.execute("UPDATE message_queue SET status='paused',reason='archived',"
             "revision=revision+1,updated_at=? WHERE status='pending' AND conversation_id IN "
-            '(SELECT id FROM chat_sessions WHERE archived=1 OR deleting=1)', (time.time(),))
+            '(SELECT id FROM chat_sessions WHERE deleting=1)', (time.time(),))
         await conn.execute("INSERT INTO message_queue_controls(conversation_id,generation,state,reason) "
             "SELECT DISTINCT q.conversation_id,q.generation,'paused','archived' FROM message_queue q JOIN chat_sessions s ON s.id=q.conversation_id "
-            "WHERE q.status='paused' AND q.reason='archived' AND s.archived=1 "
+            "WHERE q.status='paused' AND q.reason='archived' AND s.deleting=1 "
             "ON CONFLICT(conversation_id) DO UPDATE SET generation=excluded.generation,state='paused',reason='archived',owner=NULL")
         controlled = await conn.execute("UPDATE message_queue SET status='paused',revision=revision+1,reason="
             '(SELECT c.reason FROM message_queue_controls c WHERE c.conversation_id=message_queue.conversation_id),updated_at=? '
             "WHERE status='pending' AND EXISTS (SELECT 1 FROM message_queue_controls c WHERE c.conversation_id=message_queue.conversation_id "
             "AND c.generation=message_queue.generation AND c.state<>'ready')", (time.time(),))
         await conn.execute("UPDATE message_queue_controls SET state='paused',reason='archived' WHERE "
-            "state<>'paused' AND conversation_id IN (SELECT id FROM chat_sessions WHERE archived=1 OR deleting=1)")
+            "state<>'paused' AND conversation_id IN (SELECT id FROM chat_sessions WHERE deleting=1)")
         if changed.rowcount or archived.rowcount or controlled.rowcount:
             await bump(conn)
 
-    async def queue_enqueue(self, *, scope, instance, request_key, text, chat_id):
+    async def queue_enqueue(self, *, scope, instance, request_key, text, chat_id, metadata=None, draft_revision=None):
         if not isinstance(text, str) or not text.strip():
             raise ConversationError('消息不能为空。')
         async with self._transaction() as conn:
+            encoded=json.dumps(metadata or {},ensure_ascii=False,sort_keys=True)
             previous = await one(conn, 'SELECT * FROM message_queue WHERE request_key=?', (request_key,))
             if previous:
-                if previous['text'] != text or previous['conversation_id'] != scope.conversation_id or previous['generation'] != scope.generation:
+                if previous['text'] != text or previous['conversation_id'] != scope.conversation_id or previous['generation'] != scope.generation or (metadata is not None and item_metadata(previous)!=metadata):
                     raise ConversationChanged('请求标识已用于另一条消息，请重新提交。')
                 return previous
             if await one(conn, 'SELECT id FROM message_queue_requests WHERE id=?', (request_key,)):
@@ -133,8 +148,13 @@ class QueueStore:
                         or not parent or parent['deleting']):
                     raise ConversationChanged('后台任务的所属对话已改变，任务未入队。')
             session = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (scope.conversation_id,))
-            if not session or session['deleting'] or session['archived'] or session['generation'] != scope.generation:
+            if not session or session['deleting'] or session['generation'] != scope.generation:
                 raise ConversationChanged('会话已变化，消息尚未入队。')
+            if draft_revision is not None:
+                draft=await one(conn,'SELECT created_at FROM conversation_branch_drafts WHERE conversation_id=?',(scope.conversation_id,))
+                if not draft or draft['created_at']!=draft_revision:
+                    raise ConversationChanged('附件草稿已变化，本批文件尚未入队，请重新确认。')
+                await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=?',(scope.conversation_id,))
             await self._queue_sync(conn)
             control = await one(conn, 'SELECT * FROM message_queue_controls WHERE conversation_id=? AND generation=?',
                                 (scope.conversation_id, scope.generation))
@@ -145,9 +165,9 @@ class QueueStore:
             receipt = bool(scope.origin == 'telegram' and (paused or earlier or running))
             now, identifier = time.time(), uuid.uuid4().hex
             await conn.execute('INSERT INTO message_queue(id,request_key,conversation_id,generation,text,origin,'
-                'source_instance,dispatch_instance,chat_id,status,reason,created_at,updated_at,receipt_requested) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'source_instance,dispatch_instance,chat_id,status,reason,created_at,updated_at,receipt_requested,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (identifier, request_key, scope.conversation_id, scope.generation, text, scope.origin, instance, instance,
-                 chat_id, 'paused' if paused else 'pending', control['reason'] if paused else 'waiting', now, now, bool(receipt)))
+                 chat_id, 'paused' if paused else 'pending', control['reason'] if paused else 'waiting', now, now, bool(receipt),encoded))
             await bump(conn)
             return await one(conn, 'SELECT * FROM message_queue WHERE id=?', (identifier,))
 
@@ -173,7 +193,7 @@ class QueueStore:
         async with self._transaction() as conn:
             await self._queue_sync(conn)
             return await rows(conn, "SELECT q.* FROM message_queue q JOIN chat_sessions s ON s.id=q.conversation_id "
-                "WHERE q.status='pending' AND q.generation=s.generation AND s.archived=0 AND s.deleting=0 "
+                "WHERE q.status='pending' AND q.generation=s.generation AND s.deleting=0 "
                 "AND q.seq=(SELECT MIN(h.seq) FROM message_queue h WHERE h.conversation_id=q.conversation_id "
                 "AND h.generation=q.generation AND h.status='pending') ORDER BY q.seq")
 
@@ -193,6 +213,23 @@ class QueueStore:
                 raise QueueConflict('消息已接入当前回合，无法取消排队。', 'already_started')
             if item['revision'] != revision:
                 raise QueueConflict('队列已更新，请在当前消息上重试。', 'stale_revision')
+            metadata=item_metadata(item)
+            if metadata.get('attachments') or metadata.get('server_uploads'):
+                draft=await one(conn,'SELECT * FROM conversation_branch_drafts WHERE conversation_id=?',(cid,))
+                existing=item_metadata(draft) if draft else {}
+                restored={key:metadata[key] for key in ('attachments','server_uploads','file_ingress_mode','web_file_message') if key in metadata}
+                combined=[]
+                for source in (restored,existing):
+                    refs=[(key,ref) for key in ('attachments','server_uploads') for ref in source.get(key,[])]
+                    refs.sort(key=lambda pair:pair[1].get('order',0))
+                    combined.extend(refs)
+                for key in ('attachments','server_uploads'):
+                    restored[key]=[{**ref,'order':index} for index,(kind,ref) in enumerate(combined) if kind==key]
+                caption=metadata.get('web_file_message',{}).get('text',item['text'])
+                text=caption+('\n\n'+draft['text'] if draft and draft['text'] else '')
+                await conn.execute('INSERT INTO conversation_branch_drafts VALUES(?,?,?,?,?) ON CONFLICT(conversation_id) '
+                    'DO UPDATE SET text=excluded.text,metadata=excluded.metadata,created_at=excluded.created_at',
+                    (cid,item.get('record_id') or 0,text,json.dumps(restored,ensure_ascii=False),time.time()))
             await conn.execute('UPDATE message_queue SET status=?,reason=?,revision=revision+1,updated_at=?,edit_request_id=? WHERE id=?',
                                ('edited' if action == 'edit' else 'cancelled', '', time.time(), request_id, identifier))
             await bump(conn)
@@ -246,8 +283,6 @@ class QueueStore:
             if revision is not None and revision != (int(current_revision['value']) if current_revision else 0):
                 raise ConversationChanged('队列已更新，请查看当前状态后再继续。')
             session = await one(conn, 'SELECT archived FROM chat_sessions WHERE id=?', (cid,))
-            if session['archived']:
-                raise ConversationChanged('请先恢复已归档会话。')
             control = await one(conn, 'SELECT * FROM message_queue_controls WHERE conversation_id=? AND generation=?', (cid, scope.generation))
             if control and control['state'] == 'ask' and not ask:
                 raise ConversationChanged('请先提交或取消当前表单。')
@@ -282,7 +317,7 @@ class QueueStore:
             now = time.time()
             draft = await one(conn, 'SELECT * FROM conversation_branch_drafts WHERE conversation_id=?', (cid,)) if batch else None
             for index, item in enumerate(batch):
-                metadata = {'queue_id': item['id'], 'queue_origin': item['origin'], 'queue_created_at': item['created_at'],
+                metadata = {**item_metadata(item), 'queue_id': item['id'], 'queue_origin': item['origin'], 'queue_created_at': item['created_at'],
                             'queue_run_id': scope.run_id, 'src': 'message-queue'}
                 if item['origin'] == 'telegram':
                     from .telegram_records import source_bot_id
@@ -293,8 +328,8 @@ class QueueStore:
                         if all(mid.isascii() and mid.isdigit() and int(mid) > 0 for mid in source_ids):
                             metadata['source_message_ids'] = list(dict.fromkeys(int(mid) for mid in source_ids))
                             metadata['source_message_id'] = metadata['source_message_ids'][0]
-                msg_type = 'user_text'
-                if index == 0 and draft is not None:
+                msg_type = 'user_file' if metadata.get('attachments') else 'user_text'
+                if index == 0 and draft is not None and not metadata.get('queue_file_message'):
                     try:
                         branch_metadata = json.loads(draft['metadata'] or '{}')
                     except (TypeError, ValueError):
@@ -316,7 +351,7 @@ class QueueStore:
             if batch:
                 title = ' '.join(batch[0]['text'].split())
                 title = title[:32] + ('…' if len(title) > 32 else '')
-                await conn.execute('UPDATE chat_sessions SET name=CASE WHEN title_auto_pending=1 THEN ? ELSE name END,title_auto_pending=0,last_active=? WHERE id=?', (title, now, cid))
+                await conn.execute('UPDATE chat_sessions SET name=CASE WHEN title_auto_pending=1 AND archived=0 THEN ? ELSE name END,title_auto_pending=0,last_active=? WHERE id=?', (title, now, cid))
                 await self._bump_conversation_revision(conn)
                 await bump(conn)
             return batch

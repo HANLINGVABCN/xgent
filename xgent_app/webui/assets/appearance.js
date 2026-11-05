@@ -17,11 +17,20 @@ function accept(data) {
   }
   state={revision:data.revision,values}; if(!preview)apply(values);
 }
-async function refresh(){const response=await fetch('/api/config',{credentials:'same-origin',cache:'no-store'});if(response.ok)accept(await response.json());}
+async function refresh(){
+  // 未变化短路：revision 没变时服务端只回几十字节，不再重算完整 settings。
+  const suffix=state.revision>=0?'?since='+state.revision:'';
+  const response=await fetch('/api/config'+suffix,{credentials:'same-origin',cache:'no-store'});if(response.ok)accept(await response.json());
+}
 async function save(values){
+  const payload={};
   for(const key of Object.keys(defaults)) {
-    if(values[key]===undefined||values[key]===state.values[key])continue;
-    const response=await fetch('/api/config',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,value:Number(values[key])})});
+    if(values[key]===undefined||Number(values[key])===state.values[key])continue;
+    payload[key]=Number(values[key]);
+  }
+  if(Object.keys(payload).length) {
+    // 一次批量往返；响应已平铺（values 在顶层），保存即时生效。
+    const response=await fetch('/api/config',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({values:payload})});
     const data=await response.json();if(!response.ok)throw new Error(data.error||'字号保存失败');accept(data);
   }
   preview=null;apply(state.values);return state;
@@ -31,6 +40,7 @@ window.addEventListener('xgent-authenticated',()=>refresh().catch(()=>{}));
 window.addEventListener('xgent-auth-expired',()=>{preview=null;state={revision:-1,values:{...defaults}};apply(defaults);});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh().catch(()=>{});});
 apply(defaults);
-fetch('/api/session',{credentials:'same-origin'}).then(r=>r.json()).then(s=>{if(s.authenticated)return refresh();}).catch(()=>{});
+// 未登录时这里是 401，refresh 内部直接忽略；登录后会再由事件触发。
+refresh().catch(()=>{});
 
-setInterval(()=>{if(!document.hidden&&state.revision>=0)refresh().catch(()=>{});},15000);
+setInterval(()=>{if(!document.hidden&&state.revision>=0)refresh().catch(()=>{});},60000);

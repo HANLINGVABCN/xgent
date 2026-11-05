@@ -64,16 +64,23 @@ async def descendant_ids(conn, cid):
 class ChildConversationStore:
     async def _child_parent(self, conn, parent_id, generation=None):
         parent = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (parent_id,))
-        if not parent or parent['deleting'] or parent['archived']:
-            raise ConversationChanged('父对话不存在或已归档，请先恢复。')
+        if not parent or parent['deleting']:
+            raise ConversationChanged('父对话不存在或已删除。')
         if generation is not None and generation != parent['generation']:
             raise ConversationChanged('父对话上下文已改变，本次任务未提交。')
         return parent
 
     async def _new_child(self, conn, parent, name):
+        if parent['archived'] and name is None:
+            count=await one(conn,'SELECT COUNT(*) n FROM chat_sessions WHERE owner_conversation_id=?',(parent['id'],))
+            name='子对话 '+str(count['n']+1)
         cid = await self._new_conversation(conn, name)
         await conn.execute('UPDATE chat_sessions SET owner_conversation_id=?,group_id=? WHERE id=?',
                            (parent['id'], parent['group_id'], cid))
+        if parent['archived']:
+            from .archive_conversations import archive_origin, ARCHIVE_GROUP_ID
+            await conn.execute('UPDATE chat_sessions SET archived=1,group_id=?,archive_origin=?,title_auto_pending=0 WHERE id=?',
+                               (ARCHIVE_GROUP_ID,json.dumps({**archive_origin(parent),'pinned':False},ensure_ascii=False),cid))
         return cid
 
     async def create_child_conversation(self, parent_id, name=None, *, generation=None, request_id=None):
@@ -124,7 +131,7 @@ class ChildConversationStore:
                 raise ConversationError('该技能已关闭，未创建后台助手任务。')
             if conversation_id:
                 child = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (conversation_id,))
-                if (not child or child['deleting'] or child['archived']
+                if (not child or child['deleting']
                         or child['owner_conversation_id'] != parent_id):
                     raise ConversationChanged('目标不是这个父对话的可用子对话。')
             else:
@@ -359,8 +366,6 @@ async def poll_conversation_jobs(namespace):
                             await db.settle_conversation_job(job['id'], result['status'])
                     continue
                 session = await db.get_session(job['conversation_id'])
-                if session and session['archived']:
-                    continue
                 # Only the serving process invokes this maintenance hook. Its
                 # live queue instance owns admission; short-lived CLIs do not.
                 with interaction('web', 'chat'), bind_conversation(None):

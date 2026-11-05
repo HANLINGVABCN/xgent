@@ -8,7 +8,7 @@ from tests.test_workbench_browser import browser_context, workspace_url, ready  
 from xgent_app.data_contents import BACKUP_GROUPS, CATEGORIES, RECOMMENDED_CATEGORIES, grouped_inventory, selected_groups
 
 
-def backup_api(page, import_keys=None):
+def backup_api(page, import_keys=None, archive_names=None, empty_parts=None):
     records = []
     categories = [{**item, "size": 0, "file_count": 0, "files": []} for item in CATEGORIES]
     by_id = {item["id"]: item for item in categories}
@@ -25,7 +25,7 @@ def backup_api(page, import_keys=None):
     rules = {"enabled": True, "frequency": "6h", "mode": "accumulate", "max_backups": 7,
              "categories": list(RECOMMENDED_CATEGORIES), "archive_format": "zip", "include_command_outputs": False,
              "backup_directory": "/fixture/backups", "default_backup_directory": "/fixture/default"}
-    names = ["manual-fixture.zip", "manual-output.tar.xz"]
+    names = archive_names if archive_names is not None else ["manual-fixture.zip", "manual-output.tar.xz"]
     jobs = {}
     def catalog():
         return {"directory": rules["backup_directory"], "items": [
@@ -36,6 +36,9 @@ def backup_api(page, import_keys=None):
         rows = [{**item, "included": True, "current_size": item["size"] * 2,
                  "current_file_count": item["file_count"] + 1, "replace_paths": item["paths"]}
                 for item in categories if item["id"] in keys]
+        for item in rows:
+            if item['id'] in (empty_parts or []):
+                item.update(file_count=0,size=0,files=[])
         jobs[identifier] = {"id": identifier, "kind": "import", "state": "ready", "phase": "verified",
                             "source_name": source, "preview": {"restore_mode": "selection", "selectable": True,
                             "recommended_categories": keys, "recommended_groups": [group['id'] for group in grouped_inventory(rows, keys, importing=True)],
@@ -98,7 +101,7 @@ def open_backups(page, url):
     page.on("console", lambda msg: print("Console:", msg.text) if msg.type == "error" else None)
     try:
         ready(page, url, "settings")
-        page.get_by_role("tab", name="数据与备份", exact=True).click(timeout=5000)
+        page.get_by_role("button", name="数据与备份", exact=True).click(timeout=5000)
         page.locator(".wb-backup-config-card").wait_for(timeout=10000)
     except Exception:
         print("Backup page diagnostic:", page.locator("#wb-page").inner_text())
@@ -161,7 +164,8 @@ def test_click_and_upload_scan_without_import_until_confirmation(browser_context
         {"name": "uploaded.zip", "mimeType": "application/zip", "buffer": b"isolated mock archive"})
     page.wait_for_function("document.querySelector('.wb-import-source')?.textContent.includes('uploaded.zip')")
     page.get_by_role("button", name="确认覆盖并导入", exact=True).wait_for()
-    assert page.locator(".wb-import-content-group").count() == 1
+    assert page.locator(".wb-import-content-group").count() == len(BACKUP_GROUPS)
+    assert page.locator('[data-import-category]:enabled').count() == 1
     assert "对话与记忆" in page.locator(".wb-import-content-groups").inner_text()
     assert not any(resource == "activate" for resource, _ in records)
     page.get_by_role("button", name="确认覆盖并导入", exact=True).click()
@@ -267,7 +271,7 @@ def test_import_all_checks_every_group_without_duplicate_restore(browser_context
     page.get_by_role('button', name='全选可导入部分', exact=True).click()
     count = len(grouped_inventory([item for item in CATEGORIES if item['id'] in keys], keys, importing=True))
     assert page.locator('[data-import-category]:checked').count() == count
-    assert page.locator('[data-import-category]:disabled').count() == 0
+    assert page.locator('[data-import-category]:disabled').count() == len(BACKUP_GROUPS)-count
     assert '已选导入 '+str(count)+' 组' in page.locator('.wb-import-selected-summary').inner_text()
     assert page.get_by_label('导入 待发送队列与运行状态', exact=True).is_checked()
     page.get_by_role('button', name='确认覆盖并导入', exact=True).click()

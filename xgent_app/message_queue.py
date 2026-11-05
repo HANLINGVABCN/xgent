@@ -8,12 +8,20 @@ import uuid
 
 from .conversations import ConversationBusy, ConversationChanged, ConversationError, ExecutionFileLock, bind_conversation, current_scope
 from .interaction import interaction
-from .queue_store import REASONS
+from .queue_store import REASONS,item_metadata
 
 
 def public_item(item):
-    return {key: item[key] for key in ('id', 'seq', 'conversation_id', 'generation', 'text', 'origin',
+    result={key: item[key] for key in ('id', 'seq', 'conversation_id', 'generation', 'text', 'origin',
             'status', 'reason', 'revision', 'created_at', 'record_id') if key in item}
+    metadata=item_metadata(item)
+    refs=[*metadata.get('attachments',[]),*metadata.get('server_uploads',[])]
+    if refs:
+        result['text']=metadata.get('web_file_message',{}).get('text',item['text'])
+        result['files']=[{'filename':ref.get('filename') or ref.get('name') or ref.get('path','文件'),
+                          'size':ref.get('size'),'order':ref.get('order',index)} for index,ref in enumerate(refs)]
+        result['files'].sort(key=lambda ref:ref['order'])
+    return result
 
 
 def public_snapshot(snapshot):
@@ -54,15 +62,15 @@ class MessageQueue:
                 self._alive.release()
                 raise
 
-    async def submit(self, text, *, chat_id, request_key=None):
+    async def submit(self, text, *, chat_id, request_key=None, metadata=None, draft_revision=None):
         await self.start()
         scope = current_scope()
         if scope.purpose != 'chat':
-            raise ConversationChanged('只有普通聊天文本可以排队。')
+            raise ConversationChanged('只有普通对话内容可以排队。')
         key = request_key or f'{scope.origin}:{self.instance}:{uuid.uuid4().hex}'
         try:
             item = await (await self.manager.factory()).queue_enqueue(scope=scope, instance=self.instance,
-                request_key=key, text=text, chat_id=chat_id)
+                request_key=key, text=text, chat_id=chat_id,metadata=metadata,draft_revision=draft_revision)
         except ConversationError:
             raise
         except Exception as exc:

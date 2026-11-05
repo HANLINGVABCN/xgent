@@ -99,7 +99,7 @@ def test_logout_is_visible_clears_draft_and_does_not_reload_auto_login(browser_c
     expect=pytest.importorskip('playwright.sync_api').expect
     page=browser_context.new_page();ready(page,workspace_url['url'])
     page.locator('#input').fill('应当清理的草稿')
-    page.locator('#workspace-settings').click();page.locator('#wb-logout').click()
+    page.locator('#workspace-settings').click();page.locator('.wb-settings-nav [data-action=logout]').click()
     expect(page.locator('#login')).to_be_visible()
     assert not browser_context.request.get(workspace_url['url']+'/api/session').json()['authenticated']
     assert page.locator('#input').input_value()==''
@@ -125,10 +125,10 @@ def test_usage_visuals(browser_context,workspace_url,width,height):
     for theme in ['light','dark']:
         ready(page,workspace_url['url'],'usage');page.evaluate('(t)=>document.body.classList.toggle("dark",t==="dark")',theme)
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-        assert page.locator('#wb-page').evaluate('(n)=>n.scrollWidth<=n.clientWidth+1')
-        page.locator('#wb-page').evaluate('(n)=>n.scrollTop=0')
+        assert page.locator('#settings-content').evaluate('(n)=>n.scrollWidth<=n.clientWidth+1')
+        page.locator('#settings-content').evaluate('(n)=>n.scrollTop=0')
         page.screenshot(path=str(output/f'{width}-{theme}-usage.png'))
-        page.locator('#wb-page').evaluate('(n)=>n.scrollTop=650')
+        page.locator('#settings-content').evaluate('(n)=>n.scrollTop=650')
         page.screenshot(path=str(output/f'{width}-{theme}-usage-details.png'))
     assert not errors
 
@@ -138,7 +138,7 @@ def test_logout_failure_keeps_session_and_shows_retry(browser_context,workspace_
     page=browser_context.new_page();ready(page,workspace_url['url'])
     page.locator('#input').fill('退出失败时保留')
     page.route('**/api/logout',lambda r:r.fulfill(status=503,json={'error':'fixture logout unavailable'}))
-    page.locator('#workspace-settings').click();page.locator('#wb-logout').click()
+    page.locator('#workspace-settings').click();page.locator('.wb-settings-nav [data-action=logout]').click()
     expect(page.locator('#wb-dialog')).to_contain_text('退出失败')
     assert browser_context.request.get(workspace_url['url']+'/api/session').json()['authenticated']
     assert page.locator('#input').input_value()=='退出失败时保留'

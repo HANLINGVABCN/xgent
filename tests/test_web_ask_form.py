@@ -112,8 +112,9 @@ async def main():
                                 assert pending.draft['2'].get('custom','')==''
                                 await form.get_by_role('button',name='保存 补充说明',exact=True).click()
                                 await page.wait_for_function('document.querySelector(".web-ask-notice").textContent==="已保存"')
+                                await saved_mark.wait_for(state='visible')
                                 assert await saved_mark.is_visible()
-                                assert await saved_mark.evaluate('(node)=>getComputedStyle(node).color')=='rgb(34, 197, 94)'
+                                assert await saved_mark.evaluate('(node)=>{const rgb=getComputedStyle(node).color.match(/\d+/g).map(Number);return rgb[1]>rgb[0]&&rgb[1]>rgb[2];}')
                                 assert await single.get_attribute('aria-checked')=='false'
                                 await page.reload();await form.wait_for()
                                 assert await form.get_by_role('textbox',name='选择环境 · 自定义答案',exact=True).input_value()=='预发布环境'

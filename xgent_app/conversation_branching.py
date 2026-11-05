@@ -973,6 +973,8 @@ class ConversationBranchService:
 
     async def branch_preview(self, conversation_id: str, record_id: int, mode: str) -> dict:
         session = await self._session(conversation_id)
+        if session.get('archived'):
+            raise BranchingError('归档对话不能创建分支，请先恢复到原分组。')
         record, turn, snapshot_id, boundary = await self._anchor(conversation_id, record_id, mode)
         return {
             'conversation_id': conversation_id, 'conversation_name': session.get('name') or '新对话',
@@ -1014,6 +1016,8 @@ class ConversationBranchService:
         if previous:
             return {**previous, 'duplicate': True}
         source = await self._session(conversation_id)
+        if source.get('archived'):
+            raise BranchingError('归档对话不能创建分支，请先恢复到原分组。')
         record, turn, _snapshot_id, boundary = await self._anchor(conversation_id, record_id, mode)
         # Branches copy conversation history only.  No file snapshot, no Git
         # worktree and no workspace copy: the branch keeps working on the same
@@ -1057,6 +1061,9 @@ class ConversationBranchService:
             draft_metadata.pop('_branch_path_map', None)
         async with self.db._transaction() as conn:
             name_cursor = await conn.execute('SELECT name FROM chat_sessions WHERE deleting=0 AND name IS NOT NULL')
+            checked=await (await conn.execute('SELECT archived FROM chat_sessions WHERE id=?',(conversation_id,))).fetchone()
+            if checked is None or checked['archived']:
+                raise BranchingError('来源对话已归档或删除，未创建分支。')
             existing_names = {row['name'] for row in await name_cursor.fetchall()}
             await name_cursor.close()
             suffix = ' · 分支'
@@ -1181,8 +1188,6 @@ class ConversationBranchService:
     async def update_draft(self, conversation_id, data):
         """Select existing draft references; client paths never become capabilities."""
         session = await self._session(conversation_id)
-        if session.get('archived'):
-            raise BranchingError('对话已归档，请先恢复后再修改附件草稿')
         keep = data.get('keep')
         if not isinstance(keep, list) or any(not isinstance(key, str) for key in keep):
             raise BranchingError('附件选择无效')

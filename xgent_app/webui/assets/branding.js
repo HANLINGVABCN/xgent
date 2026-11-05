@@ -14,12 +14,12 @@ function presetSvg(background, inks, {glow=false,dots=false}={}) {
     paths.map((path,index)=>'    <path d="'+path+'" stroke="'+inks[index]+'"/>').join('\n')+'\n  </g>\n</svg>';
 }
 export const brandingPresets = [
-  {id:'4-A',name:'极客黑客绿',source:presetSvg('#09110d',['#10b981','#34d399','#34d399'],{glow:true})},
-  {id:'4-B',name:'电光赛博霓虹',source:presetSvg(['#0c1524','#161226'],['#38bdf8','#818cf8','#c084fc'],{glow:true})},
-  {id:'4-C',name:'终端窗口徽标',source:presetSvg('#131922',['#e2e8f0','#94a3b8','#38bdf8'],{dots:true})},
-  {id:'4-D',name:'黑曜石钛金',source:presetSvg('#141517',['#f59e0b','#fbbf24','#fef08a'])},
-  {id:'4-E',name:'纯白极简反显',source:presetSvg('#000000',['#ffffff','#ffffff','#ffffff'])},
-  {id:'4-F',name:'冷暖双色对撞',source:presetSvg('#0f141c',['#38bdf8','#38bdf8','#fb923c'])},
+  {id:'4-B',label:'a',name:'流光蓝紫',source:presetSvg(['#0c1524','#161226'],['#38bdf8','#818cf8','#c084fc'],{glow:true})},
+  {id:'4-C',label:'b',name:'终端雾蓝',source:presetSvg('#131922',['#e2e8f0','#94a3b8','#38bdf8'],{dots:true})},
+  {id:'4-D',label:'c',name:'黑曜钛金',source:presetSvg('#141517',['#f59e0b','#fbbf24','#fef08a'])},
+  {id:'4-E',label:'d',name:'黑白极简',source:presetSvg('#000000',['#ffffff','#ffffff','#ffffff'])},
+  {id:'4-F',label:'e',name:'冷暖对撞',source:presetSvg('#0f141c',['#38bdf8','#38bdf8','#fb923c'])},
+  {id:'4-A',label:'f',name:'黑客翠绿',source:presetSvg('#09110d',['#10b981','#34d399','#34d399'],{glow:true})},
 ];
 const svgNamespace='http://www.w3.org/2000/svg';
 const tags=new Set(('div span p b strong i em small br section img style svg g defs path rect circle ellipse line polyline polygon lineargradient radialgradient stop filter fegaussianblur femerge femergenode fecolormatrix fecomposite feflood feblend feoffset clipPath mask pattern use text tspan foreignobject title desc').toLowerCase().split(' '));
@@ -30,7 +30,7 @@ let brandingRequest=null,brandingController=null,brandingRequestVersion=0;
 let privateLibraryReady=false;
 let brandingRequestedRevision=-1;
 export function activeBranding(){return preview||saved;}
-export function brandingSource(config){return config.mode==='preset'?brandingPresets.find(p=>p.id===config.preset)?.source||brandingPresets[1].source:String(config.source||config.avatars?.find(item=>item.id===config.avatar_id)?.source||'');}
+export function brandingSource(config){return config.mode==='preset'?brandingPresets.find(p=>p.id===config.preset)?.source||brandingPresets[0].source:String(config.source||config.avatars?.find(item=>item.id===config.avatar_id)?.source||'');}
 export function imageSource(value) {
   if(/^data:image\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*,/i.test(value))return value;
   if(/^https?:\/\//i.test(value)){

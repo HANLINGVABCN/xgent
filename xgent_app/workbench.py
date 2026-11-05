@@ -80,6 +80,9 @@ class Workbench:
         self._background = set()
         self._settings_lock = asyncio.Lock()
         self._data_operations = None
+        # data/estimate 的短 TTL 结果缓存：备份估算要全量递归扫描数据目录，
+        # 而停留页面时前端每 60s 就会后台刷新一次；重复打开不该反复扫盘。
+        self._estimate_cache = None
 
     async def db(self):
         db = await self.ns['BotMemoryDB'].get_instance()
@@ -146,7 +149,13 @@ class Workbench:
             operations = self._data_operations
             try:
                 if resource == 'data/estimate' and method == 'GET':
-                    return await asyncio.to_thread(operations.estimate, data)
+                    signature = repr(sorted((data or {}).items()))
+                    now = time.monotonic()
+                    if self._estimate_cache and self._estimate_cache[0] == signature and now - self._estimate_cache[1] < 60:
+                        return self._estimate_cache[2]
+                    result = await asyncio.to_thread(operations.estimate, data)
+                    self._estimate_cache = (signature, now, result)
+                    return result
                 if resource == 'data/export' and method == 'POST':
                     return await operations.export(data)
                 if resource == 'data/backup-settings' and method == 'GET':
@@ -708,6 +717,10 @@ class Workbench:
 
     async def fetch_models(self,data):
         db=await self.db(); providers=await db.get_providers(); name=str(data.get('name') or ''); provider=providers.get(name)
+        if isinstance(data.get('connection'), dict):
+            name,base,key,_,fmt=self.validate_provider(data['connection'],provider)
+            self.ns['register_runtime_secret'](key)
+            provider={'api_key':key,'base_url':base,'api_format':fmt}
         if provider is None: raise WorkbenchError('提供商不存在',404)
         models,error=await self.ns['ModelClient'].fetch_knowledge_detailed(name,provider['api_key'],provider['base_url'],provider.get('api_format','openai'))
         if error: raise WorkbenchError(self.ns['redact_sensitive_text'](error),502)
@@ -913,6 +926,16 @@ class Workbench:
         return models, prices, merge, self.ns['_build_clusters'](models) if auto else {}, auto
 
     async def settings(self, data):
+        items = data.get('items')
+        if items is not None:
+            # 批量保存：一次 HTTP 往返写完全部字段，返回一次全量 settings。
+            # 旧前端仍走单 key 路径，两种形态长期并存。
+            if not isinstance(items, list) or not items or len(items) > 64 or any(not isinstance(item, dict) for item in items):
+                raise WorkbenchError('批量设置格式不正确')
+            result = None
+            for item in items:
+                result = await self.settings({'key': item.get('key'), 'value': item.get('value')})
+            return result
         key, value = str(data.get('key') or ''), data.get('value')
         if key == 'model_price_table':
             if not isinstance(value, dict): raise WorkbenchError('价格表必须是对象')
@@ -1188,7 +1211,9 @@ class Workbench:
             db = await self.db()
             result = await db.create_child_conversation(str(data['id']), data.get('name'),
                 generation=data.get('generation'), request_id=data.get('request_id'))
-            await get_conversations().manage('switch', result['conversation_id'])
+            child=await db.get_session(result['conversation_id'])
+            if not child['archived']:
+                await get_conversations().manage('switch', result['conversation_id'])
         elif action in {'reset_context','delete'}:
             if data.get('confirm') is not True:
                 raise WorkbenchError('请确认目标会话后再操作。')
@@ -1198,8 +1223,7 @@ class Workbench:
                 await self.ns['reset_conversation_context'](str(data['id']))
         else:
             changed = await get_conversations().manage(action, data.get('id'), data.get('name'))
-            if action == 'create':
-                result['conversation_id'] = changed['conversation_id']
+            result.update({key:changed[key] for key in ('conversation_id','archived_conversation_ids','restored_conversation_ids') if key in changed})
         return {**await self.conversations({}), **result}
 
     async def conversation_delete_info(self, data):

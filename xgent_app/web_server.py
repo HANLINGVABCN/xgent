@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import gzip
 import http.server
 import hashlib
 import hmac
@@ -61,11 +62,19 @@ _ASSET_REFERENCE_RE = re.compile(
 
 def _asset_version(name: str) -> str:
     path = os.path.join(STATIC_DIR, "assets", os.path.basename(name))
+    sig = _stat_signature(path)
+    if sig is None:
+        return "missing"
+    cached = _ASSET_MEMCACHE.get("version:" + name)
+    if cached and cached["sig"] == sig:
+        return cached["version"]
     try:
         with open(path, "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()[:16]
+            version = hashlib.sha256(handle.read()).hexdigest()[:16]
     except OSError:
         return "missing"
+    _ASSET_MEMCACHE["version:" + name] = {"sig": sig, "version": version}
+    return version
 
 
 def _version_asset_references(body: bytes) -> bytes:
@@ -93,6 +102,33 @@ VENDOR_ASSETS: Dict[str, Any] = {
 
 # SSE 心跳间隔。低于常见反代的 60s 空闲超时。
 SSE_HEARTBEAT_SECONDS = 10.0
+
+# 2FA policy（auth_version）的进程内缓存 TTL。policy 只在两步验证
+# 设置变更 / 改密时变化；这些路径都会立刻刷新或失效缓存，TTL 只是兜底。
+# 没有这层缓存时，每个请求（乃至 SSE 的每一帧）都要 run_coroutine_threadsafe
+# 往事件循环排队一次 + 读一次库——对话流式输出期间这会直接把设置请求挤到超时。
+AUTH_POLICY_CACHE_SECONDS = 10.0
+
+# SSE 循环里的鉴权复检间隔。建立连接时已完整鉴权过，之后按间隔复查即可；
+# 逐帧鉴权等于每帧一次事件循环往返。
+SSE_AUTH_RECHECK_SECONDS = 10.0
+
+# 文本类响应 gzip 的最小体积与压缩级别。SSE / 媒体 / 已压缩二进制不参与。
+GZIP_MIN_BYTES = 1024
+GZIP_LEVEL = 6
+
+# 静态/vendor 资源的内存缓存：文件未改动时不再读盘、不再重算哈希与压缩。
+_ASSET_MEMCACHE: Dict[str, Dict[str, Any]] = {}
+
+COMPRESSIBLE_TYPE_PREFIXES = ("text/", "application/json", "application/javascript", "image/svg+xml")
+
+
+def _stat_signature(path: str) -> Optional[tuple]:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 class WebOperationTimeout(TimeoutError):
@@ -139,10 +175,14 @@ class WebChatConfig:
         file_transfer_directory: Optional[str] = None,
         security_api: Optional[Callable[..., Any]] = None,
         read_branding: Optional[Callable[[], Any]] = None,
+        read_settings_revision: Optional[Callable[[], Any]] = None,
     ):
         self.accept_text = accept_text
         self.security_api = security_api
         self.read_branding = read_branding
+        # 轻量回调：只读外观 revision（一次 DB 读）。/api/config?since= 用它做
+        # 未变化短路，避免跨端同步轮询每次都重算完整 settings。
+        self.read_settings_revision = read_settings_revision
         self.queue_api = queue_api
         self.workbench = workbench
         self.host = host
@@ -207,12 +247,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _headers_dict(self) -> Dict[str, str]:
         return {key: value for key, value in self.headers.items()}
 
+    def _accepts_gzip(self) -> bool:
+        return "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+
+    def _maybe_gzip(self, body: bytes, content_type: str) -> bytes:
+        """对文本类响应按协商压缩。SSE/媒体/已压缩二进制不走这里。"""
+        if (len(body) >= GZIP_MIN_BYTES and self._accepts_gzip()
+                and content_type.startswith(COMPRESSIBLE_TYPE_PREFIXES)):
+            return gzip.compress(body, GZIP_LEVEL)
+        return body
+
     def _send_json(self, data: Any, status: int = 200,
                    extra_headers: Optional[Dict[str, str]] = None) -> None:
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
+        payload = self._maybe_gzip(raw, "application/json")
+        if payload is not raw:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Length", str(len(payload)))
         self.send_header("X-Content-Type-Options", "nosniff")
         if status >= 400 and getattr(self, 'command', '') == 'POST':
             # The JSON body may already be consumed (validation/CAS failure),
@@ -224,18 +278,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
         with contextlib.suppress(ConnectionError):
-            self.wfile.write(raw)
+            self.wfile.write(payload)
 
     def _send_html(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Content-Length", str(len(body)))
+        payload = self._maybe_gzip(body, "text/html")
+        if payload is not body:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Length", str(len(payload)))
         self.send_header("X-Content-Type-Options", "nosniff")
         # WebApp 需要能被 Telegram 内嵌，所以不发 X-Frame-Options: DENY。
         self.end_headers()
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-            self.wfile.write(body)
+            self.wfile.write(payload)
 
     def _read_json(self, max_bytes: int = MAX_REQUEST_BODY) -> Optional[Dict[str, Any]]:
         """读请求体。超限或格式错误时直接回错误响应并返回 None。"""
@@ -294,8 +352,44 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             raise TwoFactorError('当前服务未接入两步验证', 503)
         return self._run_coro(self.config.security_api(method, action, data, owner))
 
+    def _auth_policy_cached(self, max_age: float = AUTH_POLICY_CACHE_SECONDS) -> Optional[Dict[str, Any]]:
+        """短 TTL 读 2FA policy，省掉每请求一次事件循环往返 + DB 读。"""
+        if self.config.security_api is None:
+            return {'enabled': False, 'auth_version': '', 'recovery_remaining': 0}
+        cache = getattr(self.server, 'auth_policy_cache', None)
+        if cache is None:
+            return None
+        now = time.monotonic()
+        with cache['lock']:
+            entry = cache['entry']
+            if entry is not None and now - entry[0] < max_age:
+                return entry[1]
+        return None
+
+    def _store_auth_policy(self, policy: Dict[str, Any]) -> None:
+        cache = getattr(self.server, 'auth_policy_cache', None)
+        if cache is None:
+            return
+        with cache['lock']:
+            cache['entry'] = (time.monotonic(), policy)
+
+    def _invalidate_auth_policy(self) -> None:
+        cache = getattr(self.server, 'auth_policy_cache', None)
+        if cache is not None:
+            with cache['lock']:
+                cache['entry'] = None
+
     def _session_signing_key(self, expected=None):
-        version = self._security('GET', 'policy', {})['auth_version']
+        if expected is None:
+            policy = self._auth_policy_cached()
+            if policy is None:
+                policy = self._security('GET', 'policy', {})
+                self._store_auth_policy(policy)
+        else:
+            # 安全关键比对（改密/两步验证下发新 cookie 前的版本核对）必须读最新值。
+            policy = self._security('GET', 'policy', {})
+            self._store_auth_policy(policy)
+        version = policy['auth_version']
         if expected is not None and version != expected:
             raise TwoFactorError('安全设置已更新，请重新登录', 409)
         key = self.server.session_key
@@ -320,6 +414,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             result = self._security(method, action, data, owner)
             headers = {'Cache-Control': 'private, no-store'}
             if method == 'POST' and action in {'confirm', 'disable', 'recovery'}:
+                # auth_version 刚变化：先失效缓存；下方 _login_cookie 会以最新版本
+                # 重新取一次 policy 并回填缓存。
+                self._invalidate_auth_policy()
                 headers['Set-Cookie'] = self._login_cookie(result.pop('_auth_version', None))
             self._send_json(result, extra_headers=headers)
         except TwoFactorError as exc:
@@ -474,31 +571,65 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _serve_workbench_asset(self, path: str) -> None:
         allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "branding.js", "branding-settings.js", "branding.css", "logo.svg", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed.update({"design-system.css", "themes.css", "theme-presets.js", "theme-settings.js", "ui.js", "navigation.js", "settings-archive.js", "workspace-shell.js", "theme.js", "chat-view.js", "workbench-tasks.js", "workbench-files.js", "workbench-models.js"})
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
             return
-        try:
-            with open(os.path.join(STATIC_DIR, "assets", name), "rb") as handle:
-                body = handle.read()
-        except OSError:
+        asset_path = os.path.join(STATIC_DIR, "assets", name)
+        sig = _stat_signature(asset_path)
+        if sig is None:
             self._send_json({"error": "asset missing"}, status=404)
             return
-        if name.endswith(".js"):
-            body = _version_asset_references(body)
-        etag = '"' + hashlib.sha256(body).hexdigest() + '"'
-        self.send_response(304 if self.headers.get('If-None-Match') == etag else 200)
-        self.send_header('ETag', etag)
-        self.send_header('Cache-Control', 'no-cache')
+        # 处理后的字节 / ETag / gzip 副本按 (mtime_ns, size) 记忆化：
+        # 文件没改就不再读盘、不再正则替换、不再重算哈希与压缩。
+        cache_key = "asset:" + name
+        entry = _ASSET_MEMCACHE.get(cache_key)
+        if entry is None or entry["sig"] != sig:
+            try:
+                with open(asset_path, "rb") as handle:
+                    body = handle.read()
+            except OSError:
+                self._send_json({"error": "asset missing"}, status=404)
+                return
+            if name.endswith(".js"):
+                body = _version_asset_references(body)
+            entry = {"sig": sig, "body": body,
+                     "etag": '"' + hashlib.sha256(body).hexdigest() + '"',
+                     "gzip": None}
+            _ASSET_MEMCACHE[cache_key] = entry
         content_type = ('text/javascript; charset=utf-8' if name.endswith('.js') else
                         'image/svg+xml' if name.endswith('.svg') else 'text/css; charset=utf-8')
+        self._send_cached_bytes(entry, content_type, 'no-cache')
+
+    def _send_cached_bytes(self, entry: Dict[str, Any], content_type: str, cache_control: str) -> None:
+        """按 ETag 协商 + 可选 gzip 发送静态字节。"""
+        etag = entry["etag"]
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Cache-Control', cache_control)
+            self.send_header('Vary', 'Accept-Encoding')
+            self.end_headers()
+            return
+        payload = entry["body"]
+        gzip_body = (len(payload) >= GZIP_MIN_BYTES and self._accepts_gzip()
+                     and content_type.startswith(COMPRESSIBLE_TYPE_PREFIXES))
+        if gzip_body and entry["gzip"] is None:
+            entry["gzip"] = gzip.compress(payload, GZIP_LEVEL)
+        self.send_response(200)
+        if gzip_body:
+            payload = entry["gzip"]
+            self.send_header('Content-Encoding', 'gzip')
+        self.send_header('ETag', etag)
+        self.send_header('Cache-Control', cache_control)
+        self.send_header('Vary', 'Accept-Encoding')
         self.send_header('Content-Type', content_type)
         self.send_header('X-Content-Type-Options', 'nosniff')
-        if self.headers.get('If-None-Match') != etag:
-            self.send_header('Content-Length', str(len(body)))
+        self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
-        if self.headers.get('If-None-Match') != etag:
-            with contextlib.suppress(ConnectionError): self.wfile.write(body)
+        with contextlib.suppress(ConnectionError):
+            self.wfile.write(payload)
 
     def _handle_workbench(self, method: str, resource: str) -> None:
         if not self._require_auth() or not self._require_web_enabled(): return
@@ -555,6 +686,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if resource == 'bootstrap':
                 result['capabilities'].update(terminal=self.config.is_terminal_enabled(),
                                                terminal_supported=web_terminal.is_terminal_supported())
+            if method == 'POST' and resource == 'password':
+                # 改密会撤销全部会话（auth_version 更新）：立即失效 policy 缓存。
+                self._invalidate_auth_policy()
             self._send_json(result, extra_headers={'Cache-Control': 'private, no-store'})
         except WorkbenchError as exc:
             self._send_json({'error': str(exc)}, status=exc.status)
@@ -773,6 +907,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _handle_read_config(self) -> None:
         if not self._require_auth():
             return
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        since = (query.get('since') or [None])[0]
+        if since is not None and self.config.read_settings_revision is not None:
+            # 跨端同步轮询：revision 未变就只回几十字节，不重算完整 settings。
+            try:
+                revision = self._run_coro(self.config.read_settings_revision(), timeout=15)
+            except WebOperationTimeout:
+                raise
+            if str(revision) == since:
+                self._send_json({'revision': revision, 'unchanged': True},
+                                extra_headers={'Cache-Control': 'no-store'})
+                return
         self._send_json(self._run_coro(self.config.read_settings()))
 
     def _handle_read_branding(self) -> None:
@@ -790,7 +936,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not self._is_authenticated():
             branding = public_branding(branding)
         payload = {'revision': revision, 'branding': branding}
-        self._send_json(payload, extra_headers={'Cache-Control': 'no-store'})
+        # ETag 跟随 revision：给反代/协程方一个协商锚点。浏览器侧该接口刻意
+        # no-store（跨端新鲜度靠 ?revision= 短路），所以这里不依赖 304 协商。
+        extra = {'Cache-Control': 'no-store'}
+        if revision:
+            extra['ETag'] = f'"branding-{revision}"'
+        self._send_json(payload, extra_headers=extra)
 
     def _handle_write_config(self) -> None:
         if not self._require_auth():
@@ -798,6 +949,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         from .web_branding import MAX_BRANDING_REQUEST
         data = self._read_json(MAX_BRANDING_REQUEST)
         if data is None:
+            return
+        values = data.get("values")
+        if isinstance(values, dict):
+            # 批量字号保存：一次往返写完，只回最后一次全量 settings。
+            result: Any = {}
+            try:
+                for key, value in values.items():
+                    result = self._run_coro(self.config.write_setting(str(key), value))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            if not result:
+                self._send_json({"error": "缺少 key"}, status=400)
+                return
+            # 平铺返回（values/revision 在顶层），前端 accept() 直接应用；
+            # 保留 settings 键兼容旧读取方。
+            self._send_json({"ok": True, **result, "settings": result})
             return
         key = str(data.get("key") or "")
         if not key:
@@ -808,7 +976,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
             return
-        self._send_json({"ok": True, "settings": result})
+        self._send_json({"ok": True, **result, "settings": result})
 
     def _conversation_arguments(self, data, *, background=False):
         if self.config.read_conversations is None:
@@ -1146,11 +1314,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 ready = json.dumps({'epoch': stream.epoch, 'cursor': stream.cursor})
                 self.wfile.write(f"event: ready\ndata: {ready}\n\n".encode('utf-8'))
                 self.wfile.flush()
+                last_auth = time.monotonic()
                 while not stop_event.is_set():
                     frame = stream.get(timeout=SSE_HEARTBEAT_SECONDS)
-                    if not self._is_authenticated():
-                        break
+                    # 连接建立时已完整鉴权；逐帧鉴权等于每帧一次事件循环往返，
+                    # 对话流式输出时会把设置请求全部挤到队尾。改为按间隔复查。
+                    if time.monotonic() - last_auth >= SSE_AUTH_RECHECK_SECONDS:
+                        if not self._is_authenticated():
+                            break
+                        last_auth = time.monotonic()
                     if frame is None:
+                        if stop_event.is_set():
+                            break
                         # 超时或队列关闭：发送可观察的心跳，检测代理是否仍在转发。
                         self.wfile.write(b"event: ping\ndata: {}\n\n")
                         self.wfile.flush()
@@ -1332,22 +1507,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         """
         filename, content_type = VENDOR_ASSETS[path]
         asset_path = os.path.join(VENDOR_DIR, filename)
-        try:
-            with open(asset_path, "rb") as handle:
-                body = handle.read()
-        except OSError:
+        sig = _stat_signature(asset_path)
+        if sig is None:
             self._send_json({"error": "asset missing"}, status=404)
             return
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
+        cache_key = "vendor:" + filename
+        entry = _ASSET_MEMCACHE.get(cache_key)
+        if entry is None or entry["sig"] != sig:
+            try:
+                with open(asset_path, "rb") as handle:
+                    body = handle.read()
+            except OSError:
+                self._send_json({"error": "asset missing"}, status=404)
+                return
+            entry = {"sig": sig, "body": body,
+                     "etag": '"' + hashlib.sha256(body).hexdigest() + '"',
+                     "gzip": None}
+            _ASSET_MEMCACHE[cache_key] = entry
         # 静态资源内容按文件名固定，可以放心长期缓存；改版本号（文件名或加
         # query）时浏览器会当新资源处理，不用担心缓存吃到旧内容。
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-            self.wfile.write(body)
+        # no-cache + ETag：每次协商，命中则 304，不再整包重传。
+        self._send_cached_bytes(entry, content_type, "no-cache")
 
     def _require_terminal_enabled(self) -> bool:
         if self.config.is_terminal_enabled():
@@ -1531,6 +1711,8 @@ class WebChatServer:
         httpd.config = self.config          # type: ignore[attr-defined]
         httpd.session_key = web_auth.generate_session_secret()  # type: ignore[attr-defined]
         httpd.limiter = web_auth.LoginRateLimiter()             # type: ignore[attr-defined]
+        # 2FA policy 的共享缓存：所有 HTTP 工作线程读写同一份（带锁）。
+        httpd.auth_policy_cache = {'lock': threading.Lock(), 'entry': None}  # type: ignore[attr-defined]
         httpd.outbox = self.outbox          # type: ignore[attr-defined]
         httpd.shutdown_event = self.shutdown_event              # type: ignore[attr-defined]
         httpd.file_transfers = self.file_transfers

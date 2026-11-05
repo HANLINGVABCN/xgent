@@ -113,7 +113,8 @@ class FileTransfers:
                 or any(not isinstance(c, str) for c in captions)):
             raise TransferError('文件文字或模式无效', 400)
         spec = {'files': normalized, 'mode': mode, 'text': text, 'modes': modes,
-                'captions': captions, 'conversation_id': cid, 'idempotency_key': key}
+                'captions': captions, 'conversation_id': cid, 'idempotency_key': key,
+                'queue':data.get('queue') is True,'generation':data.get('generation')}
         signature = hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         identifier = hashlib.sha256((cid + '\0' + key).encode()).hexdigest()
         with self.lock(identifier):
@@ -205,6 +206,7 @@ class FileTransfers:
                     raise TransferError('暂存文件大小校验失败')
                 files.append({**file, 'path': str(path), 'sha256': digest})
             data = {'files': files, 'text': manifest['text'], 'idempotency_key': manifest['idempotency_key'],
+                    'queue':manifest.get('queue',False),'generation':manifest.get('generation'),
                     'modes': json.dumps(manifest['modes']), 'captions': json.dumps(manifest['captions']),
                     '_temporary': TransferLease()}
             receipt = submit(data, manifest['mode'], manifest['conversation_id'])

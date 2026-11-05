@@ -32,11 +32,11 @@ function highlighted(text, match) {
   return span;
 }
 async function openResult(item) {
-  // The workbench owns archived readers and exact history anchors. Reading a
+  // Settings owns archive entry and exact history anchors. Reading a
   // result must not restore archives or switch Telegram's selected conversation.
   const event = new CustomEvent('xgent-search-open', {detail: item, cancelable: true});
   if (window.dispatchEvent(event)) {
-    if (item.archived) throw new Error('只读历史页面尚未加载，请刷新网页后重试。');
+    if (item.archived) throw new Error('请从设置的归档列表进入这段对话。');
     if (!await window.XGentConversations?.select(item.conversation_id)) throw new Error('未能打开目标对话，请重试。');
     location.hash = '#/chat';
     await window.XGentChat?.locate(item.message_key);
@@ -110,7 +110,7 @@ export class ConversationSearch {
         'aria-label': `${item.conversation_name} · ${roles[item.role] || '消息'} · ${item.snippet}`,
         onclick: async () => { try { await openResult(item); this.onOpen(item); } catch (error) { this.error = error.message; this.render(); } }},
       el('span', {class: 'global-search-heading'}, el('strong', {}, item.conversation_name),
-        item.archived ? el('span', {class: 'global-search-archive'}, '已归档 · 只读') : null),
+        item.archived ? el('span', {class: 'global-search-archive'}, '归档对话') : null),
       el('span', {class: 'global-search-meta'}, roles[item.role] || '消息', ' · ', stamp(item.timestamp)),
       el('span', {class: 'global-search-snippet'}, highlighted(item.snippet, item.match)));
       nodes.push(hit);
@@ -136,7 +136,8 @@ export function openGlobalSearch(initialQuery) {
   const kind = el('select', {'aria-label': '搜索内容类型'}, [['all','名称与全部消息'],['title','仅对话名称'],['user','仅用户消息'],['assistant','仅 AI 回复'],['tool','仅工具结果']].map(([value, label]) => el('option', {value}, label)));
   archive.value = lastFilters.archive; kind.value = lastFilters.kind;
   const results = el('div', {class: 'global-search-results'});
-  const close = button('×', () => dialogNode.close()); close.className = 'global-search-close'; close.setAttribute('aria-label', '关闭全局搜索');
+  const close = button('', () => dialogNode.close()); close.className = 'global-search-close'; close.setAttribute('aria-label', '关闭全局搜索');
+  close.innerHTML='<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>';
   const dialogNode = searchDialog = el('dialog', {id: 'global-search-dialog', 'aria-labelledby': 'global-search-title'},
     el('header', {}, el('h2', {id: 'global-search-title'}, '全局搜索'), close),
     el('div', {class: 'global-search-controls'}, input, el('div', {class: 'global-search-filters'}, archive, kind)), results);

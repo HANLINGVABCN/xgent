@@ -30,13 +30,13 @@ def open_page(context, fixture, route='tasks'):
     page.add_init_script(PROBE)
     ready(page,fixture['url'],route)
     if route!='chat':
-        page.wait_for_function("!document.querySelector('#wb-page > .wb-loading')")
+        page.wait_for_function("!document.querySelector('#settings-content > .wb-loading')")
     return page
 
 
 def go(page, route, title=None):
     page.evaluate('(route)=>{document.activeElement?.blur();location.hash="/"+route;}',route)
-    page.wait_for_function('(route)=>document.body.dataset.page===route',arg=route)
+    page.wait_for_function('(route)=>route==="chat"?document.body.dataset.page==="chat":route==="settings"?document.body.dataset.page==="settings":window.XGentWorkbench.panel===route',arg=route)
     if title:page.get_by_role('heading',name=title,exact=True).wait_for()
 
 
@@ -47,7 +47,7 @@ def count(page, path):
 def test_back_navigation_restores_dom_scroll_and_avoids_loading_requests(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url,'models')
     page.set_viewport_size({'width':900,'height':500})
-    page.locator('#wb-page').evaluate('(node)=>{node.scrollTop=150;window.__scroll=node.scrollTop;window.__cached=node.firstElementChild;}')
+    page.locator('#settings-content').evaluate('(node)=>{node.scrollTop=150;window.__scroll=node.scrollTop;window.__cached=node.firstElementChild;}')
     providers=count(page,'/api/workbench/providers')
     bootstrap=count(page,'/api/workbench/bootstrap')
     go(page,'tasks','任务中心')
@@ -55,50 +55,50 @@ def test_back_navigation_restores_dom_scroll_and_avoids_loading_requests(browser
     page.evaluate("window.__delay['/api/workbench/providers']=1000;window.__delay['/api/workbench/bootstrap']=1000")
     elapsed=page.evaluate("""() => new Promise(resolve=>{
       const start=performance.now();location.hash='/models';
-      const poll=()=>{if(document.body.dataset.page==='models'&&document.querySelector('#wb-page').firstElementChild===window.__cached)resolve(performance.now()-start);else requestAnimationFrame(poll);};
+      const poll=()=>{if(window.XGentWorkbench.panel==='models'&&document.querySelector('#settings-content').firstElementChild===window.__cached)resolve(performance.now()-start);else requestAnimationFrame(poll);};
       requestAnimationFrame(poll);
     })""")
     assert elapsed<200, elapsed
-    assert page.locator('#wb-page > .wb-loading').count()==0
-    assert page.evaluate('Math.abs(document.querySelector("#wb-page").scrollTop-window.__scroll)<2')
+    assert page.locator('#settings-content > .wb-loading').count()==0
+    assert page.evaluate('Math.abs(document.querySelector("#settings-content").scrollTop-window.__scroll)<2')
     assert count(page,'/api/workbench/providers')==providers
     assert count(page,'/api/workbench/bootstrap')==bootstrap
     # Navigating through chat must not overwrite another page's saved position.
     go(page,'chat');go(page,'models','模型与技能')
-    assert page.evaluate('document.querySelector("#wb-page").firstElementChild===window.__cached')
-    assert page.evaluate('Math.abs(document.querySelector("#wb-page").scrollTop-window.__scroll)<2')
+    assert page.evaluate('document.querySelector("#settings-content").firstElementChild===window.__cached')
+    assert page.evaluate('Math.abs(document.querySelector("#settings-content").scrollTop-window.__scroll)<2')
     assert count(page,'/api/workbench/providers')==providers
 
 
 def test_expired_cache_stays_visible_while_background_refreshes(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url)
-    page.evaluate("window.__cached=document.querySelector('#wb-page').firstElementChild")
+    page.evaluate("window.__cached=document.querySelector('#settings-content').firstElementChild")
     go(page,'files','文件与输出')
     reads=count(page,'/api/workbench/tasks')
     page.evaluate("window.__age+=20000;window.__delay['/api/workbench/tasks']=650")
     go(page,'tasks','任务中心')
-    assert page.evaluate('document.querySelector("#wb-page").firstElementChild===window.__cached')
-    assert page.locator('#wb-page > .wb-loading').count()==0
+    assert page.evaluate('document.querySelector("#settings-content").firstElementChild===window.__cached')
+    assert page.locator('#settings-content > .wb-loading').count()==0
     page.wait_for_timeout(750)
-    assert page.evaluate('document.querySelector("#wb-page").firstElementChild===window.__cached')
+    assert page.evaluate('document.querySelector("#settings-content").firstElementChild===window.__cached')
     assert count(page,'/api/workbench/tasks')==reads+1
     assert page.locator('.wb-cache-notice').count()==0
 
 
 def test_failed_background_refresh_keeps_content_and_can_retry(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url)
-    page.evaluate("window.__cached=document.querySelector('#wb-page').firstElementChild")
+    page.evaluate("window.__cached=document.querySelector('#settings-content').firstElementChild")
     go(page,'files','文件与输出')
     page.evaluate("window.__age+=20000;window.__fail['/api/workbench/tasks']=true")
     go(page,'tasks','任务中心')
     page.get_by_role('button',name='重试更新',exact=True).wait_for()
-    assert page.evaluate('document.querySelector("#wb-page").firstElementChild===window.__cached')
-    assert page.locator('#wb-page table').count()==1
+    assert page.evaluate('document.querySelector("#settings-content").firstElementChild===window.__cached')
+    assert page.locator('#settings-content table').count()==1
     page.evaluate("window.__fail['/api/workbench/tasks']=false")
     page.get_by_role('button',name='重试更新',exact=True).click()
     page.wait_for_function('!document.querySelector(".wb-cache-notice")')
-    assert page.evaluate('document.querySelector("#wb-page").firstElementChild===window.__cached')
-    assert page.locator('#wb-page > .wb-loading').count()==0
+    assert page.evaluate('document.querySelector("#settings-content").firstElementChild===window.__cached')
+    assert page.locator('#settings-content > .wb-loading').count()==0
 
 
 def test_late_background_response_cannot_overwrite_destination(browser_context,workspace_url):
@@ -108,19 +108,20 @@ def test_late_background_response_cannot_overwrite_destination(browser_context,w
     go(page,'tasks','任务中心')
     go(page,'models','模型与技能')
     page.wait_for_timeout(750)
-    assert page.locator('#wb-page h1').text_content()=='模型与技能'
-    assert page.locator('#wb-page .wb-error').count()==0
+    assert page.locator('#settings-content h1').text_content()=='模型与技能'
+    assert page.locator('#settings-content .wb-error').count()==0
 
 
 def test_mutation_invalidates_settings_but_not_unrelated_files(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url,'settings')
-    page.get_by_role('tab',name='对话与记忆',exact=True).click()
+    page.get_by_role('button',name='对话与记忆',exact=True).click()
     page.locator('[name=global_depth]').wait_for()
     go(page,'files','文件与输出')
     artifacts=count(page,'/api/workbench/artifacts')
     # Same API used by quick setting buttons; no private cache globals needed.
     page.evaluate("async()=>{const {wb}=await import('/assets/components.js');await wb('settings',{data:{key:'global_depth',value:53}});}")
-    go(page,'settings','设置')
+    page.evaluate('window.XGentWorkbench.showSettingsPanel("conversation")')
+    page.locator('[name=global_depth]').wait_for()
     page.wait_for_function('document.querySelector("[name=global_depth]")?.value==="53"')
     go(page,'files','文件与输出')
     assert count(page,'/api/workbench/artifacts')==artifacts
@@ -128,31 +129,33 @@ def test_mutation_invalidates_settings_but_not_unrelated_files(browser_context,w
 
 def test_refresh_cannot_overwrite_a_form_edited_during_fetch(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url,'settings')
-    page.get_by_role('tab',name='对话与记忆',exact=True).click()
+    page.get_by_role('button',name='对话与记忆',exact=True).click()
     page.locator('[name=global_depth]').wait_for()
     go(page,'files','文件与输出')
     page.evaluate("window.__age+=61000;window.__delay['/api/workbench/bootstrap']=700")
-    go(page,'settings','设置')
+    page.evaluate('window.XGentWorkbench.showSettingsPanel("conversation")')
+    page.locator('[name=global_depth]').wait_for()
     page.locator('[name=global_depth]').fill('79')
     page.wait_for_timeout(800)
     assert page.locator('[name=global_depth]').input_value()=='79'
     # Explicit discard must evict this edited DOM, not restore it as saved.
     page.on('dialog',lambda dialog:dialog.accept())
     go(page,'files','文件与输出')
-    go(page,'settings','设置')
+    page.evaluate('window.XGentWorkbench.showSettingsPanel("conversation")')
+    page.locator('[name=global_depth]').wait_for()
     page.locator('[name=global_depth]').wait_for()
     assert page.locator('[name=global_depth]').input_value()!='79'
 
 
 def test_checked_tasks_survive_navigation_and_ttl_refresh(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url)
-    box=page.locator('#wb-page tbody input[type=checkbox]').first
+    box=page.locator('#settings-content tbody input[type=checkbox]').first
     box.check()
     reads=count(page,'/api/workbench/tasks')
     go(page,'files','文件与输出')
     page.evaluate('window.__age+=20000')
     go(page,'tasks','任务中心')
-    assert page.locator('#wb-page tbody input[type=checkbox]').first.is_checked()
+    assert page.locator('#settings-content tbody input[type=checkbox]').first.is_checked()
     assert count(page,'/api/workbench/tasks')==reads
     assert page.get_by_role('button',name='取消选中',exact=True).is_enabled()
 
@@ -161,9 +164,9 @@ def test_auth_expiry_clears_authenticated_page_cache(browser_context,workspace_u
     page=open_page(browser_context,workspace_url)
     go(page,'files','文件与输出')
     page.evaluate("window.dispatchEvent(new Event('xgent-auth-expired'))")
-    assert page.locator('#wb-page').inner_text()==''
+    assert page.locator('#settings-content').inner_text()==''
     go(page,'tasks')
-    assert page.locator('#wb-page h1').count()==0
+    assert page.locator('#settings-content h1').count()==0
     assert page.locator('#login').is_visible()
 
 
@@ -213,25 +216,26 @@ def test_page_cache_lru_ttl_and_dependency_invalidation(browser_context,workspac
 def test_mobile_back_navigation_reuses_page_without_flash(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url,'files')
     page.set_viewport_size({'width':390,'height':844})
-    page.evaluate("window.__cached=document.querySelector('#wb-page').firstElementChild")
+    page.evaluate("window.__cached=document.querySelector('#settings-content').firstElementChild")
     reads=count(page,'/api/workbench/artifacts')
-    page.locator('#conversation-drawer-toggle').click();page.locator('#workspace-settings').click();page.locator('#wb-nav-links [data-route=tasks]').click()
+    page.locator('#conversation-mobile-toggle').click();page.locator('#workspace-settings').click();page.locator('.wb-settings-nav [data-panel=tasks]').click()
     page.get_by_role('heading',name='任务中心',exact=True).wait_for()
-    page.locator('#conversation-drawer-toggle').click();page.locator('#workspace-settings').click();page.locator('#wb-nav-links [data-route=files]').click()
-    page.wait_for_function('document.querySelector("#wb-page").firstElementChild===window.__cached')
-    assert page.locator('#wb-page > .wb-loading').count()==0
+    page.locator('#conversation-mobile-toggle').click();page.locator('#workspace-settings').click();page.locator('.wb-settings-nav [data-panel=files]').click()
+    page.wait_for_function('document.querySelector("#settings-content").firstElementChild===window.__cached')
+    assert page.locator('#settings-content > .wb-loading').count()==0
     assert count(page,'/api/workbench/artifacts')==reads
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
 
 
 def test_external_settings_change_is_loaded_after_ttl(browser_context,workspace_url):
     page=open_page(browser_context,workspace_url,'settings')
-    page.get_by_role('tab',name='对话与记忆',exact=True).click()
+    page.get_by_role('button',name='对话与记忆',exact=True).click()
     page.locator('[name=global_depth]').wait_for()
     go(page,'files','文件与输出')
     response=browser_context.request.post(workspace_url['url']+'/api/workbench/settings',data={'key':'global_depth','value':64})
     assert response.ok
     page.evaluate('window.__age+=61000')
-    go(page,'settings','设置')
+    page.evaluate('window.XGentWorkbench.showSettingsPanel("conversation")')
+    page.locator('[name=global_depth]').wait_for()
     page.wait_for_function('document.querySelector("[name=global_depth]")?.value==="64"')
-    assert page.locator('#wb-page > .wb-loading').count()==0
+    assert page.locator('#settings-content > .wb-loading').count()==0

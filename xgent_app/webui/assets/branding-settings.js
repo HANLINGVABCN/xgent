@@ -15,14 +15,15 @@ export function brandingCard({card,actions,state,dirtyForm}) {
   const code=el('textarea',{name:'brand_source',rows:8,spellcheck:'false',placeholder:'输入 SVG／HTML 代码，或粘贴图片地址','aria-label':'Logo 代码或图片链接'});
   const codeSave=button('保存',()=>persist(true), 'primary');codeSave.setAttribute('aria-label','保存头像');
   const codeLabel=el('label',{class:'wb-field brand-code-field'},el('span',{},'Logo 代码或图片链接'),el('div',{class:'brand-code-editor'},code,codeSave));
+  const codeDetails=el('details',{class:'brand-code-details'},el('summary',{},'Logo 代码或图片链接',el('span',{},'展开查看或编辑')),codeLabel);
   const feedback=el('div',{class:'brand-feedback',role:'status'});
   const file=el('input',{type:'file',accept:'image/*',hidden:true,'aria-label':'上传本地 Logo 图片'});
   const fileName=el('span',{class:'brand-file-name'});
   const save=el('button',{class:'wb-btn primary',type:'submit'},'保存设置');
-  const presetLetter=()=>draft.preset.slice(-1).toLowerCase();
+  const presetLetter=()=>brandingPresets.find(preset=>preset.id===draft.preset)?.label||'a';
   function selectedName(){return draft.avatar_id?draft.avatars.find(item=>item.id===draft.avatar_id)?.name||'':draft.mode==='preset'?presetLetter():'';}
   function abortUpload(){uploadSequence++;reader?.abort();reader=null;}
-  function select(value){abortUpload();pendingAvatarId='';draft={...draft,...value};code.value=brandingSource(draft);avatarInput.value=selectedName();fileName.textContent='';changed();}
+  function select(value){abortUpload();pendingAvatarId='';draft={...draft,...value};code.value=brandingSource(draft);codeDetails.open=draft.mode!=='preset';avatarInput.value=selectedName();fileName.textContent='';changed();}
   function drawStrip(){
     const left=list.scrollLeft;list.replaceChildren();
     function choice(id,label,config,fn,title=label,removable=false){
@@ -35,8 +36,8 @@ export function brandingCard({card,actions,state,dirtyForm}) {
       if(removable){const remove=button('×',event=>{event.preventDefault();event.stopPropagation();removeAvatar(id,label);});remove.className='brand-avatar-delete';remove.setAttribute('aria-label','删除头像：'+label);remove.title='删除头像';option.append(remove);}
       list.append(option);
     }
-    for(const preset of brandingPresets)choice(preset.id,preset.id.slice(-1).toLowerCase(),{...defaultBranding,preset:preset.id},
-      ()=>select({mode:'preset',preset:preset.id,source:'',avatar_id:''}),preset.id+' '+preset.name);
+    for(const preset of brandingPresets)choice(preset.id,preset.label,{...defaultBranding,preset:preset.id},
+      ()=>select({mode:'preset',preset:preset.id,source:'',avatar_id:''}),preset.label+' · '+preset.name);
     choice('custom','自定义',null,()=>{select({mode:'custom',source:'',avatar_id:''});code.focus();});
     for(const item of draft.avatars)choice(item.id,item.name,{...defaultBranding,mode:item.mode,source:item.source},
       ()=>select({mode:item.mode,source:'',avatar_id:item.id}),item.name,true);
@@ -46,9 +47,9 @@ export function brandingCard({card,actions,state,dirtyForm}) {
   function reflect(){setCodeMode();sourceKind(brandingSource(draft));renderBrandLogo(preview,draft);previewBranding(draft);drawStrip();}
   function changed(){editing=true;state.dirty=true;feedback.replaceChildren();try{reflect();}catch(error){feedback.replaceChildren(message(error.message));}}
   function revealSelected(){const selected=list.querySelector('[aria-checked=true]');if(selected){const item=selected.getBoundingClientRect(),box=list.getBoundingClientRect();list.scrollLeft+=item.left-box.left-(list.clientWidth-item.width)/2;}}
-  function load(value){const before=draft.avatar_id||draft.preset;abortUpload();draft={...value};pendingAvatarId='';nameInput.value=draft.name;code.value=brandingSource(draft);avatarInput.value=selectedName();fileName.textContent='';setCodeMode();drawStrip();renderBrandLogo(preview,draft);if(!initialized||before!==(draft.avatar_id||draft.preset))requestAnimationFrame(()=>{if(form.isConnected)revealSelected();});initialized=true;}
+  function load(value){const before=draft.avatar_id||draft.preset;abortUpload();draft={...value};pendingAvatarId='';nameInput.value=draft.name;code.value=brandingSource(draft);codeDetails.open=draft.mode!=='preset';avatarInput.value=selectedName();fileName.textContent='';setCodeMode();drawStrip();renderBrandLogo(preview,draft);if(!initialized||before!==(draft.avatar_id||draft.preset))requestAnimationFrame(()=>{if(form.isConnected)revealSelected();});initialized=true;}
   async function removeAvatar(id,label){
-    if(busy||!confirm('删除头像「'+label+'」？'+(initial().avatar_id===id?' 当前使用的头像将恢复为默认 b。':'')))return;
+    if(busy||!confirm('删除头像「'+label+'」？'+(initial().avatar_id===id?' 当前使用的头像将恢复为默认 a · 流光蓝紫。':'')))return;
     if(reader){feedback.replaceChildren(message('图片正在读取，请稍候再删除。'));return;}
     const pending={...draft},pendingAlias=avatarInput.value,pendingName=nameInput.value;
     const nameEdited=pendingName!==initial().name,wasEditing=editing;
@@ -103,12 +104,12 @@ export function brandingCard({card,actions,state,dirtyForm}) {
     const type=chosen.type||({png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',svg:'image/svg+xml',webp:'image/webp',gif:'image/gif'}[chosen.name.split('.').pop().toLowerCase()]);
     if(!type?.startsWith('image/')){feedback.replaceChildren(message('请选择 PNG、JPG、SVG、WebP 等图片。'));file.value='';return;}
     const sequence=uploadSequence;reader=new FileReader();
-    reader.onload=()=>{if(sequence!==uploadSequence||!form.isConnected)return;const source=String(reader.result).replace(/^data:[^;]*;/,'data:'+type+';');draft={...draft,mode:'upload',source,avatar_id:''};pendingAvatarId='';code.value=source;avatarInput.value=chosen.name.replace(/\.[^.]+$/,'').slice(0,40);fileName.textContent=chosen.name;reader=null;changed();};
+    reader.onload=()=>{if(sequence!==uploadSequence||!form.isConnected)return;const source=String(reader.result).replace(/^data:[^;]*;/,'data:'+type+';');draft={...draft,mode:'upload',source,avatar_id:''};pendingAvatarId='';code.value=source;codeDetails.open=true;avatarInput.value=chosen.name.replace(/\.[^.]+$/,'').slice(0,40);fileName.textContent=chosen.name;reader=null;changed();};
     reader.onerror=()=>{if(sequence===uploadSequence){feedback.replaceChildren(message('图片读取失败，请重新选择。'));reader=null;}};
     reader.readAsDataURL(chosen);file.value='';
   });
   preview.addEventListener('brand-image-error',()=>feedback.replaceChildren(message('图片暂时无法读取，请检查地址或换一张图片。')));
-  form.append(name,list,el('div',{class:'brand-preview-row'},preview,avatarName,nameSave),codeLabel,
+  form.append(name,list,el('div',{class:'brand-preview-row'},preview,avatarName,nameSave),codeDetails,
     el('div',{class:'brand-upload-row'},button('上传本地图片',()=>file.click()),file,fileName),
     el('p',{class:'wb-note'},'代码框内“保存”将头像加入上方列表，头像名称旁“保存”确认名称。图片最多 8 MB，代码最多 65,536 个字符。'),feedback,
     actions(save));
@@ -116,5 +117,5 @@ export function brandingCard({card,actions,state,dirtyForm}) {
   form.onsubmit=event=>{event.preventDefault();persist(false);};
   form.addEventListener('brand-config-changed',()=>{if(!editing&&!busy)load(initial());});
   load(draft);
-  const result=card('',form);result.querySelector(':scope>h3')?.remove();result.classList.add('branding-card');return result;
+  const result=card('品牌与头像',form);result.classList.add('branding-card');return result;
 }

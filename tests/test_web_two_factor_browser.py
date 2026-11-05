@@ -13,7 +13,7 @@ def test_manual_enrollment_recovery_and_two_step_password_login(browser_context,
         before = conn.execute('SELECT COUNT(*) FROM global_messages').fetchone()[0]
     page = browser_context.new_page()
     ready(page, base, 'settings')
-    page.get_by_role('tab', name='Web 与安全', exact=True).click()
+    page.get_by_role('button', name='Web 与安全', exact=True).click()
     page.get_by_role('button', name='添加验证器', exact=True).wait_for()
     assert browser_context.request.get(base + '/api/security/2fa').json()['enabled'] is False
     page.get_by_role('button', name='添加验证器', exact=True).click()
@@ -54,7 +54,7 @@ def test_manual_enrollment_recovery_and_two_step_password_login(browser_context,
     page.screenshot(path=str(tmp_path / 'two-factor-enabled.png'))
     page.get_by_role('button', name='关闭两步验证', exact=True).click()
     page.get_by_label('当前访问密码', exact=True).fill(workspace_url['password'])
-    page.get_by_label('动态验证码或恢复码', exact=True).fill(result['recovery_codes'][1])
+    page.locator('#wb-dialog').get_by_label('动态验证码或恢复码', exact=True).fill(result['recovery_codes'][1])
     page.get_by_role('button', name='确认关闭', exact=True).click()
     page.get_by_role('button', name='添加验证器', exact=True).wait_for()
     assert browser_context.request.get(base + '/api/security/2fa').json()['enabled'] is False
@@ -68,7 +68,7 @@ def test_mobile_manual_key_layout_and_terminal_password_challenge(browser_contex
     page = browser_context.new_page()
     page.set_viewport_size({'width': 390, 'height': 844})
     ready(page, base, 'settings')
-    page.get_by_role('tab', name='Web 与安全', exact=True).click()
+    page.get_by_role('button', name='Web 与安全', exact=True).click()
     page.get_by_role('button', name='添加验证器', exact=True).click()
     page.get_by_label('当前访问密码', exact=True).fill(workspace_url['password'])
     with page.expect_response('**/api/security/2fa/setup') as setup:

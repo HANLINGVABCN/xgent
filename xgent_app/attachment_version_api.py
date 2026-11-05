@@ -71,10 +71,10 @@ class AttachmentVersionAPI:
             # Long disk work may overlap a context reset, archive or deletion.
             # Re-authorize before publishing a capability or downloaded bytes.
             _, _, _, _, session = await self.target(data)
-            allowed = not session['archived'] and record['id'] >= session['context_start_record_id']
+            allowed = record['id'] >= session['context_start_record_id']
             result.update(id=data['id'], filename=ref.get('name') or store.path.name,
                           conversation_id=session['id'], generation=session['generation'], can_restore=allowed)
-            result['restore_reason'] = ('' if allowed else '归档或旧上下文附件只能查看、下载；不能恢复到当前路径')
+            result['restore_reason'] = ('' if allowed else '旧上下文附件只能查看、下载；不能恢复到当前路径')
             return result
         raw, info = await asyncio.to_thread(store.read_version, data.get('version_id'))
         await self.target(data)
@@ -119,7 +119,7 @@ class AttachmentVersionAPI:
         ticket, success = None, False
         async with manager.file_maintenance_slot():
             db, record, ref, metadata, session = await self.target(data)
-            if session['generation'] != data['generation'] or session['archived'] or record['id'] < session['context_start_record_id']:
+            if session['generation'] != data['generation'] or record['id'] < session['context_start_record_id']:
                 raise VersionError('附件已不属于当前可编辑上下文，请刷新后确认')
             store = AttachmentVersions(self.upload_root, ref)
             try:
@@ -128,7 +128,7 @@ class AttachmentVersionAPI:
                     cursor = await conn.execute('SELECT archived,generation,context_start_record_id FROM chat_sessions WHERE id=?', (session['id'],))
                     checked = await cursor.fetchone()
                     await cursor.close()
-                    if checked['archived'] or checked['generation'] != data['generation'] or record['id'] < checked['context_start_record_id']:
+                    if checked['generation'] != data['generation'] or record['id'] < checked['context_start_record_id']:
                         raise VersionError('会话状态已改变，未恢复文件')
                     ticket = await asyncio.to_thread(store.prepare_restore, data.get('version_id'), data.get('fingerprint'))
                     info = inspect_version(ticket.data, ref)

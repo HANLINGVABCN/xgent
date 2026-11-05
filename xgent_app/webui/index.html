@@ -3,10 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>XGent Web Chat</title>
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f7f4">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#171d1a">
+<title>XGent</title>
 <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
-<script src="/vendor/telegram-web-app.js"></script>
-<script src="/vendor/marked.umd.js"></script>
+<script>try{const t=localStorage.getItem('xgent-theme'),p=localStorage.getItem('xgent-theme-palette');document.documentElement.dataset.theme=t==='dark'||(!t&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';document.documentElement.dataset.palette=['neon','slate','gold','mono','duo','forest'].includes(p)?p:'neon';}catch{document.documentElement.dataset.palette='neon';}</script>
+<script defer src="/vendor/telegram-web-app.js"></script>
+<script defer src="/vendor/marked.umd.js"></script>
+<link rel="stylesheet" href="/assets/design-system.css">
+<link rel="stylesheet" href="/assets/themes.css">
 <link rel="stylesheet" href="/assets/chat.css">
 <link rel="stylesheet" href="/assets/workbench.css">
 <link rel="stylesheet" href="/assets/conversations.css">
@@ -16,8 +21,9 @@
 <link rel="stylesheet" href="/assets/branding.css">
 </head>
 <body data-page="chat">
+<a class="skip-link" href="#input">跳到主要内容</a>
 
-<!-- SVG 精致图标库 -->
+<!-- Local icon symbols: no font or network icon dependency. -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <g id="i-menu"><path d="M3.5 7h17M3.5 12h17M3.5 17h11"/></g>
@@ -47,20 +53,26 @@
     <g id="i-undo"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></g>
     <g id="i-info"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></g>
     <g id="i-more"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></g>
-    <g id="i-terminal"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 8 3 3-3 3M13 15h4"/></g>
     <g id="i-file"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></g>
+    <g id="i-plus"><path d="M12 5v14M5 12h14"/></g>
+    <g id="i-upload"><path d="M12 16V3m-4 4 4-4 4 4M4 15v6h16v-6"/></g>
+    <g id="i-chart"><path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/></g>
+    <g id="i-archive"><path d="M4 8h16v12H4zM3 4h18v4H3zM10 12h4"/></g>
+    <g id="i-sidebar-hide"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16m7-11-3 3 3 3"/></g>
+    <g id="i-sidebar-show"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16m4-11 3 3-3 3"/></g>
   </defs>
 </svg>
 
-<aside id="wb-nav" aria-label="对话与工作台">
+<aside id="wb-nav" aria-label="对话与设置">
   <div class="conv-brand-row">
-    <a class="wb-brand" href="#/chat"><span class="wb-mark" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="29" height="29" alt=""></span><span data-brand-name>XGent</span></a>
-    <button id="conversation-drawer-close" class="conv-icon-button" type="button" aria-label="关闭对话列表" title="关闭对话列表"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+    <a class="wb-brand" href="#/chat" aria-label="返回对话"><span class="wb-mark" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="29" height="29" alt=""></span><span class="workspace-brand-text"><span data-brand-name>XGent</span></span></a>
+    <button id="conversation-drawer-toggle" class="conv-icon-button" type="button" aria-label="对话记录" title="收起对话列表" aria-controls="wb-nav" aria-expanded="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sidebar-hide"/></svg></button>
+    <button id="conversation-drawer-close" class="conv-icon-button" type="button" aria-label="关闭对话列表" title="关闭对话列表"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sidebar-hide"/></svg></button>
   </div>
-  <button id="conversation-new" class="conv-new" type="button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 5.5 18.5.5l5 5-5 5M16 3 5 14l-1 6 6-1L21 8M12 4H5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2v-7" transform="translate(1 0) scale(.86)"/></svg><span>新对话</span></button>
+  <button id="conversation-new" class="conv-new" type="button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg><span>新对话</span><span class="conv-new-arrow" aria-hidden="true">↗</span></button>
   <div class="conv-search-wrap">
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
-    <input id="conversation-search" type="search" aria-label="搜索对话名称和内容" placeholder="搜索对话名称和内容" maxlength="200" autocomplete="off" spellcheck="false">
+    <input id="conversation-search" type="search" aria-label="搜索对话名称和内容" placeholder="搜索对话" maxlength="200" autocomplete="off" spellcheck="false">
     <button id="conversation-search-clear" class="conv-icon-button" type="button" aria-label="清除对话搜索" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <div id="conversation-groups" class="conv-groups" aria-label="对话分组">
@@ -68,18 +80,17 @@
     <button id="conversation-group-new" class="conv-icon-button" type="button" aria-label="新建分组" title="新建分组">+</button>
     <button id="conversation-group-edit" class="conv-icon-button" type="button" aria-label="管理当前分组" title="管理当前分组">⋯</button>
   </div>
-  <div class="conv-section-head"><h2 id="conversation-list-title">最近对话</h2><button id="conversation-view-back" type="button" hidden>返回最近</button></div>
+  <div class="conv-section-head"><h2 id="conversation-list-title">最近对话</h2></div>
   <div id="conversation-sync-error" class="conv-sync-error" role="status" hidden></div>
   <div id="conversation-scroll" class="conv-scroll">
     <div id="conversation-list" aria-labelledby="conversation-list-title" aria-busy="true"><p class="conv-list-hint">正在加载对话…</p></div>
   </div>
   <div class="workspace-dock">
-    <button id="workspace-settings" type="button" aria-label="设置与工作台" aria-haspopup="menu" aria-controls="workspace-menu" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg><span>设置</span></button>
-    <div id="workspace-menu" role="menu" aria-label="设置与工作台" hidden>
-      <div class="workspace-menu-label">工作台</div>
-      <nav id="wb-nav-links" aria-label="工作台导航"></nav>
+    <button id="workspace-settings" type="button" aria-label="设置" data-route="settings"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg><span>设置</span><svg class="icon dock-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
+    <div id="workspace-menu" role="menu" aria-label="设置" hidden>
+      <div class="workspace-menu-label">设置</div>
+      <nav id="wb-nav-links" aria-label="设置选项"></nav>
       <div class="workspace-menu-label">对话与账户</div>
-  <button id="conversation-archive-view" class="conv-archive-link" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4zM3 4h18v4H3zM10 12h4"/></svg><span>已归档</span><span id="conversation-archive-count" class="conv-count" hidden></span></button>
       <button id="btn-search" type="button" role="menuitem" title="全局搜索 (Ctrl+F)" aria-label="全局搜索"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg><span>全局搜索</span></button>
       <button id="btn-settings" type="button" role="menuitem" aria-label="偏好与安全"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg><span>偏好与安全</span></button>
       <button id="wb-logout" type="button" role="menuitem" aria-label="退出登录"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H4v16h6M14 8l4 4-4 4M8 12h10"/></svg><span>退出登录</span></button>
@@ -88,17 +99,19 @@
 </aside>
 <div id="conversation-backdrop" aria-hidden="true" hidden></div>
 <div id="wb-shell">
-<div id="header">
-  <button id="conversation-drawer-toggle" class="conv-drawer-toggle icon-btn" type="button" aria-label="对话记录" title="展开或收起对话记录" aria-controls="wb-nav" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg></button>
+<header id="header" aria-label="当前页面">
+  <button id="conversation-mobile-toggle" class="conv-mobile-toggle icon-btn" type="button" aria-label="对话记录" title="展开对话列表" aria-controls="wb-nav" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sidebar-show"/></svg></button>
   <div class="header-info"><div class="header-text">
     <h1 id="wb-conversation-title" title="新对话">新对话</h1><span id="wb-page-title" hidden></span>
     <div class="bot-status" id="status-text"><span class="conn-dot" id="conn-dot"></span> 在线</div>
     <span class="bot-name" data-brand-name hidden>XGent</span><span id="bot-avatar" data-brand-logo hidden>X</span>
   </div><span id="conversation-current-status" class="conv-title-status" hidden>正在生成</span></div>
+  <button id="workspace-search-open" class="header-search" type="button" aria-label="搜索全部历史" title="全局搜索 (Ctrl / ⌘ F)"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg><span>搜索</span><kbd aria-hidden="true">⌘ F</kbd></button>
+  <span class="header-divider" aria-hidden="true"></span>
   <button id="btn-theme" class="icon-btn" type="button" title="切换主题" aria-label="切换主题"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-moon"/></svg></button>
   <button id="btn-terminal" class="icon-btn" type="button" title="终端" aria-label="终端"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-terminal"/></svg></button>
   <span class="model-pill" id="model-pill" hidden>AI</span>
-</div>
+</header>
 
 <!-- 查找栏 -->
 <div id="search-bar">
@@ -117,18 +130,19 @@
 <section id="wb-chat" aria-label="对话">
 <div id="conversation-running" class="conv-running" role="status" hidden></div>
 <div id="history-loading-state" role="status" hidden><span id="wb-history-state"></span><button id="history-retry" type="button" hidden>重试加载</button></div>
-<main id="log" aria-label="消息记录"></main>
+<main id="log" aria-label="消息记录" tabindex="-1"></main>
 
 <div id="empty-state" class="hidden">
-  <div class="mark"><svg class="icon" viewBox="0 0 24 24"><use href="#i-spark"/></svg></div>
+  <div class="empty-orbit" aria-hidden="true"><div class="mark"><svg class="icon" viewBox="0 0 24 24"><use href="#i-spark"/></svg></div><span class="orbit-dot"></span></div>
+  <p class="empty-eyebrow">一个想法，无限可能</p>
   <div class="title">把想法，变成行动。</div>
   <div class="desc">从一个问题开始，或让 Agent 帮你检查、构建和管理。所有结果在此汇聚。</div>
   <div class="chips">
-    <button class="chip" type="button" data-cmd="/start">▶ 打开主菜单</button>
-    <button class="chip" type="button" data-cmd="/status">ℹ 查看运行状态</button>
-    <button class="chip" type="button" data-cmd="/show_chat_info">📊 状态与记忆统计</button>
-    <button class="chip" type="button" data-cmd="/export">📦 导出记忆</button>
-    <button class="chip" type="button" data-cmd="/compress">压缩上下文</button>
+    <button class="chip" type="button" data-cmd="/start"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg><span>打开主菜单</span><span class="chip-arrow" aria-hidden="true">↗</span></button>
+    <button class="chip" type="button" data-cmd="/status"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-info"/></svg><span>查看运行状态</span><span class="chip-arrow" aria-hidden="true">↗</span></button>
+    <button class="chip" type="button" data-cmd="/show_chat_info"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chart"/></svg><span>状态与记忆统计</span><span class="chip-arrow" aria-hidden="true">↗</span></button>
+    <button class="chip" type="button" data-cmd="/export"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-archive"/></svg><span>导出记忆</span><span class="chip-arrow" aria-hidden="true">↗</span></button>
+    <button class="chip" type="button" data-cmd="/compress"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wrap"/></svg><span>压缩上下文</span><span class="chip-arrow" aria-hidden="true">↗</span></button>
   </div>
 </div>
 
@@ -138,7 +152,12 @@
 <button id="scroll-bottom" title="滚动到底部" aria-label="滚动到底部"><svg class="icon" viewBox="0 0 24 24"><use href="#i-down"/></svg></button>
 
 </section>
-<section id="wb-page" tabindex="-1" hidden></section>
+<section id="wb-page" tabindex="-1" aria-label="设置" hidden>
+  <div class="settings-layout">
+    <div id="settings-navigation"></div>
+    <main id="settings-content" tabindex="-1" aria-label="设置内容"></main>
+  </div>
+</section>
 <!-- 全局拖拽遮罩 -->
 <div id="drop-overlay">
   <div class="drop-box">
@@ -164,7 +183,7 @@
   </div>
 </div>
 
-<footer>
+<footer aria-label="消息输入">
   <div id="composer">
     <section id="message-queue" aria-label="待发消息" hidden></section>
     <div class="composer-card">
@@ -177,7 +196,7 @@
         <input type="file" id="server-upload-input" class="hidden" multiple>
         <button id="btn-composer-menu" class="icon-btn" type="button" title="命令菜单 (Ctrl / ⌘ K)" aria-label="命令菜单" aria-expanded="false" aria-controls="composer-commands"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg></button>
         <button id="btn-attach" class="icon-btn" title="添加附件或拖入文件" aria-label="附件"><svg class="icon" viewBox="0 0 24 24"><use href="#i-attach"/></svg></button>
-        <button id="btn-server-upload" class="icon-btn" type="button" title="上传到服务器并同步 Telegram，仅将路径交给 AI" aria-label="上传到服务器">上传</button>
+        <button id="btn-server-upload" class="icon-btn" type="button" title="上传到服务器并同步 Telegram，仅将路径交给 AI" aria-label="上传到服务器"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-upload"/></svg><span>上传</span></button>
         <div id="wb-chat-controls" aria-label="模型与生成设置"></div>
         <button id="btn-send" class="send-btn" disabled title="发送消息 (Enter)" aria-label="发送"><svg class="icon" viewBox="0 0 24 24"><use href="#i-send"/></svg></button>
         <button id="btn-stop" class="stop-btn hidden" title="停止生成" aria-label="停止"><svg class="icon" viewBox="0 0 24 24"><use href="#i-stop"/></svg></button>
@@ -187,6 +206,7 @@
     <p id="composer-option-error" role="status" hidden></p>
     <section id="composer-commands" aria-label="命令列表" hidden></section>
     <div id="cmd-suggest" class="cmd-suggest hidden"></div>
+    <div class="composer-footnote"><span>支持附件与 / 命令</span><span id="composer-keyboard-hint">Enter 发送 · Shift Enter 换行</span></div>
   </div>
 </footer>
 
@@ -196,7 +216,7 @@
     <button id="btn-close-terminal" class="icon-btn" title="返回聊天" aria-label="返回聊天"><svg class="icon" viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
     <strong data-brand-name data-brand-suffix=" 终端控制台">XGent 终端控制台</strong>
   </div>
-  <iframe id="terminal-iframe" src="about:blank"></iframe>
+  <iframe id="terminal-iframe" src="about:blank" title="服务器终端"></iframe>
 </div>
 
 <!-- 设置面板 -->
@@ -208,7 +228,7 @@
   <div class="settings-body">
     <div class="section-label">对话与思考参数</div>
     <div class="card" id="settings-rows"></div>
-    <p class="hint">配置改动即时生效并同步至 Telegram。模型提供商与 API Key 请在 Telegram 中管理。</p>
+    <p class="hint">配置改动即时生效并同步至 Telegram。模型提供商与 API Key 可在「模型与技能」中管理。</p>
     <button id="btn-logout" class="btn-danger-row">退出登录</button>
   </div>
 </div>
@@ -216,7 +236,7 @@
 </div>
 <aside id="wb-detail" aria-label="详情" hidden><div id="wb-resizer" role="separator" aria-label="调整详情宽度" tabindex="0"></div><header><span id="wb-detail-title">详情</span><button id="wb-detail-close" aria-label="关闭详情">×</button></header><div id="wb-detail-body"></div></aside>
 
-<dialog id="wb-dialog" aria-labelledby="wb-dialog-title"><header><h2 id="wb-dialog-title"></h2><button id="wb-dialog-close" aria-label="关闭">×</button></header><div id="wb-dialog-body"></div></dialog>
+<dialog id="wb-dialog" aria-labelledby="wb-dialog-title"><header><h2 id="wb-dialog-title"></h2><button id="wb-dialog-close" class="icon-btn" type="button" aria-label="关闭"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header><div id="wb-dialog-body"></div></dialog>
 <div id="conversation-item-menu" class="conv-item-menu" role="menu" aria-label="对话操作" hidden></div>
 <dialog id="conversation-rename-dialog" class="conv-dialog" aria-labelledby="conversation-rename-title">
   <form id="conversation-rename-form">
@@ -229,22 +249,24 @@
 </dialog>
 <div id="conversation-feedback" class="conv-feedback" role="status" aria-live="polite" hidden></div>
 <!-- 登录弹窗 -->
-<dialog id="login">
+<dialog id="login" aria-labelledby="login-title">
+  <div class="login-context" aria-hidden="true"><span class="login-eyebrow" data-brand-name>XGent</span><div class="login-orbit"><span></span><svg class="icon" viewBox="0 0 24 24"><use href="#i-spark"/></svg></div><p>从想法，到行动。</p><small>对话 · 工具 · 知识 · 创作</small></div>
   <div class="login-card">
     <div class="login-icon" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="58" height="58" alt=""></div>
-    <h2 data-brand-name data-brand-suffix=" Web">XGent Web</h2>
+    <h2 id="login-title" data-brand-name data-brand-suffix=" Web">XGent Web</h2>
     <p class="login-sub" id="login-sub">请输入访问密码以继续</p>
-    <div class="err" id="login-err"></div>
-    <input type="password" id="password" placeholder="访问密码" autocomplete="current-password">
-    <input type="text" id="login-code" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
+    <div class="err" id="login-err" role="alert"></div>
+    <input type="password" id="password" aria-label="访问密码" placeholder="访问密码" autocomplete="current-password">
+    <input type="text" id="login-code" aria-label="动态验证码或恢复码" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
     <button type="button" id="login-back" class="login-sub" hidden>返回密码登录</button>
-    <button class="btn-primary" id="btn-login">登 录</button>
+    <button class="btn-primary" id="btn-login" type="button">登录 <span aria-hidden="true">→</span></button>
   </div>
   <div class="login-foot" id="login-foot">在 Telegram 中通过菜单按钮打开可免密直接登录</div>
 </dialog>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
+<script type="module" src="/assets/workspace-shell.js"></script>
 <script type="module" src="/assets/chat.js"></script>
 <script type="module" src="/assets/conversations.js"></script>
 <script type="module" src="/assets/workbench.js"></script>

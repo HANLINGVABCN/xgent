@@ -130,6 +130,30 @@ def test_busy_submit_cancel_edit_batch_preview_and_no_log_jump(queue_browser, tm
         page.screenshot(path=str(tmp_path / f'queue-{width}-{theme}.png'))
 
 
+def test_busy_attachment_submission_is_enabled_and_enters_pending_queue(queue_browser):
+    from concurrent.futures import Future
+    from pathlib import Path
+    server,page,_,base,state=queue_browser
+    accepted=[]
+    def submit(data,mode,outbox,**options):
+        accepted.append({'text':data['text'],'queue':data.get('queue'),'files':[Path(file['path']).read_bytes() for file in data['files']]})
+        data['_temporary'].cleanup()
+        item={'id':'queued-file','conversation_id':'A','generation':0,'revision':1,'seq':1,'origin':'web',
+              'status':'pending','reason':'waiting','text':data['text'],'files':[{'filename':'queued.txt','size':9,'order':0}]}
+        state['items']['A'].append(item);state['revision']+=1
+        receipt=Future();receipt.set_result({'ok':True,'queued':True,**item});return receipt
+    server.config.submit_file_batch=submit
+    ready(page,base);before=page.locator('#log>.msg-row').count()
+    page.locator('#file-input').set_input_files({'name':'queued.txt','mimeType':'text/plain','buffer':b'FULL FILE'})
+    page.locator('#input').fill('文件也能排队')
+    assert page.locator('#btn-stop').is_visible() and page.locator('#btn-send').is_enabled()
+    page.locator('#btn-send').click();page.locator('.queue-files').wait_for()
+    assert page.locator('.queue-files').inner_text()=='📎 queued.txt'
+    assert accepted==[{'text':'文件也能排队','queue':'1','files':[b'FULL FILE']}]
+    assert page.locator('#log>.msg-row').count()==before
+    assert page.locator('#btn-stop').is_visible()
+
+
 @pytest.mark.parametrize('action,label', [('edit','编辑'),('cancel','❌ 取消')])
 def test_recovery_after_switch_restores_original_draft_not_current_view(queue_browser, action, label):
     _, page, _, base, state = queue_browser
@@ -174,7 +198,7 @@ def test_lost_submit_response_uses_same_request_id_and_attachment_not_partially_
     assert len(state['items']['A']) == 1
     page.locator('#file-input').set_input_files({'name': 'fixture.txt', 'mimeType': 'text/plain', 'buffer': b'fixture'})
     page.locator('#input').fill('带附件的文字不能单独入队')
-    assert page.locator('#btn-send').is_disabled()
+    assert page.locator('#btn-send').is_enabled()
     assert len(requests) == 2
 
 

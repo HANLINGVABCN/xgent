@@ -59,7 +59,7 @@ def test_group_pins_are_isolated_and_switching_groups_never_switches_chat(
 def test_backup_ui_is_explicit_separate_from_chat(browser_context, workspace_url):
     page = browser_context.new_page()
     ready(page, workspace_url["url"], "settings")
-    page.get_by_role("tab", name="数据与备份", exact=True).click()
+    page.get_by_role("button", name="数据与备份", exact=True).click()
     page.get_by_role("button", name="立即压缩", exact=True).wait_for()
     checkbox = page.get_by_role("checkbox", name="导出 命令完整输出", exact=True)
     assert not checkbox.is_checked()

@@ -1,42 +1,14 @@
 import {affectedPages} from './page-cache.js';
-export const $ = (id) => document.getElementById(id);
-export function el(tag, attrs={}, ...children) {
-  const node=document.createElement(tag);
-  for(const [k,v] of Object.entries(attrs)) {
-    if(k==='class')node.className=v;
-    else if(k==='text')node.textContent=v;
-    else if(k.startsWith('on'))node.addEventListener(k.slice(2),v);
-    else if(k==='checked'||k==='disabled'||k==='hidden'||k==='selected')node[k]=!!v;
-    else if(v!==null&&v!==undefined)node.setAttribute(k,v);
-  }
-  for(const child of children.flat())if(child!==null&&child!==undefined)node.append(child instanceof Node?child:document.createTextNode(String(child)));
-  return node;
-}
-export const button=(text,fn,kind='')=>el('button',{class:'wb-btn '+kind,type:'button',onclick:fn},text);
-export const fmt=n=>n==null?'—':Number(n).toLocaleString('zh-CN');
-export const stamp=n=>n?new Date(n*1000).toLocaleString('zh-CN',{hour12:false}):'—';
-export const bytes=n=>n==null?'—':n>1048576?(n/1048576).toFixed(1)+' MiB':n>1024?(n/1024).toFixed(1)+' KiB':n+' B';
-export const message=(text,kind='error')=>el('div',{class:'wb-'+kind,role:kind==='error'?'alert':'status'},text);
-export const empty=(title,detail,action)=>el('div',{class:'wb-empty'},el('span',{class:'wb-empty-icon'},'◇'),el('h3',{},title),el('p',{},detail),action);
-export function field(label,name,value='',type='text',note='') {
-  const input=el(type==='textarea'?'textarea':'input',{name,type:type==='textarea'?null:type});input.value=value??'';
-  return el('label',{class:'wb-field'},el('span',{},label),input,note?el('small',{},note):null);
-}
-export function select(label,name,options,value) {
-  const input=el('select',{name},options.map(o=>el('option',{value:o.value??o,selected:(o.value??o)===value},o.label??o)));
-  return el('label',{class:'wb-field'},el('span',{},label),input);
-}
-export function check(label,name,value=false){return el('label',{class:'wb-check'},el('input',{name,type:'checkbox',checked:value}),label);}
-export function table(headings,rows){return el('div',{class:'wb-table-wrap'},el('table',{class:'wb-table'},el('thead',{},el('tr',{},headings.map(x=>el('th',{},x)))),el('tbody',{},rows.map(row=>el('tr',{},row.map(x=>el('td',{},x)))))));}
-export function formData(form){const data=Object.fromEntries(new FormData(form));form.querySelectorAll('input[type=checkbox]').forEach(x=>data[x.name]=x.checked);return data;}
+import {el,message} from './ui.js';
+export {$,el,button,fmt,stamp,bytes,message,empty,field,select,check,table,formData} from './ui.js';
 export async function api(path,{data,signal,...options}={}) {
   const cid=window.XGentConversations?.current;
   let requestPath=path;
-  if(cid&&path.startsWith('/api/workbench/')&&!path.includes('/conversations')){
+  if(cid&&!window.XGentConversations?.readOnly&&path.startsWith('/api/workbench/')&&!path.includes('/conversations')){
     if(data===undefined){if(!new URL(path,location.origin).searchParams.has('conversation_id')&&['history','search','tasks','artifacts'].some(name=>path.startsWith('/api/workbench/'+name)))requestPath+= (path.includes('?')?'&':'?')+'conversation_id='+encodeURIComponent(cid);}
     else data={conversation_id:cid,...data};
   }
-  const affected=data===undefined?[]:affectedPages(path,data?.key);
+  const affected=data===undefined?[]:affectedPages(path,Array.isArray(data?.items)?data.items.map(item=>item?.key):data?.key);
   const changed=()=>{if(affected.length)window.dispatchEvent(new CustomEvent('xgent-workbench-change',{detail:{pages:affected}}));};
   // Invalidate both before and after: an in-flight read cannot make partial/late writes fresh.
   changed();

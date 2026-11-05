@@ -42,17 +42,22 @@ def test_native_link_opens_new_tab_without_switching_source(browser_context, wor
     other.close()
 
 
-def test_copied_url_opens_archived_conversation_read_only(browser_context, workspace_url):
+def test_copied_archive_url_opens_settings_entry_and_can_continue_without_restoring(browser_context, workspace_url):
     base = workspace_url['url']
-    cid = create(browser_context, base, '复制地址和归档只读')
+    cid = create(browser_context, base, '复制归档地址需要从设置进入')
     page = open_chat(browser_context, base, cid)
     copied = page.url
     response = browser_context.request.post(base + '/api/workbench/conversations/archive', data={'id': cid})
     assert response.ok
     other = browser_context.new_page()
     other.goto(copied)
-    other.wait_for_function('(id)=>window.XGentConversations?.current===id && window.XGentConversations.readOnly', arg=cid)
-    assert other.locator('#btn-send').is_disabled()
+    entry=other.locator('.archive-row[data-conversation-id="'+cid+'"]')
+    entry.wait_for()
+    assert other.evaluate('document.body.dataset.page')=='settings'
+    entry.get_by_role('button',name='进入对话',exact=True).click()
+    other.wait_for_function('(id)=>window.XGentConversations?.current===id&&document.body.dataset.page==="chat"',arg=cid)
+    other.wait_for_function('!document.querySelector("#btn-send").disabled')
+    assert not other.evaluate('window.XGentConversations.readOnly')
     assert page.url == copied
     page.close()
     other.close()

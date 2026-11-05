@@ -294,8 +294,9 @@ class ChildConversationTests(unittest.IsolatedAsyncioTestCase):
         await self.db.set_config('conversation_schema_version', 9)
         await self.db.backup_legacy_conversations()
         await self.db.migrate_conversations()
-        self.assertEqual(10, await self.db.get_config_fresh('conversation_schema_version'))
-        self.assertTrue(Path(self.path + '.pre-conversations-v10.sqlite3').is_file())
+        from xgent_app.conversations import SCHEMA_VERSION
+        self.assertEqual(SCHEMA_VERSION, await self.db.get_config_fresh('conversation_schema_version'))
+        self.assertTrue(Path(self.path + f'.pre-conversations-v{SCHEMA_VERSION}.sqlite3').is_file())
         self.assertEqual('global_memory', (await self.db.get_session(branch))['parent_conversation_id'])
         self.assertIsNone((await self.db.get_session(branch))['owner_conversation_id'])
         self.assertEqual([], await descendant_ids(await self.db._get_conn(), 'global_memory'))

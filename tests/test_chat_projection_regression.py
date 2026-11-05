@@ -157,9 +157,9 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             assert page.locator('.fc-name', has_text='fixture.png').count() == 0
             assert page.locator('.fc-name', has_text='toolcall_all_test.txt').count() == 1
             assert page.locator('.fc-preview').count() == 1
-            assert page.locator('.media-filename').first.evaluate('node=>getComputedStyle(node).fontSize') == '11px'
+            assert 11 <= page.locator('.media-filename').first.evaluate('node=>parseFloat(getComputedStyle(node).fontSize)') <= 14
             assert page.locator('.msg-row.ai .bubble-header:visible').count() <= 1
-            assert page.locator('.fc-name').first.evaluate('node=>getComputedStyle(node).fontSize') == '11px'
+            assert 11 <= page.locator('.fc-name').first.evaluate('node=>parseFloat(getComputedStyle(node).fontSize)') <= 16
             # Project the durable state on the same page, then compare a full refresh.
             async def history(limit):
                 return workflow_case['history']

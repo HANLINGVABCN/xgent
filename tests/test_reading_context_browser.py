@@ -16,7 +16,8 @@ def test_compact_header_fonts_and_options(browser_context,workspace_url,size,tmp
     page.wait_for_function('window.XGentAppearance && document.querySelectorAll("#log .msg-row").length>0')
     page.evaluate('window.XGentAppearance.save(window.XGentAppearance.defaults)')
     metrics=page.locator('#log').bounding_box()
-    assert metrics['y']==56
+    header=page.locator('#header').bounding_box()
+    assert abs(metrics['y']-(header['y']+header['height']))<1
     if size==(360,640):assert metrics['height']>=390
     assert page.locator('.bubble').first.evaluate('(e)=>getComputedStyle(e).fontSize')=='16px'
     assert page.locator('#btn-menu,#menu-panel').count()==0

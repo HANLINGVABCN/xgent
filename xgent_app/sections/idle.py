@@ -892,6 +892,17 @@ async def start_external_sync_watcher(outbox: Any = None, app: Any = None) -> No
 
 
 @conversation_entry()
+async def _web_read_settings_revision() -> int:
+    """只读外观 revision 的轻量回调，供 /api/config?since= 做未变化短路。
+
+    完整的 _web_read_settings 要跑 providers 循环、技能目录扫描和价格表解析；
+    跨端同步轮询大多数时候只需要知道"变没变"。
+    """
+    appearance = await read_appearance(await BotMemoryDB.get_instance(), include_branding=False)
+    return appearance['revision']
+
+
+@conversation_entry()
 async def _web_read_settings() -> Dict[str, Any]:
     """返回当前值 + 下拉框选项，供网页渲染设置面板。"""
     await UserDataManager.init()
@@ -1669,10 +1680,21 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
     try:
         db = await BotMemoryDB.get_instance()
         generation = await db.get_attachment_generation()
-        key = data.get('idempotency_key')
+        if data.get('queue') in (True,'1') and data.get('generation') is not None and str(data['generation'])!=str(generation):
+            raise ConversationChanged('上下文已改变，本批附件尚未入队，请确认后重新发送。')
+        key = data.get('idempotency_key') or uuid.uuid4().hex
         signature = hashlib.sha256(json.dumps([mode, data.get('modes', ''), data.get('text', ''), data.get('captions', ''),
             [(f['filename'], f['size'], f['sha256']) for f in data['files']]], ensure_ascii=False).encode()).hexdigest()
         if key:
+            queued=await db.queue_request('web-file:'+key)
+            if queued and queued.get('kind')=='chat':
+                from xgent_app.queue_store import item_metadata
+                from xgent_app.message_queue import public_item
+                item=queued['item']
+                if item_metadata(item).get('upload_signature')!=signature:
+                    raise ValueError('相同上传标识对应不同文件，请重新提交')
+                receipt.set_result({'ok':True,'queued':True,'duplicate':True,**public_item(item)})
+                return
             conn = await db._get_conn()
             cursor = await conn.execute("SELECT id,metadata FROM global_messages WHERE session_id=? AND json_extract(metadata,'$.upload_request_key')=? LIMIT 1",
                                        (current_scope().conversation_id, key))
@@ -1740,6 +1762,20 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
                        *[p['attachment'] for p in payloads if p['mode'] == 'server_upload']]
         if upload_refs:
             metadata['server_uploads'] = upload_refs
+        if state==BotState.IDLE and data.get('queue') in (True,'1'):
+            from xgent_app.message_queue import public_item
+            metadata.update(attachments=attachment_refs,attachment_generation=generation,queue_file_message=True)
+            queue=get_text_queue()
+            item=await queue.submit(content,chat_id=BotConfig.AUTHORIZED_USER_ID,request_key='web-file:'+key,
+                metadata=metadata,draft_revision=draft_row['created_at'] if draft_row else None)
+            committed=True
+            receipt.set_result({'ok':True,'queued':True,**public_item(item)})
+            get_conversations().start()
+            try:
+                await queue.poll()
+            except Exception:
+                logger.exception('附件已保存到待发队列，唤醒暂失败；后台轮询将重试')
+            return
         if attachment_refs:
             row_id = await GlobalRecorder.record_attachment_message(content, MessageType.USER_FILE,
                 BotConfig.AUTHORIZED_USER_ID, attachment_refs, generation, metadata=metadata)
@@ -1809,7 +1845,7 @@ def _web_submit_file_batch(data, mode, outbox, *, conversation_id=None):
     async def receive():
         try:
             await _web_scoped_call(_web_run_file_batch(data, mode, outbox, receipt), conversation_id,
-                outbox, execution=True)
+                outbox, execution=lambda:not(data.get('queue') in (True,'1') and UserDataManager.get('state')==BotState.IDLE))
         except Exception as exc:
             logger.exception('Web 文件批次接纳失败')
             if not receipt.done():
@@ -2087,6 +2123,7 @@ async def start_web_chat_if_enabled(app: Optional[Any] = None, *,
         read_conversations=get_conversations().state,
         read_history_message=_web_read_history_message,
         read_settings=_web_read_settings,
+        read_settings_revision=_web_read_settings_revision,
         read_branding=_web_read_branding,
         write_setting=_web_write_setting,
         # 分通道健康详情。同步回调（runtime.runtime_health 不 await 任何东西）：

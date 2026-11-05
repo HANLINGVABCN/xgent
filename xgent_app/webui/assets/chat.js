@@ -1,6 +1,8 @@
+import {svgIcon,escapeHtml,highlightCode,sanitizeHtml,htmlWithLineBreaks,renderMarkdown,renderText,renderBubbleBody} from './chat-view.js';
 import {syncAskForm} from './ask-form.js';
 import {installCommandSeries} from './command-series.js';
 import {decorateBrandAuthor} from './branding.js';
+import {initializeTheme} from './theme.js';
 (function () {
   "use strict";
 
@@ -89,10 +91,6 @@ import {decorateBrandAuthor} from './branding.js';
     recoveredEdits=new Set(JSON.parse(sessionStorage.getItem('xgent_queue_recovered')||'[]'));
   }catch(e){}
 
-  function svgIcon(name, cls) {
-    return '<svg class="icon' + (cls ? " " + cls : "") + '" viewBox="0 0 24 24"><use href="#i-' + name + '"/></svg>';
-  }
-
   function triggerHaptic(type) {
     try {
       if (tg && tg.HapticFeedback) {
@@ -103,25 +101,7 @@ import {decorateBrandAuthor} from './branding.js';
     } catch (e) {}
   }
 
-  function applyTheme(dark) {
-    document.body.classList.toggle("dark", dark);
-    btnTheme.innerHTML = svgIcon(dark ? "sun" : "moon");
-  }
-  var savedTheme = null;
-  try { savedTheme = localStorage.getItem("xgent-theme"); } catch(e) {}
-  if (savedTheme === "dark" || savedTheme === "light") {
-    applyTheme(savedTheme === "dark");
-  } else if (tg && tg.colorScheme) {
-    applyTheme(tg.colorScheme === "dark");
-  } else {
-    applyTheme(!!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches));
-  }
-  btnTheme.addEventListener("click", function () {
-    var isDark = !document.body.classList.contains("dark");
-    applyTheme(isDark);
-    try { localStorage.setItem("xgent-theme", isDark ? "dark" : "light"); } catch(e) {}
-    triggerHaptic();
-  });
+  initializeTheme({telegram:tg,toggle:btnTheme,onToggle:triggerHaptic});
 
   var COMMAND_GROUPS = [
     {
@@ -238,217 +218,6 @@ import {decorateBrandAuthor} from './branding.js';
         legacy();
       }
     });
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-
-  // 高亮词法片段。用正则字面量 + .source 拼装，避免 new RegExp 里的双重转义。
-  var HL_STR_RE = /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/;
-  var HL_KWD_RE = /\b(?:def|class|return|import|from|if|elif|else|for|while|try|except|finally|async|await|with|as|lambda|yield|function|const|let|var|switch|case|break|continue|default|new|throw|typeof|instanceof|interface|type|enum|public|private|static|void|int|string|bool|SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|JOIN|GROUP|ORDER|BY|LIMIT|CREATE|TABLE)\b/;
-  var HL_NUM_RE = /\b\d+(?:\.\d+)?\b/;
-  var HL_HASH_LANGS = /^(?:py|python|bash|sh|shell|zsh|yaml|yml|rb|ruby|toml|ini|conf|dockerfile|makefile)$/;
-
-  function hlRegex(commentRe) {
-    return new RegExp(
-      "(" + HL_STR_RE.source + ")|(" + commentRe.source + ")|(" +
-      HL_KWD_RE.source + ")|(" + HL_NUM_RE.source + ")", "g");
-  }
-  var HL_RE_HASH = hlRegex(/#[^\n]*/);
-  var HL_RE_SLASH = hlRegex(/\/\/[^\n]*|\/\*[\s\S]*?\*\//);
-
-  // 单遍扫描"原始源码"，只在拼接时对叶子文本转义。
-  // 旧实现是先整体 escapeHtml、再对结果反复 replace，于是自己注入的
-  // <span class="hl-str"> 会被关键字表里的 class 再匹配一次（产出
-  // <span <span class="hl-kwd">class</span>="hl-str">），转义出来的 &#39;
-  // 里的 39 也会被数字规则吃掉。扫原文就没有这两类自噬。
-  function highlightCode(code, lang) {
-    lang = (lang || "").toLowerCase().trim();
-    var re = HL_HASH_LANGS.test(lang) ? HL_RE_HASH : HL_RE_SLASH;
-    var out = "", last = 0, m;
-    re.lastIndex = 0;   // 模块级 /g 正则跨调用复用，必须重置
-    while ((m = re.exec(code)) !== null) {
-      out += escapeHtml(code.slice(last, m.index));
-      var cls = m[1] ? "hl-str" : m[2] ? "hl-cmt" : m[3] ? "hl-kwd" : "hl-num";
-      out += '<span class="' + cls + '">' + escapeHtml(m[0]) + "</span>";
-      last = m.index + m[0].length;
-    }
-    return out + escapeHtml(code.slice(last));
-  }
-
-  var ALLOWED = {
-    B:1, STRONG:1, I:1, EM:1, U:1, INS:1, S:1, STRIKE:1, DEL:1, CODE:1, PRE:1, BR:1, A:1, BLOCKQUOTE:1,
-    TABLE:1, THEAD:1, TBODY:1, TR:1, TH:1, TD:1, DIV:1, SPAN:1, P:1,
-    H1:1, H2:1, H3:1, H4:1, H5:1, H6:1, UL:1, OL:1, LI:1, HR:1,
-    // Telegram 原生剧透 / 自定义 emoji：渲染器当前不产出，但模型可能原样输出。
-    // 收进白名单后剧透文字才不会被“拆标签”直接摊开（配合 CSS 模糊 + 点击揭示）；
-    // 自定义元素在 HTML 文档里 tagName 会大写化，故键名写成 TG-SPOILER/TG-EMOJI。
-    "TG-SPOILER":1, "TG-EMOJI":1
-  };
-
-  // 把 marked 的标准输出对齐到本项目既有的 CSS，省得为了一个解析器去改整套样式。
-  // 三件事都必须在"剥属性"之前做完——align / style / type 随后都会被清掉。
-  function normalizeMarkdownNode(c) {
-    // 1) GFM 任务列表：marked 出 <input type=checkbox disabled>，本项目是 .task-checkbox
-    if (c.tagName === "INPUT") {
-      if (c.getAttribute("type") !== "checkbox") return false;
-      // 用 hasAttribute 而不是 .checked：marked 出的是 checked 属性，
-      // 而 .checked 这个 IDL 属性在非浏览器 DOM 实现里不一定跟着属性走。
-      var checked = c.hasAttribute("checked");
-      var box = document.createElement("span");
-      box.className = "task-checkbox" + (checked ? " checked" : "");
-      if (checked) box.textContent = "✓";
-      var li = c.parentNode;
-      c.parentNode.replaceChild(box, c);
-      // 样式挂在 .task-item 上，而 marked 并不给 <li> 加 class（松散列表时
-      // checkbox 还会多包一层 <p>），所以往上找到 LI 自己补。
-      while (li && li.tagName !== "LI") li = li.parentNode;
-      if (li && li.classList) li.classList.add("task-item");
-      return true;   // 已替换，调用方不要再往下走
-    }
-    // 2) 任务项样式类对齐（部分 marked 版本会给 task-list-item）
-    if (c.tagName === "LI" && c.classList.contains("task-list-item")) c.classList.add("task-item");
-    // 3) 表格列对齐：属性会被剥掉，先落到 class 上
-    if (c.tagName === "TH" || c.tagName === "TD") {
-      var al = c.getAttribute("align") || (c.style && c.style.textAlign);
-      if (al) c.classList.add("ta-" + al);
-    }
-    // 4) 宽表格的横向滚动容器。marked 只出裸 <table>，而 overflow-x 挂在
-    //    .table-wrap 上，少了它宽表格会直接撑破气泡。
-    if (c.tagName === "TABLE" && !(c.parentNode && c.parentNode.className === "table-wrap")) {
-      var tw = document.createElement("div");
-      tw.className = "table-wrap";
-      c.parentNode.insertBefore(tw, c);
-      tw.appendChild(c);
-    }
-    return false;
-  }
-
-  function sanitizeHtml(htmlStr) {
-    // Parse inertly: a detached DIV can still fetch IMG URLs and fire onerror
-    // before its forbidden attributes/nodes are removed. Template contents cannot.
-    var tmp = document.createElement("template");
-    tmp.innerHTML = String(htmlStr);
-    (function clean(node) {
-      Array.prototype.slice.call(node.childNodes).forEach(function (c) {
-        if (c.nodeType === 3) return;
-        if (c.nodeType !== 1) { node.removeChild(c); return; }
-        if (/^(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|SVG|MATH|TEMPLATE|LINK|META)$/.test(c.tagName)) {
-          node.removeChild(c);
-          return;
-        }
-        if (normalizeMarkdownNode(c)) return;
-        if (!ALLOWED[c.tagName]) {
-          clean(c);
-          var frag = document.createDocumentFragment();
-          while (c.firstChild) frag.appendChild(c.firstChild);
-          c.parentNode.replaceChild(frag, c);
-          return;
-        }
-        Array.prototype.slice.call(c.attributes).forEach(function (a) {
-          if (c.tagName === "A" && a.name === "href") {
-            if (!/^(https?:|mailto:)/i.test(a.value)) c.removeAttribute(a.name);
-          } else if (c.tagName === "A" && (a.name === "target" || a.name === "rel")) {
-          } else if (c.tagName === "BLOCKQUOTE" && (a.name === "expandable" || a.name === "data-raw" || a.name === "data-output-path" || ['data-protocol','data-state','data-preview','data-operation-details'].includes(a.name) || (a.name === "data-web-fold" && a.value === "1") || (a.name === "data-compact" && a.value === "1"))) {
-            // 保留：服务端 render_folded_html 用 <blockquote expandable> 标记
-            // 「可展开折叠的协议代码块」（与电报原生 expandable 同源），网页据此做
-            // 折叠交互（CSS blockquote[expandable] + bindContentClicks 里的点击切换）。
-          } else if (a.name === "class") {
-            var classes = a.value.split(/\s+/).filter(function (name) {
-              return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note|file-write-result|stop-notice)$/.test(name);
-            });
-            if (classes.length) c.setAttribute("class", classes.join(" "));
-            else c.removeAttribute("class");
-          } else {
-            c.removeAttribute(a.name);
-          }
-        });
-        if (c.tagName === "A") { c.target = "_blank"; c.rel = "noopener noreferrer"; }
-        clean(c);
-      });
-    })(tmp.content);
-    return tmp.innerHTML;
-  }
-
-  function htmlWithLineBreaks(htmlStr) {
-    var tmp = document.createElement("div");
-    tmp.innerHTML = htmlStr;
-    (function visit(node) {
-      if (/^(PRE|CODE)$/.test(node.tagName)) return;
-      Array.prototype.slice.call(node.childNodes).forEach(function (c) {
-        if (c.nodeType === 1) { visit(c); return; }
-        if (c.nodeType !== 3 || c.nodeValue.indexOf("\n") < 0) return;
-        if (/^(TABLE|THEAD|TBODY|TR|UL|OL)$/.test(node.tagName)) return;
-        // Formatting whitespace next to a block is not another visible blank
-        // paragraph. Leave the original text node intact instead of adding BRs.
-        if (/^\s*$/.test(c.nodeValue) && [c.previousSibling,c.nextSibling].some(function(s){
-          return s && /^(PRE|BLOCKQUOTE|DIV|TABLE|UL|OL|P|H[1-6]|HR)$/.test(s.tagName);
-        })) return;
-        var frag = document.createDocumentFragment();
-        c.nodeValue.split("\n").forEach(function (line, i) {
-          if (i) frag.appendChild(document.createElement("br"));
-          frag.appendChild(document.createTextNode(line));
-        });
-        c.parentNode.replaceChild(frag, c);
-      });
-    })(tmp);
-    return tmp.innerHTML;
-  }
-
-  // GFM 解析交给 marked（本地 vendor，不联网）。breaks:true 是必须的：
-  // Agent / 聊天输出严重依赖单换行可见，旧渲染器把每个 \n 都转成了 <br>，
-  // 用 GFM 默认的 breaks:false 会让大量既有输出塌成一段。
-  if (window.marked && marked.use) {
-    marked.use({ gfm: true, breaks: true });
-  }
-
-  function renderMarkdown(src) {
-    if (window.marked && marked.parse) {
-      try { return marked.parse(src); } catch (e) { /* 落到下面的纯文本兜底 */ }
-    }
-    return escapeHtml(src).replace(/\n/g, "<br>");
-  }
-
-  function renderText(text, parseMode) {
-    text = text == null ? "" : String(text);
-    if (parseMode && String(parseMode).toUpperCase().indexOf("HTML") >= 0) {
-      return htmlWithLineBreaks(sanitizeHtml(text));
-    }
-
-    // marked 直接出 <pre><code class="language-xxx">，正好是 enhanceBubbleContent
-    // 期待的形状（它按 /language-(...)/ 读语言并补外壳），所以这里不再需要
-    // 旧的 %%CODE_BLOCK_n%% 占位符回填——那个用字符串做 replace 的 pattern，
-    // 代码里出现 $& / $` / $' / $$ 会被当成替换模式吃掉。
-    return sanitizeHtml(renderMarkdown(text));
-  }
-
-  // 用户气泡永远按字面渲染：只转义 + 换行，绝不过 marked / HTML，免得输入里的
-  // *、`、#、| 之类被当 markdown 语法篡改显示（Telegram/CLI 两端都原样回显用户
-  // 输入，Web 对齐）。其余角色照常走 renderText。初始渲染(makeBubble)与流式/编辑
-  // 更新(putTextFrame)两处共用，避免规则失步。
-  function renderBubbleBody(role, text, parseMode, webDisplay) {
-    if(webDisplay?.version===1 && typeof webDisplay.plain_text==='string'){
-      return escapeHtml(webDisplay.plain_text).replace(/\n/g,'<br>');
-    }
-    if (role === "user") {
-      return escapeHtml(text == null ? "" : String(text)).replace(/\n/g, "<br>");
-    }
-    // Reported errors are literal diagnostics both live and in durable history.
-    // Do not turn upstream Markdown, HTML or stack traces into different layouts.
-    if(role==='sys'&&!parseMode&&/^⚠️(?:\s|$)/.test(String(text||''))){
-      return escapeHtml(String(text||'')).replace(/\n/g,'<br>');
-    }
-    if(webDisplay?.version===1 && Array.isArray(webDisplay.segments) &&
-       webDisplay.segments.every(s=>s && ['markdown','html'].includes(s.kind) && typeof s.text==='string')){
-      // Every segment uses the same allowlist. Never trust even stored/tool HTML.
-      let rendered=webDisplay.segments.map(s=>s.footer?'<div class="token-hud">'+renderText(s.text,'HTML')+'</div>':renderText(s.text,s.kind==='html'?'HTML':null)).join('\n');
-      return rendered;
-    }
-    const rendered=renderText(text,parseMode);
-    return role==='sys'?rendered.replace(/<pre(?:\s[^>]*)?>/g,'<pre class="literal-diagnostic">'):rendered;
   }
 
   function repaintBubble(entry, html) {
@@ -1679,6 +1448,7 @@ import {decorateBrandAuthor} from './branding.js';
     if(!entry?.bubble||!message?.conversation_actions||!Number.isSafeInteger(message.id))return;
     var bar=entry.bubble.querySelector('.msg-actions');if(!bar)return;
     var actions=message.conversation_actions;
+    entry.conversationActions=message;
     if(actions.branch_mode==='user'&&message.turn_id){
       var firstUser=log.querySelector(`.msg-row.user[data-turn-id="${CSS.escape(String(message.turn_id))}"]`);
       if(firstUser&&firstUser!==entry.row)return;
@@ -1689,8 +1459,9 @@ import {decorateBrandAuthor} from './branding.js';
       });
     }
     bar.querySelectorAll('.conversation-action').forEach(button=>button.remove());
-    if(actions.branch_mode){
+    if(actions.branch_mode&&!window.XGentConversations?.archived){
       var fork=conversationActionButton('fork-chat','分支到新聊天',()=>openBranchDialog(message,actions.branch_mode));
+      fork.classList.add('branch-message-action');
       bar.appendChild(fork);
     }
     if(actions.withdraw){const withdraw=conversationActionButton('undo','撤回此消息及之后',()=>openWithdrawDialog(message));withdraw.classList.add('secondary-action');bar.appendChild(withdraw);}
@@ -1714,6 +1485,7 @@ import {decorateBrandAuthor} from './branding.js';
   }
 
   async function openBranchDialog(message,mode){
+    if(window.XGentConversations?.archived){toast('归档对话不能创建分支，请先恢复。',true);return;}
     var cid=message.conversation_id||selectedConversationId;
     var box=dialogSummary('正在检查分支点…',[]);showAction('创建对话分支',box);
     try{
@@ -1770,11 +1542,11 @@ import {decorateBrandAuthor} from './branding.js';
         preview.conflicts.slice(0,12).forEach(item=>box.append(actionNode('code',item.path)));
         box.append(actionButton('关闭',closeAction));return;
       }
-      box.append(actionNode('p',preview.changes.length?`可安全应用 ${preview.changes.length} 项文件改动。`:'来源工作区已经与分支一致。'));
+      box.append(actionNode('p',preview.changes.length?`可安全应用 ${preview.changes.length} 项文件改动。`:'来源文件已经与分支一致。'));
       preview.changes.slice(0,20).forEach(item=>box.append(actionNode('code',`${item.action}  ${item.path}`)));
-      var apply=actionButton('应用到来源工作区',async()=>{apply.disabled=true;try{
+      var apply=actionButton('应用到来源目录',async()=>{apply.disabled=true;try{
         await api('/api/workbench/conversations/branch/apply',{method:'POST',body:JSON.stringify({conversation_id:cid,confirm:true,base_snapshot_id:preview.base_snapshot_id,source_digest:preview.source_digest,branch_digest:preview.branch_digest,request_id:queueRequestId()})});
-        closeAction();toast('分支文件改动已原子应用到来源工作区');
+        closeAction();toast('分支文件改动已应用到来源目录');
       }finally{apply.disabled=false;}},'primary');apply.disabled=!preview.changes.length;
       var applyControls=actionNode('div',null,'wb-actions');applyControls.append(actionButton('取消',closeAction),apply);box.append(applyControls);
     }catch(error){box.replaceChildren(actionMessage(error.message,true),actionButton('关闭',closeAction));}
@@ -1792,7 +1564,7 @@ import {decorateBrandAuthor} from './branding.js';
         var exact=data.branch_mode==='exact';
         head.append(actionNode('strong','分支'),actionNode('span',`来源：${data.parent.name}${exact?' · 旧版文件分支':''}`));
         var acts=actionNode('div',null,'lineage-actions');
-        acts.append(actionButton('打开来源',async()=>{if(optBtn?.getAttribute('aria-expanded')==='true')optBtn.click();await window.XGentConversations?.select(data.parent.id);}));
+        acts.append(actionButton('打开来源',async()=>{if(optBtn?.getAttribute('aria-expanded')==='true')optBtn.click();const owner=window.XGentConversations.items.find(item=>item.id===data.parent.id);if(owner?.archived)await window.XGentWorkbench?.revealArchive(data.parent.id);else await window.XGentConversations?.select(data.parent.id);}));
         if(exact)acts.append(actionButton('查看并应用文件改动',()=>{if(optBtn?.getAttribute('aria-expanded')==='true')optBtn.click();openApplyBranchDialog();}));
         bar.append(head,acts);
       }
@@ -2567,7 +2339,7 @@ import {decorateBrandAuthor} from './branding.js';
   }
 
   function updateSendAvailability(){
-    var queueable=queueEnabled&&!pendingFiles.length&&!input.value.trim().startsWith('/');
+    var queueable=queueEnabled&&(pendingFiles.length>0||!input.value.trim().startsWith('/'));
     btnSend.disabled=!!textSubmitting||!!uploadQueue||!historyReady||!!currentConnState||!!window.XGentConversations?.readOnly||(conversationBusy&&!queueable);
     btnSend.classList.toggle('hidden',conversationBusy&&!queueEnabled);
     btnSend.title=conversationBusy&&queueable?'加入待发队列 (Enter)':'发送消息 (Enter)';
@@ -2593,6 +2365,7 @@ import {decorateBrandAuthor} from './branding.js';
       var row=document.createElement('div');row.className='queue-item';row.dataset.queueId=item.id;
       var preview=document.createElement('div');preview.className='queue-preview';
       var p=document.createElement('p');p.textContent=item.text;p.title=item.text;
+      if(item.files?.length){const files=document.createElement('small');files.className='queue-files';files.textContent='📎 '+item.files.map(file=>file.filename).join(' · ');preview.append(files);}
       var reason=document.createElement('small');reason.textContent=queueReason(item.reason)+' · '+item.origin;
       preview.append(p,reason);row.appendChild(preview);
       var actions=document.createElement('div');actions.className='queue-actions';
@@ -2633,7 +2406,7 @@ import {decorateBrandAuthor} from './branding.js';
         const response=await fetch('/api/queue/status?'+new URLSearchParams({conversation_id:cid,id:p.item.id,request_id:p.request_id}),{credentials:'same-origin'});
         if(!response.ok)continue;
         const result=await response.json();
-        if(result.state==='recovered')restoreQueuedDraft(cid,result.item.text,p.request_id);
+        if(result.state==='recovered'){restoreQueuedDraft(cid,result.item.text,p.request_id);await restoreQueuedFiles(cid,result.item);}
         if(['recovered','settled','already_started','unavailable','waiting'].includes(result.state)){
           queueActions.delete(key);persistQueueEdits();
           if(cid===selectedConversationId)drawQueue();
@@ -2652,6 +2425,12 @@ import {decorateBrandAuthor} from './branding.js';
     if(cid===selectedConversationId){input.value=merged;syncSendState();input.dispatchEvent(new Event('input'));input.focus();}
   }
 
+  async function restoreQueuedFiles(cid,item){
+    if(!item.files?.length)return;
+    const lineage=await api('/api/workbench/conversations/lineage?conversation_id='+encodeURIComponent(cid));
+    setServerDraft(cid,lineage.draft);
+  }
+
   async function changeQueue(item,action){
     var cid=item?.conversation_id||selectedConversationId,key=item?.id||('resume:'+cid),previous=queueActions.get(key);
     if(previous?.busy)return;
@@ -2659,7 +2438,7 @@ import {decorateBrandAuthor} from './branding.js';
     try{
       var data=await api('/api/queue/'+action,{method:'POST',body:JSON.stringify({conversation_id:cid,id:item?.id,
         generation:item?.generation??queueState.generation,revision:item?.revision??queueState.revision,request_id:pending.request_id})});
-      if(action==='edit'||action==='cancel')restoreQueuedDraft(cid,data.text,pending.request_id);
+      if(action==='edit'||action==='cancel'){restoreQueuedDraft(cid,data.text,pending.request_id);await restoreQueuedFiles(cid,data);}
       queueActions.delete(key);persistQueueEdits();await refreshQueue(true);drawQueue();
     }catch(e){pending.busy=false;pending.error=e.message;if(e.status===409){queueActions.delete(key);persistQueueEdits();await refreshQueue(true);toast(e.message,true);if(cid===selectedConversationId)drawQueue();}else if(cid===selectedConversationId)drawQueue(e.message);else toast(e.message,true);}
   }
@@ -2699,7 +2478,7 @@ import {decorateBrandAuthor} from './branding.js';
     input.style.height = "auto";
     syncSendState();
     hideSuggest();
-    setBusy(true);
+    if(!hasFiles||!queueEnabled)setBusy(true);
     triggerHaptic();
 
     if (hasFiles) {
@@ -2743,7 +2522,7 @@ import {decorateBrandAuthor} from './branding.js';
       throw new Error('暂时无法确认传输状态，重试会从已接收位置继续：'+last.message);
     }
     var transfer=await control('/api/file-transfers/init',{
-      idempotency_key:key,conversation_id:batch.conversation_id,mode:mode,text:text,modes:modes,
+      idempotency_key:key,conversation_id:batch.conversation_id,mode:mode,text:text,modes:modes,queue:queueEnabled,generation:batch.generation,
       files:batch.files.map(file=>({filename:file.name,size:file.size}))
     });
     if(transfer.state==='accepted')return {...transfer,duplicate:true};
@@ -2800,7 +2579,7 @@ import {decorateBrandAuthor} from './branding.js';
   }
 
   async function sendFiles(text, selected) {
-    var batch = { conversation_id:selectedConversationId, files: selected || pendingFiles.slice(), next: 0, cancelled: false, finish: null, awaitingTurn: false };
+    var batch = { conversation_id:selectedConversationId,generation:uiGeneration, files: selected || pendingFiles.slice(), next: 0, cancelled: false, finish: null, awaitingTurn: false };
     uploadQueue = batch;
     if (selected) { pendingFiles=pendingFiles.filter(function(f){return selected.indexOf(f)<0;});renderPendingFiles(); }
     else clearPendingFiles();
@@ -2820,16 +2599,18 @@ import {decorateBrandAuthor} from './branding.js';
           var url=URL.createObjectURL(file);entry.objectUrls.push(url);
           return {kind:file.type.startsWith('image/')?'photo':mediaKindFromName(file.name),filename:file.name,download_url:url,local_preview:true,ingress_mode:fileModes.get(file)||'attachment'};
         }));
-        setBusy(true);
+        if(!queueEnabled)setBusy(true);
         // HTTP 只确认接收，turn_end 才允许下一份上传进入对话核心。
-        batch.awaitingTurn = true;
+        batch.awaitingTurn = !queueEnabled;
         batch.rejected = false;
         var turnDone = new Promise(function (resolve) { batch.finish = resolve; });
         var fd = new FormData();
         batch.files.forEach(file=>fd.append('file',file,file.name));
         fd.append("text", caption);
         fd.append('modes',JSON.stringify(modes));
-        var signature = JSON.stringify([mode,text,modes,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
+        if(queueEnabled)fd.append('queue','1');
+        if(batch.generation!==null)fd.append('generation',String(batch.generation));
+        var signature = JSON.stringify([mode,text,modes,batch.generation,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
         var previous = fileBatchKeys.get(f);
         var requestKey = previous?.signature===signature ? previous.key : (crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());
         byMessageId['upload:'+requestKey]=entry;
@@ -2859,6 +2640,14 @@ import {decorateBrandAuthor} from './branding.js';
           body = await response.json().catch(function () { return {}; });
           if (!response.ok) throw new Error(body.error || (response.status===413?'反向代理拒绝了上传（HTTP 413），请调整代理请求体限制后重试。':response.status===524?'代理等待服务器响应超时（HTTP 524），请先核对历史；不要重复提交已确认文件。':"HTTP " + response.status));
           }
+          if(body.queued){
+            batch.next=batch.files.length;batch.awaitingTurn=false;
+            progress.textContent='已保存到待发队列';setServerDraft(batch.conversation_id,null);
+            if(!entry.durable)removeEntry(entry);
+            batch.files.forEach(file=>fileBatchKeys.delete(file));
+            await refreshQueue(true);return;
+          }
+          batch.awaitingTurn=true;
           progress.textContent='已接收，正在处理';
           if(body.message&&batch.conversation_id===selectedConversationId)putHistoryFrame(body.message,streamEpoch);
           else if(Number.isSafeInteger(body.record_id)&&batch.conversation_id===selectedConversationId){
@@ -2900,7 +2689,7 @@ import {decorateBrandAuthor} from './branding.js';
       uploadQueue = null;
       renderPendingFiles();
       // Disconnecting the upload queue does not finish an accepted server-side turn.
-      if (!batch.awaitingTurn) setBusy(false);
+      if (!batch.awaitingTurn&&!queueEnabled) setBusy(false);
       if ((remaining.length || batch.error || reconcileAfterTurn) && !currentConnState) {
         reconcileAfterTurn = false;
         await resync();
@@ -3778,7 +3567,7 @@ import {decorateBrandAuthor} from './branding.js';
     if(actionDialog.open)return;
     commandTrigger=document.activeElement;
     if(window.XGentWorkbench){if(!await window.XGentWorkbench.prepareChat())return;}
-    else {document.body.dataset.page='chat';location.hash='/chat';}
+    else {document.body.dataset.page='chat';if(!/^#\/?chat(?:\?|$)/.test(location.hash)&&location.hash)location.hash=window.XGentConversations?.href(window.XGentConversations.current)||'#/chat';}
     hideSuggest();
     const sequence=++commandSequence;
     commandPanel.hidden=false;
@@ -3835,7 +3624,7 @@ import {decorateBrandAuthor} from './branding.js';
       buttons[i].focus({preventScroll:true});buttons[i].scrollIntoView({block:'nearest'});
     }
   },true);
-  window.addEventListener('hashchange',()=>{if(location.hash!=='#/chat'&&location.hash!=='#chat'&&location.hash!=='')closeCommands(false);});
+  window.addEventListener('hashchange',()=>{if(location.hash&&!/^#\/?chat(?:\?|$)/.test(location.hash))closeCommands(false);});
   window.addEventListener('resize',positionCommands);window.visualViewport?.addEventListener('resize',positionCommands);window.visualViewport?.addEventListener('scroll',positionCommands);
   if(window.ResizeObserver)new ResizeObserver(positionCommands).observe(document.getElementById('composer'));
   ['btn-composer-menu'].forEach(id=>document.getElementById(id)?.addEventListener('click',function(e){e.preventDefault();e.stopImmediatePropagation();openCommands().catch(err=>toast('菜单打开失败：'+err.message,true));},true));
@@ -3886,6 +3675,12 @@ import {decorateBrandAuthor} from './branding.js';
       } else if (settings.classList.contains("open")) {
         settings.classList.remove("open");
       }
+    }
+  });
+  window.addEventListener('xgent-conversation-state',()=>{
+    for(const entry of new Set(Object.values(byMessageId))){
+      if(window.XGentConversations?.archived)entry.bubble?.querySelectorAll('.branch-message-action').forEach(node=>node.remove());
+      else if(entry.conversationActions)setConversationActions(entry,entry.conversationActions);
     }
   });
   window.addEventListener('xgent-conversation-changed',function(event){

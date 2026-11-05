@@ -516,7 +516,7 @@ class BotMemoryDB(ConversationStore):
                 title = ' '.join(str(content or '').split()).strip()
                 if title:
                     title = title[:32] + ('…' if len(title) > 32 else '')
-                    changed = await conn.execute("UPDATE chat_sessions SET name=?,title_auto_pending=0 WHERE id=? AND title_auto_pending=1",
+                    changed = await conn.execute("UPDATE chat_sessions SET name=?,title_auto_pending=0 WHERE id=? AND title_auto_pending=1 AND archived=0",
                                                  (title, session_id))
                     title_changed = changed.rowcount > 0
                     if title_changed:
@@ -1482,6 +1482,10 @@ class BotMemoryDB(ConversationStore):
     async def update_session(self, session_id: str, **kwargs):
         """更新会话信息"""
         async with self._transaction() as conn:
+            if 'name' in kwargs:
+                row=await (await conn.execute('SELECT archived FROM chat_sessions WHERE id=?',(session_id,))).fetchone()
+                if row is not None and row['archived']:
+                    raise ConversationError('归档对话名称固定，恢复后可以重命名。')
             for key, value in kwargs.items():
                 if key not in self._ALLOWED_SESSION_COLUMNS:
                     logger.warning(f"尝试更新非法列名: {key}，已拒绝")
@@ -1513,6 +1517,9 @@ class BotMemoryDB(ConversationStore):
         result = []
         for row in rows:
             item = dict(row)
+            from xgent_app.archive_conversations import archive_origin
+            if item.get('archived'):
+                item['archive_origin']=archive_origin(item)
             first = ' '.join(str(item.pop('first_user_text') or '').split()).strip()
             name = item.get('name') or '新对话'
             item['display_title'] = (first[:32] + ('…' if len(first) > 32 else '')) if item.get('title_auto_pending') and first else name

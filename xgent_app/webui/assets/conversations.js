@@ -18,16 +18,18 @@ const paths = {
   restore: 'M4 8h16v12H4zM3 4h18v4H3zM12 17v-6m-3 3 3-3 3 3',
   close: 'm6 6 12 12M6 18 18 6',
   export: 'M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4',
-  branch: 'M6 3v12M18 9a9 9 0 0 1-9 9M15 6a3 3 0 1 0 6 0 3 3 0 1 0-6 0M3 18a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  branch: 'M3 17h5l8-10h5M17 3l4 4-4 4M3 7h5M17 14v7h-7',
 };
 let state = {current_chat_id: null, telegram_conversation_id: null, revision: -1, items: [], running: null};
 let authenticated = false, authEpoch = 0, request = null, mutation = null;
-let view = 'recent', listSignature = '', menuTarget = null, menuTrigger = null;
+let listSignature = '', menuTarget = null, menuTrigger = null;
 let groupView = 'ungrouped';
 let moveSubmenu = null, moveTrigger = null, moveHideTimer = null;
 const exporting = new Set();
 const expansionKey = 'xgent-conversation-children';
 const expandedChildren = new Set();
+const enteredArchives=new Set();
+try{for(const id of JSON.parse(sessionStorage.getItem('xgent-entered-archives')||'[]'))if(typeof id==='string')enteredArchives.add(id);}catch{}
 try { for (const id of JSON.parse(localStorage.getItem(expansionKey) || '[]')) if (typeof id === 'string') expandedChildren.add(id); } catch {}
 let drawerOpen = false, drawerReturn = null, previousInert = null;
 let renameTarget = null, renameReturn = null, renameSaving = false;
@@ -35,10 +37,13 @@ let feedbackTimer = null;
 const controllers = new Set();
 const locationParams = () => new URLSearchParams(location.hash.split('?')[1] || '');
 let localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
+try{if(!localCurrent&&!locationParams().has('message'))localCurrent=sessionStorage.getItem('xgent-selected-conversation');}catch{}
 function conversationHref(id) { return id ? '#/chat?conversation=' + encodeURIComponent(id) : '#/chat'; }
 function keepConversationUrl() {
   if (!localCurrent || locationParams().has('message')) return;
   const route = location.hash.replace(/^#\/?/, '').split('?')[0] || 'chat';
+  try{sessionStorage.setItem('xgent-selected-conversation',localCurrent);}catch{}
+  if(route!=='chat')return;
   const params = locationParams(); params.set('conversation', localCurrent);
   const hash = '#/' + route + '?' + params.toString();
   if (location.hash !== hash) history.replaceState(null, '', hash);
@@ -47,6 +52,7 @@ function selectLocal(id, writeUrl = true) {
   if (!id) return false;
   const previous = state.current_chat_id;
   localCurrent = id;
+  try{sessionStorage.setItem('xgent-selected-conversation',id);}catch{}
   state = {...state, current_chat_id: id, running: runningFor(id)};
   if (writeUrl && locationParams().get('conversation') !== id) history.pushState(null, '', conversationHref(id));
   if (!writeUrl) keepConversationUrl();
@@ -98,11 +104,11 @@ function itemById(id) { return itemIndex.get(id); }
 function activeRuns() { return state.runs ? Object.values(state.runs) : state.running ? [state.running] : []; }
 function runningFor(id) { return state.runs ? state.runs[id] || null : state.running?.conversation_id === id ? state.running : null; }
 function groups() {
-  const values=Array.isArray(state.groups)?state.groups:[];
+  const values=(Array.isArray(state.groups)?state.groups:[]).filter(group=>group.id!=='__archived__');
   return [{...(values.find(group=>group.id==='ungrouped')||{}),id:'ungrouped',name:'默认分组'},...values.filter(group=>group.id!=='ungrouped')];
 }
 function groupName(id) { return groups().find(group => group.id === id)?.name || '默认分组'; }
-function isArchived(item) { return item.archived === true || Number(item.archived) === 1; }
+function isArchived(item) { return item?.archived === true || Number(item?.archived) === 1; }
 function isBranch(item) { return Boolean(item?.parent_conversation_id || item?.branch_mode); }
 function saveExpandedChildren() {
   try { localStorage.setItem(expansionKey, JSON.stringify([...expandedChildren])); } catch {}
@@ -208,8 +214,8 @@ async function mutate(name, data = {}) {
   try {
     const result = await api('/api/workbench/conversations/' + name, data);
     accept(result);
-    if (name === 'create' || name === 'create_child') selectLocal(result.conversation_id || result.current_chat_id);
-    else if ((name === 'archive' && data.id === localCurrent) ||
+    if (name === 'create' || name === 'create_child'&&!isArchived(itemById(result.conversation_id))) selectLocal(result.conversation_id || result.current_chat_id);
+    else if ((name === 'archive' && (result.archived_conversation_ids||[data.id]).includes(localCurrent)) ||
              (name === 'delete' && (result.deleted_conversation_ids || [data.id]).includes(localCurrent))) {
       selectLocal(result.current_chat_id || result.items?.[0]?.id);
     }
@@ -223,17 +229,19 @@ async function prepareChat() {
   return true;
 }
 async function selectConversation(id) {
-  if (mutation || !await prepareChat()) return;
+  if(isArchived(itemById(id))&&!enteredArchives.has(id)){await window.XGentWorkbench?.revealArchive(id);return false;}
+  if (mutation || !await prepareChat()) return false;
   try {
     selectLocal(id);
     closeMenu(false);
     setDrawer(false);
+    return true;
   } catch (error) { if (error.name !== 'AbortError') notify('切换失败：' + error.message, {error: true, retry: () => selectConversation(id)}); }
 }
 async function createConversation() {
   if (mutation || !state.current_chat_id || !await prepareChat()) return;
   try {
-    view = 'recent'; search.value = '';
+    search.value = '';
     const result = await mutate('create');if(!result)return;
     if(groupView!=='all'&&groupView!=='ungrouped')await groupMutation('/api/workbench/conversations/move',{id:result.conversation_id||result.current_chat_id,group_id:groupView});
     scroll.scrollTop = 0;
@@ -243,45 +251,41 @@ async function createConversation() {
 }
 async function createChildConversation(id) {
   const parent = itemById(id);
-  if (mutation || !parent || isArchived(parent) || !await prepareChat()) return;
+  if (mutation || !parent) return;
+  const archived=isArchived(parent);
+  if(!archived&&!await prepareChat())return;
   closeMenu(false);
   try {
-    view = 'recent'; search.value = ''; expandedChildren.add(id); saveExpandedChildren();
-    groupView = parent.group_id || 'ungrouped';
+    search.value = ''; expandedChildren.add(id); saveExpandedChildren();
+    if(!isArchived(parent))groupView = parent.group_id || 'ungrouped';
     const requestId = crypto.randomUUID();
     const result = await mutate('create_child', {id, generation: parent.generation, request_id: requestId});
     if (!result) return;
+    if(archived){await window.XGentWorkbench?.revealArchive(result.conversation_id);return;}
     setDrawer(false, false);
     requestAnimationFrame(() => $('input')?.focus({preventScroll: true}));
   } catch (error) { if (error.name !== 'AbortError') notify('新建子对话失败：' + error.message, {error: true, retry: refresh}); }
 }
 async function archiveConversation(id) {
-  const item = itemById(id), wasCurrent = state.current_chat_id === id;
+  const item = itemById(id);
   if (!item || mutation) return;
   closeMenu(false);
   try {
     const result = await mutate('archive', {id});
     if (!result) return;
-    const fallback = result.current_chat_id;
     notify('已归档「' + title(item) + '」', {label: '撤销', undo: async () => {
-      if (!await mutate('restore', {id})) return;
-      if (wasCurrent && state.current_chat_id === fallback) selectLocal(id);
-      notify('已恢复对话');
+      await restoreConversation(id);
     }});
   } catch (error) { if (error.name !== 'AbortError') notify('归档失败：' + error.message, {error: true, retry: () => archiveConversation(id)}); }
 }
-async function restoreConversation(id, open = false) {
-  if (mutation || (open && !await prepareChat())) return;
+async function restoreConversation(id, open = true) {
+  if (mutation) return;
   closeMenu(false);
   try {
     if (!await mutate('restore', {id})) return;
-    if (open) { view = 'recent'; search.value = ''; await selectConversation(id); render(); }
+    if (open) { search.value = '';groupView=itemById(id)?.group_id||'ungrouped'; await selectConversation(id); render(); }
     else notify('已恢复到最近对话');
   } catch (error) { if (error.name !== 'AbortError') notify('恢复失败：' + error.message, {error: true, retry: () => restoreConversation(id, open)}); }
-}
-function setView(next) {
-  view = next; search.value = ''; closeMenu(false); render();
-  scroll.scrollTop = 0; search.focus({preventScroll: true});
 }
 function notify(text, options = {}) {
   clearTimeout(feedbackTimer);
@@ -302,8 +306,8 @@ function notify(text, options = {}) {
 
 function createRow(item) {
   const row = node('div', {class: 'conv-row', 'data-conversation-id': item.id});
-  const branch = node('span', {class: 'conv-branch-badge', hidden: '', title: '分支对话'}, icon('branch'), node('span', {}, '分支'));
-  const childBadge = node('span', {class: 'conv-child-badge', hidden: ''}, '子');
+  const branch = node('span', {class: 'conv-branch-badge', hidden: '', title: '分支对话', 'aria-label':'分支对话'}, icon('branch'));
+  const childBadge = node('span', {class: 'conv-child-badge', hidden: '', title:'子对话','aria-label':'子对话'}, icon('branch'));
   const name = node('span', {class: 'conv-row-title'});
   const bot = node('span', {class: 'conv-bot-badge', hidden: '', title: 'Telegram 当前使用此对话，不代表正在执行任务'}, 'Bot 当前');
   const dot = node('span', {class: 'conv-running-dot', 'aria-label': '正在生成', hidden: ''});
@@ -339,14 +343,14 @@ function renderList() {
   }
   if (globalResults.options) globalResults.reset();
   const query = search.value.trim().toLocaleLowerCase();
-  const visible = state.items.filter(item => isArchived(item) === (view === 'archived')
+  const visible = state.items.filter(item => !isArchived(item)
       && (groupView === 'all' || (item.group_id||'ungrouped') === groupView)
       && title(item).toLocaleLowerCase().includes(query))
     .sort((a, b) => {
       const pinned = !query ? Number(b.pinned || 0) - Number(a.pinned || 0) : 0;
       return pinned || timestamp(b) - timestamp(a) || a.id.localeCompare(b.id);
     });
-  const signature = JSON.stringify([view, groupView, query, groups().map(group=>[group.id,group.name]), state.current_chat_id, state.telegram_conversation_id, activeRuns(), mutation,
+  const signature = JSON.stringify([groupView, query, groups().map(group=>[group.id,group.name]), state.current_chat_id, state.telegram_conversation_id, activeRuns(), mutation,
     [...expandedChildren], visible.map(item => [item.id, title(item), groupFor(item), item.group_id, item.pinned,
       item.parent_conversation_id, item.branch_mode, item.owner_conversation_id])]);
   if (signature === listSignature) return;
@@ -379,7 +383,7 @@ function renderList() {
     entry.row.style.setProperty('--conv-depth', String(Math.min(depth, 3)));
     entry.row.classList.toggle('is-pinned',!!item.pinned&&!query);
     entry.row.classList.toggle('is-pending', mutation?.name === 'switch' && mutation.id === item.id);
-    entry.branch.hidden = !branched;
+    entry.branch.hidden = !branched||!!item.owner_conversation_id;
     entry.childBadge.hidden = !item.owner_conversation_id;
     entry.childBadge.title = '子对话 · 父对话：' + title(itemById(item.owner_conversation_id));
     if (branched) {
@@ -416,15 +420,15 @@ function renderList() {
   // Keep malformed imported ownership cycles visible and finite.
   for (const item of [...roots, ...visible]) {
     if (visited.has(item.id)) continue;
-    const next = query ? '搜索结果 · ' + visible.length : view === 'archived' ? '已归档的对话' :
+    const next = query ? '搜索结果 · ' + visible.length :
       (item.pinned ? '置顶' : groupFor(item));
     if (next !== group) { group = next; children.push(node('h3', {class: 'conv-date-group'}, group)); }
     children.push(renderTree(item));
   }
   if (!visible.length) {
     children.push(node('div', {class: 'conv-list-empty'},
-      node('strong', {}, query ? '没有找到对话' : view === 'archived' ? '没有已归档的对话' : '从一段新对话开始'),
-      node('p', {}, query ? '换个关键词，或清除搜索。' : view === 'archived' ? '归档的对话会显示在这里。' : '你的对话会保留在这里，随时回来继续。'),
+      node('strong', {}, query ? '没有找到对话' : '从一段新对话开始'),
+      node('p', {}, query ? '换个关键词，或清除搜索。' : '你的对话会保留在这里，随时回来继续。'),
       query ? button('清除搜索', () => { search.value = ''; render(); search.focus(); }) : null));
   }
   list.replaceChildren(...children);
@@ -444,7 +448,7 @@ function renderRunning() {
   const item = itemById(running.conversation_id);
   const text = node('span', {}, '「' + (item ? title(item) : running.name || '另一段对话') + '」' + (running.stop_requested ? '正在停止…' : '正在生成'));
   const visit = button('查看', () => {
-    if (item && isArchived(item)) { view = 'archived'; render(); setDrawer(true); }
+    if (item && isArchived(item)) { window.XGentWorkbench?.revealArchive(item.id); }
     else selectConversation(running.conversation_id);
   });
   visit.disabled = !item;
@@ -466,12 +470,7 @@ function render() {
   $('conversation-new').disabled = !state.current_chat_id || !!mutation;
   $('conversation-new').setAttribute('aria-busy', String(mutation?.name === 'create'));
   $('conversation-search-clear').hidden = !search.value;
-  $('conversation-list-title').textContent = search.value.trim() ? '全局搜索' : view === 'archived' ? '已归档' : groupView === 'all' ? '全部对话' : groupName(groupView);
-  $('conversation-view-back').hidden = view !== 'archived';
-  $('conversation-archive-view').setAttribute('aria-pressed', String(view === 'archived'));
-  const count = state.items.filter(isArchived).length;
-  $('conversation-archive-count').textContent = String(count);
-  $('conversation-archive-count').hidden = !count;
+  $('conversation-list-title').textContent = search.value.trim() ? '全局搜索' : groupView === 'all' ? '全部对话' : groupName(groupView);
   const select = $('conversation-group-select');
   if (select) {
     const options = [groups()[0],{id:'all',name:'全部对话'},...groups().slice(1)];
@@ -544,12 +543,12 @@ function openMenu(id, trigger) {
   menuTarget = id; menuTrigger = trigger;
   trigger.setAttribute('aria-expanded', 'true');
   const rename = button([icon('rename'), node('span', {}, '重命名')], () => openRename(id), {role: 'menuitem'});
+  rename.disabled=isArchived(item);if(rename.disabled)rename.title='归档对话名称固定，恢复后可以重命名';
   const other = isArchived(item)
     ? button([icon('restore'), node('span', {}, '恢复对话')], () => restoreConversation(id), {role: 'menuitem'})
     : button([icon('archive'), node('span', {}, '归档对话')], () => archiveConversation(id), {role: 'menuitem'});
   const download=button([icon('export'),node('span',{},'导出')],()=>exportConversation(item),{role:'menuitem'});download.disabled=exporting.has(id);
   const newChild=button([icon('branch'),node('span',{},'新建子对话')],()=>createChildConversation(id),{role:'menuitem'});
-  newChild.disabled=isArchived(item);
   const remove=button('🗑 删除对话',()=>confirmConversationAction('delete',id),{role:'menuitem',class:'danger'});
   const botCurrent=state.telegram_conversation_id===id;
   const setBot=button(botCurrent?'🤖 Bot 当前对话':'🤖 设为 Bot 当前对话',()=>setBotConversation(item),{role:'menuitem'});
@@ -561,9 +560,11 @@ function openMenu(id, trigger) {
     catch(error){notify(error.message,{error:true,retry:refresh});}
   },{role:'menuitem'});
   pin.title='所属分组：'+groupName(item.group_id||'ungrouped');
+  pin.disabled=isArchived(item);if(pin.disabled)pin.title='归档期间保留原置顶信息';
   const moveWrapper=node('div',{class:'conv-move-menu'});
   moveTrigger=button([node('span',{},'移动到'),node('span',{class:'conv-menu-caret','aria-hidden':'true'},'›')],()=>moveSubmenu.hidden?showMoveMenu():hideMoveMenu(),{role:'menuitem','aria-haspopup':'menu','aria-expanded':'false'});
-  moveTrigger.disabled=!!item.owner_conversation_id;
+  moveTrigger.disabled=!!item.owner_conversation_id||isArchived(item);
+  if(isArchived(item))moveTrigger.title='归档对话通过恢复操作返回原分组';
   if(item.owner_conversation_id)moveTrigger.title='子对话跟随父对话分组';
   moveSubmenu=node('div',{class:'conv-group-submenu',role:'menu','aria-label':'移动到分组',tabindex:'-1',hidden:''});
   const moveButtons=groups().map(group=>button((group.id===(item.group_id||'ungrouped')?'✓ ':'')+group.name,async()=>{
@@ -611,6 +612,7 @@ async function confirmConversationAction(action,id) {
 }
 
 function openRename(id) {
+  if(isArchived(itemById(id))){notify('归档对话名称固定，恢复后可以重命名');return;}
   const item = itemById(id);
   if (!item || mutation) return;
   renameTarget = id; renameReturn = menuTrigger || document.activeElement;
@@ -672,11 +674,10 @@ $('conversation-drawer-toggle').addEventListener('click', () => {
   if(mobile.matches)setDrawer(!drawerOpen);
   else {const collapsed=document.body.classList.toggle('conv-sidebar-collapsed');try{localStorage.setItem('xgent-conversation-sidebar-collapsed',collapsed?'1':'0');}catch{}syncConversationToggle();}
 });
+$('conversation-mobile-toggle').addEventListener('click',()=>setDrawer(!drawerOpen));
 $('conversation-drawer-close').addEventListener('click', () => setDrawer(false));
 $('conversation-backdrop').addEventListener('click', () => setDrawer(false));
 $('workspace-menu').addEventListener('click',event=>{if(event.target.closest('a, #btn-settings, #btn-search, #wb-logout'))setDrawer(false,false);});
-$('conversation-archive-view').addEventListener('click', () => setView(view === 'archived' ? 'recent' : 'archived'));
-$('conversation-view-back').addEventListener('click', () => setView('recent'));
 search.addEventListener('input', event => { if (!event.isComposing) { closeMenu(false); render(); scroll.scrollTop = 0; } });
 search.addEventListener('compositionend', () => { closeMenu(false); render(); scroll.scrollTop = 0; });
 $('conversation-search-clear').addEventListener('click', () => { search.value = ''; render(); search.focus(); });
@@ -735,10 +736,16 @@ document.addEventListener('keydown', event => {
 }, true);
 
 window.XGentConversations = {
+  restore:id=>restoreConversation(id),
+  enter:async(id,message)=>{if(isArchived(itemById(id))){enteredArchives.add(id);try{sessionStorage.setItem('xgent-entered-archives',JSON.stringify([...enteredArchives]));}catch{}}if(!await selectConversation(id))return false;if(message)location.hash=conversationHref(id)+'&message='+encodeURIComponent(message);return true;},
+  enteredArchive:id=>enteredArchives.has(id),
+  createChild:createChildConversation,
+  menu:(id,trigger)=>openMenu(id,trigger),
   accept, refresh, get items(){return state.items;},
-  async select(id){if(mutation)throw new Error('正在切换对话，请稍后重试');if(!itemById(id))throw new Error('对话已不存在');selectLocal(id);closeMenu(false);setDrawer(false);return state.current_chat_id===id;},
+  async select(id){if(mutation)throw new Error('正在切换对话，请稍后重试');if(!itemById(id))throw new Error('对话已不存在');if(isArchived(itemById(id))&&!enteredArchives.has(id)){await window.XGentWorkbench?.revealArchive(id);return false;}selectLocal(id);closeMenu(false);setDrawer(false);return state.current_chat_id===id;},
   href: conversationHref, followLocation: followConversationLocation,
-  get readOnly(){const item=itemById(state.current_chat_id);return !!state.items.length && (!item || isArchived(item));},
+  get readOnly(){return !!state.items.length&&!itemById(state.current_chat_id);},
+  get archived(){return isArchived(itemById(state.current_chat_id));},
   get current() { return state.current_chat_id; }, get running() { return runningFor(state.current_chat_id); }, get runs() { return activeRuns(); },
 };
 const groupSelect = $('conversation-group-select');
@@ -770,6 +777,7 @@ $('conversation-group-edit')?.addEventListener('click',()=>{
 function start() { authenticated = true; refresh(); }
 window.addEventListener('xgent-authenticated', start);
 window.addEventListener('xgent-auth-expired', () => {
+  enteredArchives.clear();try{sessionStorage.removeItem('xgent-entered-archives');}catch{}
   globalResults.reset();
   authenticated = false; authEpoch++; controllers.forEach(controller => controller.abort()); request = null;
   setDrawer(false, false); closeMenu(false); renameDialog.close();
@@ -779,7 +787,7 @@ window.addEventListener('xgent-auth-expired', () => {
   $('conversation-sync-error').hidden = true;
   state = {current_chat_id: null, revision: -1, items: [], running: null};
   localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
-  rows.clear(); itemIndex.clear(); listSignature = ''; view = 'recent'; search.value = '';
+  rows.clear(); itemIndex.clear(); listSignature = ''; search.value = '';
   list.replaceChildren(); render();
 });
 api('/api/session').then(data => { if (data.authenticated) start(); }).catch(() => {});
@@ -787,7 +795,12 @@ setInterval(() => { if (authenticated && !document.hidden) refresh(); }, 3000);
 document.addEventListener('visibilitychange', () => { if (authenticated && !document.hidden) refresh(); });
 
 function syncConversationToggle(){
-  $('conversation-drawer-toggle').setAttribute('aria-expanded',String(mobile.matches?drawerOpen:!document.body.classList.contains('conv-sidebar-collapsed')));
+  sidebar.inert=mobile.matches&&!drawerOpen;
+  if(mobile.matches&&!drawerOpen)sidebar.setAttribute('aria-hidden','true');else sidebar.removeAttribute('aria-hidden');
+  const expanded=!document.body.classList.contains('conv-sidebar-collapsed'),toggle=$('conversation-drawer-toggle');
+  toggle.setAttribute('aria-expanded',String(expanded));toggle.title=expanded?'收起对话列表':'展开对话列表';
+  toggle.querySelector('use').setAttribute('href',expanded?'#i-sidebar-hide':'#i-sidebar-show');
+  $('conversation-mobile-toggle').setAttribute('aria-expanded',String(drawerOpen));
 }
 try{document.body.classList.toggle('conv-sidebar-collapsed',localStorage.getItem('xgent-conversation-sidebar-collapsed')==='1');}catch{}
 syncConversationToggle();

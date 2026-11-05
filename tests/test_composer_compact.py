@@ -23,11 +23,12 @@ def test_single_card_never_has_external_control_rows(browser_context,workspace_u
             assert bounds['y']>=row['y']-1 and bounds['y']+bounds['height']<=row['y']+row['height']+1
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
         assert page.locator('#wb-shell > footer').bounding_box()['height']<=140
+        assert page.locator('#composer-agent').count()==0
         if size[0]<768:
-            assert page.locator('#composer-agent').is_hidden() and page.locator('#composer-thinking').is_visible()
+            assert page.locator('#composer-thinking').is_visible()
             assert page.locator('#composer-generation-options').is_visible()
         else:
-            assert page.locator('#composer-agent').is_visible() and page.locator('#composer-thinking').is_visible()
+            assert page.locator('#composer-thinking').is_visible()
         page.screenshot(path=str(tmp_path/f'composer-{size[0]}-{dark}.png'))
     for message,ui in [(12,12),(24,20)]:
         page.evaluate('([message,ui])=>window.XGentAppearance.save({web_message_font_size:message,web_ui_font_size:ui})',[message,ui])
@@ -70,7 +71,7 @@ def test_mobile_generation_panel_switch_and_resize(browser_context,workspace_url
     original=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']['agent_mode']
     trigger=page.get_by_role('button',name='生成选项',exact=True);trigger.click()
     switch=page.get_by_role('switch',name='Agent 模式',exact=True);switch.click()
-    page.wait_for_function('(old)=>document.getElementById("composer-agent").getAttribute("aria-pressed")===String(!old)',arg=original)
+    page.wait_for_function('(old)=>document.getElementById("composer-generation-options").classList.contains("agent-on")===!old',arg=original)
     assert page.locator('#composer-options-popover').is_hidden()
     trigger.click()
     assert page.locator('#composer-options-popover .composer-setting-button').count()==5

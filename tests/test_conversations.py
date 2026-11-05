@@ -85,8 +85,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             await self.write('retained')
         state = await self.manager.manage('archive', a.conversation_id)
         self.assertNotEqual(a.conversation_id, state['current_chat_id'])
-        with self.assertRaises(ConversationChanged):
-            await self.manager.resolve(a.conversation_id)
+        self.assertEqual(a.conversation_id,(await self.manager.resolve(a.conversation_id)).conversation_id)
         with bind_conversation(await self.manager.resolve(a.conversation_id, allow_archived=True)):
             self.assertIn('retained', str(await self.db.get_conversation_messages()))
         await self.manager.manage('restore', a.conversation_id)

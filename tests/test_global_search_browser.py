@@ -56,7 +56,7 @@ def test_sidebar_content_search_crosses_conversations_and_does_not_switch_bot(br
     search.fill('仅在正文命中的独有词')
     page.wait_for_function('document.querySelectorAll("#conversation-list .global-search-hit").length===2')
     assert page.locator('#conversation-list mark').count() == 2
-    assert '已归档 · 只读' in page.locator('#conversation-list').inner_text()
+    assert '归档对话' in page.locator('#conversation-list').inner_text()
     assert page.evaluate('window.XGentConversations.current') == 'global_memory'
     assert page.locator('#input').input_value() == '搜索期间不能丢的草稿'
     after = browser_context.request.get(workspace_url['url'] + '/api/workbench/conversations').json()
@@ -70,19 +70,22 @@ def test_sidebar_content_search_crosses_conversations_and_does_not_switch_bot(br
     page.close()
 
 
-def test_archive_search_is_read_only_and_can_browse_without_restoring(browser_context, workspace_url, search_seed):
+def test_archive_search_opens_settings_entry_before_entering_writable_chat(browser_context, workspace_url, search_seed):
     page = browser_context.new_page(); ready(page, workspace_url['url'])
     search = open_dialog(page); search.fill('仅在正文命中的独有词')
     page.get_by_role('combobox', name='搜索对话范围').select_option('archived')
     page.locator('#global-search-dialog .global-search-hit').first.wait_for()
     assert page.locator('#global-search-dialog .global-search-hit').count() == 1
     page.locator('#global-search-dialog .global-search-hit').click()
-    page.locator('#source-reader').wait_for()
-    assert '归档 AI 回复' in page.locator('#source-reader').inner_text()
-    assert page.locator('#input').is_hidden()
+    archive=page.locator('.archive-row[data-conversation-id="'+search_seed['archived']+'"]')
+    archive.wait_for()
+    assert page.evaluate('document.body.dataset.page')=='settings'
+    archive.get_by_role('button',name='进入对话',exact=True).click()
+    page.locator('#log').get_by_text('仅在正文命中的独有词 · 归档 AI 回复',exact=True).wait_for()
+    assert page.locator('#input').is_visible()
     sessions = browser_context.request.get(workspace_url['url'] + '/api/workbench/conversations').json()
     assert next(s for s in sessions['items'] if s['id'] == search_seed['archived'])['archived']
-    assert page.evaluate('window.XGentConversations.current') == 'global_memory'
+    assert page.evaluate('window.XGentConversations.current') == search_seed['archived']
     page.close()
 
 

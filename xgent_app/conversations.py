@@ -20,7 +20,7 @@ from typing import Any
 
 DEFAULT_CONVERSATION_ID = 'global_memory'
 DEFAULT_CONVERSATION_NAME = '默认会话'
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class ConversationError(ValueError):
@@ -337,7 +337,7 @@ class ConversationManager:
                 db = await self.factory()
                 checked_id = self._terminal_id
                 session = await db.get_session(checked_id)
-                if checked_id == self._terminal_id and (session is None or session.get('archived') or session.get('deleting')):
+                if checked_id == self._terminal_id and (session is None or session.get('deleting')):
                     self._terminal_id = None
                     self._terminal_revision += 1
             state = {**state, 'running': state.get('runs', {}).get(self._terminal_id), 'terminal_conversation_id': self._terminal_id,
@@ -393,8 +393,6 @@ class ConversationManager:
         session = await db.get_session(cid)
         if session is None or session.get('deleting'):
             raise ConversationChanged('该会话不存在，请刷新会话列表。')
-        if session.get('archived') and not allow_archived:
-            raise ConversationChanged('该会话已归档，请先恢复。')
         origin, purpose = identity()
         deliver = (purpose == 'chat' and cid == state.get('telegram_conversation_id')) if origin in {'web','cli'} else True
         route = await self.topics.route(cid) if self.topics is not None else {}

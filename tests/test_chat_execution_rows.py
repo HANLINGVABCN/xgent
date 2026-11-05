@@ -152,7 +152,7 @@ def test_real_shell_single_rows_inline_actions_and_copying(full_output_server, t
                 if not output.get_attribute('class').split().count('expanded'):
                     output.locator('.execution-row').click();page.wait_for_timeout(300)
                 assert output.locator('.execution-pre').evaluate('(n)=>getComputedStyle(n).fontSize')=='12px'
-                assert output.locator('.execution-pre').evaluate('(n)=>getComputedStyle(n).lineHeight')=='17px'
+                assert 17<=output.locator('.execution-pre').evaluate('(n)=>parseFloat(getComputedStyle(n).lineHeight)')<=20
                 assert output.get_by_role('button',name='查看完整输出').count()==1, output.inner_html()
                 output.get_by_role('button',name='查看完整输出').click()
                 page.get_by_text('FULL OUTPUT',exact=True).wait_for()

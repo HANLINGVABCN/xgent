@@ -204,7 +204,7 @@ def test_bot_import_guard_is_persisted_for_detached_coordinator_without_launchin
         assert operations.status(job['id'])['state'] == 'failed'
     else:
         operations.activate({'id': job['id'], 'confirm_replace': True, 'preserve_environment': True})
-        saved = json.loads(operations.job_path(job['id']).read_text())
+        saved = json.loads(operations.job_path(job['id']).read_text(encoding='utf-8'))
         assert saved['preserve_environment'] is True
         assert 'xgent_app.data_restore' in launch.call_args.args[0]
     assert paths.env.read_bytes() == before

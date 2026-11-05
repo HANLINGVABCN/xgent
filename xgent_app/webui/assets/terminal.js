@@ -1,4 +1,5 @@
 import './appearance.js';
+import {initializeTheme,acceptTheme} from './theme.js';
 
 var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
@@ -222,9 +223,9 @@ function openStream() {
 }
 
 var THEME = {
-  background: '#08090C', foreground: '#DDE1E9',
-  cursor: '#8189FF', cursorAccent: '#08090C',
-  selectionBackground: 'rgba(129,137,255,.34)',
+  background: '#171d1a', foreground: '#dfe9df',
+  cursor: '#8cceb0', cursorAccent: '#171d1a',
+  selectionBackground: 'rgba(140,206,176,.25)',
   black: '#1C1F27',   red: '#FF6B7E',     green: '#3ECF8E',  yellow: '#F0B429',
   blue: '#8189FF',    magenta: '#C08BFF', cyan: '#4CD6DE',   white: '#C6CBD6',
   brightBlack: '#5A6273', brightRed: '#FF8D9C', brightGreen: '#67E0AA', brightYellow: '#FFC94D',
@@ -406,16 +407,18 @@ async function createSession(){
 $('newSessionBtn').onclick=createSession;
 $('refreshSessionsBtn').onclick=function(){refreshSessions(false);};
 $('sessionSelect').onchange=function(){const s=sessions.find(x=>x.id===this.value);if(s)attachSession(s.id,s.pid);};
-var DARK_THEME={...THEME};
+var ANSI_THEME={...THEME};
+function acceptTerminalTheme({dark,colors}){
+  document.body.classList.toggle('light',!dark);
+  THEME={...ANSI_THEME,...colors};
+  if(term)term.options.theme=THEME;
+}
+window.addEventListener('xgent-theme-applied',event=>acceptTerminalTheme(event.detail));
 window.addEventListener('message',function(e){
   if(e.origin!==location.origin||e.data?.type!=='xgent-theme')return;
-  document.body.classList.toggle('light',!e.data.dark);
-  if(term)term.options.theme=e.data.dark?DARK_THEME:{...DARK_THEME,background:'#f7f9fb',foreground:'#24343e',cursor:'#147f9e'};
+  acceptTheme(e.data);
 });
-var theme=localStorage.getItem('xgent-theme');
-if(theme==='light'||(!theme&&!matchMedia('(prefers-color-scheme:dark)').matches)){
-  document.body.classList.add('light');THEME.background='#f7f9fb';THEME.foreground='#24343e';
-}
+initializeTheme({telegram:tg});
 
 new ResizeObserver(()=>{if(fit&&term){try{fit.fit();}catch{}}}).observe($('term-wrap'));
 window.visualViewport?.addEventListener('resize',()=>{if(fit&&term){try{fit.fit();}catch{}}});

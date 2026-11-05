@@ -264,12 +264,20 @@ class MessageQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('已取消', native_messages[1]['text'])
         self.assertIsNone(native_messages[1]['reply_markup'])
 
-    async def test_archive_restore_and_delete_do_not_auto_send_or_leak_pending_text(self):
+    async def test_archive_keeps_pending_text_runnable_in_the_original_context(self):
+        async with self.manager.operation(self.scope, execution=True):
+            item = await self.submit('private pending')
+            await self.manager.manage('archive', self.scope.conversation_id)
+            self.assertFalse((await self.queue.snapshot(self.scope.conversation_id))['paused'])
+            self.assertEqual(item['id'], (await self.db.queue_head())['id'])
+            batch = await self.queue.claim_continuation()
+            self.assertEqual(['private pending'], [entry['text'] for entry in batch])
+            self.assertEqual(self.scope.conversation_id, batch[0]['conversation_id'])
+            await self.manager.manage('restore', self.scope.conversation_id)
+        self.assertEqual('completed', (await self.db.queue_item(item['id']))['status'])
+
+    async def test_delete_removes_pending_text(self):
         item = await self.submit('private pending')
-        await self.manager.manage('archive', self.scope.conversation_id)
-        self.assertEqual('archived', (await self.queue.snapshot(self.scope.conversation_id))['reason'])
-        await self.manager.manage('restore', self.scope.conversation_id)
-        self.assertIsNone(await self.db.queue_head())
         await self.db.begin_conversation_delete(self.scope.conversation_id)
         await self.db.finish_conversation_delete(self.scope.conversation_id)
         self.assertIsNone(await self.db.queue_item(item['id']))

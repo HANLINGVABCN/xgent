@@ -212,7 +212,7 @@ def read_multipart(stream, length, content_type, directory):
             if file_part:
                 result['files'].append({'filename': filename or 'upload', 'path': str(Path(temporary.name) / str(len(result['files']))),
                                         'size': size, 'sha256': digest.hexdigest(), 'mime_type': headers.get_content_type()})
-            elif name in {'text', 'conversation_id', 'idempotency_key', 'batch_id', 'captions', 'modes'}:
+            elif name in {'text', 'conversation_id', 'idempotency_key', 'batch_id', 'captions', 'modes', 'queue', 'generation'}:
                 decoded = content.decode('utf-8', 'strict')
                 # Browsers normalize FormData text fields to CRLF on the wire.
                 result[name] = decoded.replace('\r\n', '\n') if name == 'text' else decoded

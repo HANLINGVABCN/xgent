@@ -4,9 +4,16 @@ from tests.test_workbench_browser import workspace_url,browser_context,ready
 
 
 def open_tab(context,url,tab):
-    page=context.new_page();ready(page,url,'models')
+    page=context.new_page()
+    if tab=='记忆':
+        # 「记忆」浏览管理已迁至 设置·对话与记忆 分区（懒加载面板）。
+        ready(page,url,'settings')
+        page.get_by_role('button',name='对话与记忆',exact=True).click()
+        page.get_by_role('button',name='新建记忆',exact=True).wait_for()
+        return page
+    ready(page,url,'models')
     page.get_by_role('button',name=tab,exact=True).click()
-    page.get_by_role('button',name='新建技能' if tab=='技能库' else '新建记忆',exact=True).wait_for()
+    page.get_by_role('button',name='新建技能',exact=True).wait_for()
     return page
 
 
@@ -65,6 +72,8 @@ def test_memory_crud_and_shared_draft_survives_conversation_switch(browser_conte
     items=browser_context.request.get(url+'/api/workbench/memories').json()['items'];item=next(d for d in items if d['path'] not in before)
     text.fill('切换时保留的共享记忆草稿')
     result=browser_context.request.post(url+'/api/workbench/conversations/create',data={'name':'编辑记忆时切换'}).json()
+    page.evaluate('window.XGentConversations.refresh()')
+    page.evaluate('(id)=>window.XGentConversations.select(id)',result['current_chat_id'])
     page.wait_for_function('(id)=>window.XGentConversations.current===id',arg=result['current_chat_id'])
     assert text.is_visible() and text.input_value()=='切换时保留的共享记忆草稿'
     page.get_by_role('button',name='保存修改',exact=True).click();page.get_by_text('已保存，后续对话生效',exact=True).wait_for()
@@ -108,7 +117,7 @@ def test_header_font_settings_and_removed_reset_card(browser_context,workspace_u
     page.get_by_role('button',name='保存字号',exact=True).click();page.get_by_text('字号已保存，其他网页设备同步生效。',exact=True).wait_for()
     assert browser_context.request.get(workspace_url['url']+'/api/config').json()['values']['web_message_font_size']==18
     page.screenshot(path=str(tmp_path/f'fonts-{size[0]}.png'))
-    page.get_by_role('tab',name='对话与记忆',exact=True).click()
+    page.get_by_role('button',name='对话与记忆',exact=True).click()
     assert page.get_by_text('当前会话上下文',exact=True).count()==0
     assert page.get_by_role('button',name='重置上下文',exact=True).count()==0
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')

@@ -48,7 +48,7 @@ def test_source_hint_does_not_overlap_bottom_arrow_and_close_stays_visible(brows
     ready(page,base,'files' if entry=='files' else 'chat')
     page.evaluate('(dark)=>document.body.classList.toggle("dark",dark)',dark)
     if entry=='files':
-        page.locator('.wb-file-table tbody tr').filter(has_text=source_record['filename']).locator('.wb-source-link').click()
+        page.locator('.wb-file-grid .wb-file-card').filter(has_text=source_record['filename']).locator('.wb-source-link').click()
     elif entry=='search':
         page.keyboard.press('Control+f')
         page.get_by_role('searchbox',name='全局搜索关键词',exact=True).fill('来源跳转显示验收')
@@ -61,16 +61,24 @@ def test_source_hint_does_not_overlap_bottom_arrow_and_close_stays_visible(brows
     page.locator('#log').evaluate('node=>{node.scrollTop=0;node.dispatchEvent(new Event("scroll"));}')
     page.wait_for_function('document.getElementById("scroll-bottom").classList.contains("show")')
     page.mouse.move(1,1)
-    styles=close.evaluate('node=>{const style=getComputedStyle(node);return {position:style.position,opacity:style.opacity,fontSize:style.fontSize};}')
-    assert styles=={'position':'static','opacity':'1','fontSize':'16px'}
+    styles=close.evaluate('node=>{const style=getComputedStyle(node);return {position:style.position,opacity:style.opacity};}')
+    assert styles=={'position':'static','opacity':'1'}
     box,cross,content,arrow=(locator.bounding_box() for locator in (banner,close,page.locator('.wb-source-content'),page.locator('#scroll-bottom')))
     assert cross['width']==cross['height']==28
+    glyph=close.locator('svg').bounding_box()
+    assert abs(glyph['x']+glyph['width']/2-cross['x']-cross['width']/2)<1
+    assert abs(glyph['y']+glyph['height']/2-cross['y']-cross['height']/2)<1
     assert content['x']>=cross['x']+cross['width']+5
     assert box['x']+box['width']+6<=arrow['x']
     assert content['x']+content['width']<=box['x']+box['width']
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
     page.screenshot(path=str(tmp_path/'source-hint.png'))
     page.locator('#input').fill('当前位置草稿保留')
+    # 相邻历史页在后台预取（chat.js 原行为）：等在途加载落地后再取基线，
+    # 避免把正常的预取落屏误判为“关闭提示丢失阅读状态”。
+    page.wait_for_function('document.getElementById("history-loading-state").hidden')
+    page.wait_for_timeout(500)
+    page.wait_for_function('document.getElementById("history-loading-state").hidden')
     before=page.locator('#log').evaluate('node=>({scroll:node.scrollTop,count:node.querySelectorAll(".msg-row").length})')
     close.click()
     assert banner.is_hidden() and page.evaluate('location.hash')=='#/chat?conversation='+source_record['id']

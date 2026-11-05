@@ -98,7 +98,7 @@ def test_versions_from_files_and_identity_validation(browser):
     page, context, base, demo, _ = browser
     page.goto(base+'/#/files')
     page.get_by_role('heading',name='文件与输出',exact=True).wait_for()
-    row=page.locator('.wb-file-table tbody tr').filter(has_text='版本说明.txt')
+    row=page.locator('.wb-file-grid .wb-file-card').filter(has_text='版本说明.txt')
     row.get_by_role('button',name='版本',exact=True).click()
     page.locator('.attachment-versions .version-card').first.wait_for()
     for value in ('../secret',demo['versions_id'].split(':')[0]+':'+'0'*64):

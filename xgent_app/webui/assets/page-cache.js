@@ -36,6 +36,7 @@ export class PageCache {
 
 /** Mutations invalidate only dependent pages. Read-only POSTs do not invalidate. */
 export function affectedPages(path,key) {
+  if(Array.isArray(key))return [...new Set(key.flatMap(item=>affectedPages(path,item)))];
   if(path==='/api/config')path='/api/workbench/settings';
   if(path.startsWith('/api/workbench/providers/')) {
     return /\/(fetch|export)$/.test(path)?[]:['models','settings','usage'];

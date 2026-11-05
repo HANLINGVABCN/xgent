@@ -27,7 +27,7 @@ def test_touch_menu_and_logout_do_not_depend_on_workbench(touch_context,workspac
     elif failure=='syntax_error':page.route('**/assets/workbench.js*',lambda r:r.fulfill(content_type='text/javascript',body='export const broken = ;'))
     else:page.add_init_script("Storage.prototype.getItem=function(){throw new DOMException('storage blocked','SecurityError')};Storage.prototype.removeItem=function(){throw new DOMException('storage blocked','SecurityError')};Storage.prototype.setItem=function(){throw new DOMException('storage blocked','SecurityError')};")
     page.goto(workspace_url['url']);page.wait_for_function('!!window.XGentChat && !document.getElementById("btn-send").disabled')
-    assert not page.evaluate('!!window.XGentWorkbench')
+    assert page.evaluate('!!window.XGentWorkbench') == (failure=='storage_denied')
     draft='基础按钮必须能用';page.locator('#input').fill(draft)
     assert page.locator('#btn-menu,#menu-panel').count() == 0
     for selector in ['#btn-composer-menu']:
@@ -40,7 +40,7 @@ def test_touch_menu_and_logout_do_not_depend_on_workbench(touch_context,workspac
         expect(page.locator('#composer-commands')).not_to_be_visible()
     page.locator('#btn-composer-menu').tap();page.locator('#composer-commands .composer-command').first.tap()
     assert sent==[{'conversation_id':'global_memory','command':'/start'}]
-    page.locator('#conversation-drawer-toggle').tap();page.locator('#workspace-settings').tap();page.locator('#wb-logout').tap()
+    page.locator('#conversation-mobile-toggle').tap();page.locator('#workspace-settings').tap();(page.locator('.wb-settings-nav [data-action=logout]') if page.evaluate('!!window.XGentWorkbench') else page.locator('#wb-logout')).tap()
     expect(page.locator('#login')).to_be_visible()
     assert not touch_context.request.get(workspace_url['url']+'/api/session').json()['authenticated']
     assert page.locator('#log .msg-row').count()==0
@@ -57,9 +57,9 @@ def test_optional_page_import_failure_is_local_to_that_page(touch_context,worksp
     assert not any('/assets/'+module+'.js' in url for url in reads)
     page.locator('#btn-composer-menu').tap();expect(page.locator('#composer-commands')).to_be_visible();page.keyboard.press('Escape')
     page.evaluate('(name)=>location.hash="/"+name',module)
-    expect(page.locator('#wb-page')).to_contain_text('管理页面脚本加载失败')
+    expect(page.locator('#wb-page')).to_contain_text('设置组件暂时无法加载')
     page.keyboard.press('Control+k');expect(page.locator('#composer-commands .composer-command strong').first).to_have_text('/start')
-    page.locator('#conversation-drawer-toggle').tap();page.locator('#workspace-settings').tap();page.locator('#wb-logout').tap()
+    page.locator('#conversation-mobile-toggle').tap();page.locator('#workspace-settings').tap();(page.locator('.wb-settings-nav [data-action=logout]') if page.evaluate('!!window.XGentWorkbench') else page.locator('#wb-logout')).tap()
     expect(page.locator('#login')).to_be_visible()
 
 
@@ -77,7 +77,7 @@ def test_failure_fallback_retry_and_no_duplicate_logout(touch_context,workspace_
     page.keyboard.press('Escape')
     def fail(r):requests.append(r.request);r.fulfill(status=503,json={'error':'logout offline'})
     page.route('**/api/logout',fail)
-    page.locator('#conversation-drawer-toggle').tap();page.locator('#workspace-settings').tap();page.locator('#wb-logout').tap()
+    page.locator('#conversation-mobile-toggle').tap();page.locator('#workspace-settings').tap();(page.locator('.wb-settings-nav [data-action=logout]') if page.evaluate('!!window.XGentWorkbench') else page.locator('#wb-logout')).tap()
     expect(page.locator('#wb-dialog')).to_contain_text('退出失败：logout offline')
     assert len(requests)==1
     page.unroute('**/api/logout');page.get_by_role('button',name='重试退出',exact=True).tap()
@@ -104,7 +104,7 @@ def test_normal_touch_controls_and_screenshot(touch_context,workspace_url):
     page.locator('#btn-composer-menu').tap();expect(page.locator('#composer-commands .composer-command strong').first).to_have_text('/start')
     output=Path(__file__).resolve().parents[1]/'workspace'/'web-basic-actions-qa';output.mkdir(parents=True,exist_ok=True)
     page.screenshot(path=str(output/'390-menu.png'))
-    page.keyboard.press('Escape');page.locator('#conversation-drawer-toggle').tap();page.locator('#workspace-settings').tap();page.locator('#wb-logout').tap();expect(page.locator('#login')).to_be_visible()
+    page.keyboard.press('Escape');page.locator('#conversation-mobile-toggle').tap();page.locator('#workspace-settings').tap();(page.locator('.wb-settings-nav [data-action=logout]') if page.evaluate('!!window.XGentWorkbench') else page.locator('#wb-logout')).tap();expect(page.locator('#login')).to_be_visible()
     page.screenshot(path=str(output/'390-logged-out.png'))
     assert not errors
 
