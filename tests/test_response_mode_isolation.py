@@ -107,6 +107,13 @@ async def test(root,telegram_mode):
         assert any(row['msg_type']=='ai_reply' and 'FINAL_VISIBLE_LINE' in row['content']
                    for row in await h.db.get_display_history(100))
         if telegram_mode!='foreground':assert not native.drafts
+        label={'foreground':'前台流式','background':'后台流式','nonstream':'非流式'}[telegram_mode]
+        statuses=[data['text'] for method,data in native.api_calls if method in {'sendMessage','editMessageText'}
+                  and '输出中…' in data.get('text','')]
+        assert statuses and all(value.startswith(label+'输出中…') for value in statuses),statuses
+        assert all(('等待完整回复' in value if telegram_mode=='nonstream' else
+                    '等待首段内容' in value or '已生成 ' in value) for value in statuses),statuses
+        if telegram_mode!='foreground':assert not any('FIRST_VISIBLE_LINE' in value for value in statuses)
         assert sum(method=='sendRichMessage' for method,_ in native.api_calls)==1,native.api_calls
         await worker.aclose()
         return {'live_web':True,'one_model_request':True,'telegram_mode':telegram_mode}

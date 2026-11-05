@@ -167,6 +167,39 @@ async def _delete_control(bot, chat_id, entry, extra):
         entry['control_id'] = None
 
 
+def _generation_status(spec):
+    mode = spec.get('mode')
+    label = {'background': '后台流式', 'nonstream': '非流式'}.get(mode, '前台流式')
+    raw = str(spec.get('raw') or '')
+    detail = ('等待完整回复' if mode == 'nonstream' else
+              '已生成 ' + str(len(raw)) + ' 字' if raw else '等待首段内容')
+    return label + '输出中… ' + detail
+
+
+async def _generation_control(bot, op, state, entry, keyboard, delivery, extra, *,
+                              paced=True, text=None, parse_mode=None):
+    """Reuse the same status and Stop target for waiting and streamed previews."""
+    from .web_bridge import markup_from_frame
+    spec = op.payload['telegram_native']
+    controls = markup_from_frame(spec.get('control_markup'))
+    control_keyboard = controls.to_dict() if controls else keyboard
+    text = _generation_status(spec) if text is None else text
+    signature = (text, control_keyboard, parse_mode)
+    if entry['control_id'] and entry.get('control_signature') == signature:
+        return
+    if paced and entry['control_id'] and not await _preview_ready(state, op, PROGRESS_INTERVAL_SECONDS):
+        return
+    data = {'chat_id': op.chat_id, 'text': text, 'reply_markup': control_keyboard, **delivery}
+    if parse_mode:
+        data['parse_mode'] = parse_mode
+    if entry['control_id']:
+        await _ignore_same_edit(bot, 'editMessageText', {**data, 'message_id': entry['control_id']}, extra)
+    else:
+        sent = await _post(bot, 'sendMessage', data, extra)
+        entry['control_id'] = sent['message_id']
+    entry['control_signature'] = signature
+
+
 async def deliver_native(bot, op, native_id, markup, extra):
     state = _state(bot)
     if op.kind == OP_NATIVE_MEDIA:
@@ -210,24 +243,7 @@ async def deliver_native(bot, op, native_id, markup, extra):
         await _delete_control(bot, op.chat_id, entry, extra)
         return None
     if op.kind == OP_NATIVE_CONTROL:
-        mode = spec.get('mode')
-        raw = str(spec.get('raw') or '')
-        text = ('已生成 ' + str(len(raw)) + ' 字…') if mode == 'background' and raw else '等待模型回复…' if mode == 'nonstream' else '生成中…'
-        from .web_bridge import markup_from_frame
-        controls = markup_from_frame(spec.get('control_markup'))
-        control_keyboard = controls.to_dict() if controls else keyboard
-        signature = (text, control_keyboard)
-        if entry.get('control_signature') == signature:
-            return None
-        if entry['control_id'] and not await _preview_ready(state, op, PROGRESS_INTERVAL_SECONDS):
-            return None
-        data = {'chat_id': op.chat_id, 'text': text, 'reply_markup': control_keyboard, **delivery}
-        if entry['control_id']:
-            await _ignore_same_edit(bot, 'editMessageText', {**data, 'message_id': entry['control_id']}, extra)
-        else:
-            sent = await _post(bot, 'sendMessage', data, extra)
-            entry['control_id'] = sent['message_id']
-        entry['control_signature'] = signature
+        await _generation_control(bot, op, state, entry, keyboard, delivery, extra)
         return None  # A status ID is never the formal reply ID.
     if op.kind == OP_NATIVE_MARKUP:
         ids = entry['ids'] or ([native_id] if native_id else [])
@@ -247,14 +263,8 @@ async def deliver_native(bot, op, native_id, markup, extra):
     if op.kind == OP_NATIVE_DRAFT:
         if not await _preview_ready(state, op, PREVIEW_INTERVAL_SECONDS):
             return None
-        if entry['control_id'] is None:
-            from .web_bridge import markup_from_frame
-            controls = markup_from_frame(spec.get('control_markup'))
-            sent = await _post(bot, 'sendMessage', {'chat_id': op.chat_id,
-                'text': '前台流式输出中…', 'reply_markup': controls.to_dict() if controls else keyboard,
-                **delivery}, extra)
-            entry['control_id'] = sent['message_id']
         if state['rich'] is not False and state['draft'] is not False:
+            await _generation_control(bot, op, state, entry, keyboard, delivery, extra, paced=False)
             try:
                 await _post(bot, 'sendRichMessageDraft', {'chat_id': op.chat_id,
                     'draft_id': spec['draft_id'], 'rich_message': {'html': rich_html[-1]},
@@ -267,10 +277,12 @@ async def deliver_native(bot, op, native_id, markup, extra):
                     raise
                 state['draft'] = False
         # Older local API: keep one live status, finalize the complete body later.
-        if entry['control_id']:
-            await _ignore_same_edit(bot, 'editMessageText', {'chat_id': op.chat_id,
-                'message_id': entry['control_id'], 'text': str(op.payload.get('text') or '生成中…'),
-                'parse_mode': op.payload.get('parse_mode'), 'reply_markup': keyboard}, extra)
+        status = _generation_status(spec)
+        body = str(op.payload.get('text') or '')
+        if spec.get('raw') and body:
+            status += '\n\n' + body
+        await _generation_control(bot, op, state, entry, keyboard, delivery, extra,
+                                  paced=False, text=status, parse_mode=op.payload.get('parse_mode'))
         return None
     if not entry['ids']:
         entry['ids'] = list(op.payload.get('_native_parts') or await _stored_parts(bot, op) or ([native_id] if native_id else []))

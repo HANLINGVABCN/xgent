@@ -20,6 +20,7 @@ paths = ['xgent_app/webui', 'xgent_app/web_server.py', 'xgent_app/workbench.py',
          'xgent_app/conversations.py', 'xgent_app/conversation_store.py',
          'xgent_app/child_conversations.py', 'xgent_app/archive_conversations.py',
          'xgent_app/conversation_branching.py', 'xgent_app/attachment_version_api.py',
+         'xgent_app/telegram_native.py',
          'xgent_app/sections/database.py', 'xgent_app/sections/SOURCE_BASELINE.sha256']
 stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
 backup = target / 'workspace' / 'frontend-deploy' / stamp
