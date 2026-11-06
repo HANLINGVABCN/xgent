@@ -140,3 +140,6 @@
 @media (hover:none) { .conv-more { opacity:1; } }
 
 .conv-new,.conv-dialog-actions button.conv-save { color:var(--on-accent); }
+@keyframes xgent-search-autofill { from { opacity:1; } to { opacity:1; } }
+#conversation-search:-webkit-autofill { animation:xgent-search-autofill 1ms; }
+#conversation-search:autofill { animation:xgent-search-autofill 1ms; }

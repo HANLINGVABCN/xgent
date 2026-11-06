@@ -1,4 +1,5 @@
 /* Native Web ask-x form; plain drafts survive reload, passwords stay in this DOM. */
+import {preventAutofill} from './input-policy.js';
 function mergeDraft(snapshot,current,unsaved){
   const draft=structuredClone(snapshot.draft||{});
   for(const q of snapshot.questions)if(unsaved.has(q.id)){
@@ -21,6 +22,7 @@ export function syncAskForm(entry,snapshot,options={}){
   entry.askNode?.remove();
   entry.btns?.remove();entry.btns=null;
   const node=document.createElement('form');node.className='web-ask-form';node.setAttribute('aria-label','Agent 提问表单');
+  preventAutofill(node);
   const key='xgent-ask-draft:'+snapshot.conversation_id+':'+snapshot.id;
   const state={snapshot,draft:structuredClone(snapshot.draft||{}),unsavedFields:new Set(),dirty:false,busy:false,serial:0,timer:null,writes:Promise.resolve(),fields:[],settled:false};
   entry.askState=state;entry.askNode=node;
@@ -107,7 +109,8 @@ export function syncAskForm(entry,snapshot,options={}){
       const title=document.createElement('span');title.textContent=q.type==='secret'?'密钥 $'+q.var:q.type==='text'?'填写答案':'自定义答案';
       const controls=document.createElement('span');controls.className='web-ask-entry';
       const input=document.createElement(q.type==='secret'?'input':'textarea');
-      if(q.type==='secret'){input.type='password';input.autocomplete='off';}else{input.rows=2;input.value=state.draft[q.id]?.custom||'';}
+      if(q.type==='secret'){input.type='password';}else{input.rows=2;input.value=state.draft[q.id]?.custom||'';}
+      preventAutofill(input);
       input.setAttribute('aria-label',q.prompt+(q.other?' · 自定义答案':''));input.maxLength=20000;
       input.oninput=()=>{if(q.type==='secret'){state.paint();return;}const answer=state.draft[q.id]||={};answer.custom=input.value;if(q.type==='single')answer.selected=[];changed(q.id);};
       controls.append(input);

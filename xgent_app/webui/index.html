@@ -72,7 +72,7 @@
   <button id="conversation-new" class="conv-new" type="button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg><span>新对话</span><span class="conv-new-arrow" aria-hidden="true">↗</span></button>
   <div class="conv-search-wrap">
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
-    <input id="conversation-search" type="search" aria-label="搜索对话名称和内容" placeholder="搜索对话" maxlength="200" autocomplete="off" spellcheck="false">
+    <input id="conversation-search" type="search" aria-label="搜索对话名称和内容" placeholder="搜索对话" maxlength="200" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" spellcheck="false">
     <button id="conversation-search-clear" class="conv-icon-button" type="button" aria-label="清除对话搜索" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <div id="conversation-groups" class="conv-groups" aria-label="对话分组">
@@ -117,7 +117,7 @@
 <div id="search-bar">
   <div class="search-input-wrap">
     <svg class="icon" viewBox="0 0 24 24"><use href="#i-search"/></svg>
-    <input type="search" id="search-input" autocomplete="off" placeholder="在会话中搜索关键词…">
+    <input type="search" id="search-input" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" placeholder="在会话中搜索关键词…">
     <span class="search-count" id="search-count">0/0</span>
   </div>
   <div class="search-actions">
@@ -189,7 +189,7 @@
     <div class="composer-card">
       <div id="pending-files" class="pending-files hidden"></div>
       <div class="input-wrap">
-        <textarea id="input" rows="1" placeholder="发送消息…" aria-label="消息"></textarea>
+        <textarea id="input" rows="1" placeholder="发送消息…" aria-label="消息" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></textarea>
       </div>
       <div class="composer-row">
         <input type="file" id="file-input" class="hidden" multiple>
@@ -239,10 +239,10 @@
 <dialog id="wb-dialog" aria-labelledby="wb-dialog-title"><header><h2 id="wb-dialog-title"></h2><button id="wb-dialog-close" class="icon-btn" type="button" aria-label="关闭"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header><div id="wb-dialog-body"></div></dialog>
 <div id="conversation-item-menu" class="conv-item-menu" role="menu" aria-label="对话操作" hidden></div>
 <dialog id="conversation-rename-dialog" class="conv-dialog" aria-labelledby="conversation-rename-title">
-  <form id="conversation-rename-form">
+  <form id="conversation-rename-form" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true">
     <div class="conv-dialog-heading"><h2 id="conversation-rename-title">重命名对话</h2><button id="conversation-rename-close" class="conv-icon-button" type="button" aria-label="关闭重命名"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></div>
     <label for="conversation-rename-input">对话名称</label>
-    <input id="conversation-rename-input" name="name" type="text" maxlength="80" required autocomplete="off">
+    <input id="conversation-rename-input" name="name" type="text" maxlength="80" required autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true">
     <p id="conversation-rename-error" role="alert" hidden></p>
     <div class="conv-dialog-actions"><button id="conversation-rename-cancel" type="button">取消</button><button id="conversation-rename-save" class="conv-save" type="submit">保存</button></div>
   </form>
@@ -251,7 +251,7 @@
 <!-- 登录弹窗 -->
 <dialog id="login" aria-labelledby="login-title">
   <div class="login-context" aria-hidden="true"><span class="login-eyebrow" data-brand-name>XGent</span><div class="login-orbit"><span></span><svg class="icon" viewBox="0 0 24 24"><use href="#i-spark"/></svg></div><p>从想法，到行动。</p><small>对话 · 工具 · 知识 · 创作</small></div>
-  <div class="login-card">
+  <form id="login-credentials" class="login-card" autocomplete="on">
     <div class="login-icon" data-brand-logo aria-hidden="true"><img src="/assets/logo.svg" width="58" height="58" alt=""></div>
     <h2 id="login-title" data-brand-name data-brand-suffix=" Web">XGent Web</h2>
     <p class="login-sub" id="login-sub">请输入访问密码以继续</p>
@@ -260,7 +260,7 @@
     <input type="text" id="login-code" aria-label="动态验证码或恢复码" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
     <button type="button" id="login-back" class="login-sub" hidden>返回密码登录</button>
     <button class="btn-primary" id="btn-login" type="button">登录 <span aria-hidden="true">→</span></button>
-  </div>
+  </form>
   <div class="login-foot" id="login-foot">在 Telegram 中通过菜单按钮打开可免密直接登录</div>
 </dialog>
 

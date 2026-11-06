@@ -1,11 +1,13 @@
 // Navigation must remain usable if optional workbench/components scripts fail.
 // Keep this small read-only surface independent of their module graph.
+import {preventAutofill} from './input-policy.js';
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
     if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
     else if (value !== undefined && value !== null) node.setAttribute(key, value);
   }
+  preventAutofill(node);
   for (const child of children.flat(Infinity)) if (child !== null && child !== undefined) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return node;
 }

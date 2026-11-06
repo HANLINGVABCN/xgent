@@ -1,4 +1,5 @@
 import {el,button,field,api,message,copyText} from './components.js';
+import {allowCredentialAutofill} from './input-policy.js';
 
 const endpoint='/api/security/2fa';
 export async function twoFactorCard({card,dialog,closeDialog,submit}){
@@ -23,7 +24,7 @@ export async function twoFactorCard({card,dialog,closeDialog,submit}){
   }
   function setup(){
     const box=el('div'),form=el('form',{},field('当前访问密码','password','','password','重新确认密码后生成绑定二维码。'),el('button',{type:'submit',class:'wb-btn primary'},'生成绑定信息'));
-    form.elements.password.autocomplete='current-password';form.elements.password.required=true;form.elements.password.setAttribute('aria-label','当前访问密码');
+    allowCredentialAutofill(form.elements.password,'current-password');form.elements.password.required=true;form.elements.password.setAttribute('aria-label','当前访问密码');
     box.append(form);dialog('添加验证器 App',box);
     form.onsubmit=event=>{event.preventDefault();submit(form,async data=>{
       const binding=await api(endpoint+'/setup',{data:{password:data.password}});form.reset();
@@ -31,7 +32,7 @@ export async function twoFactorCard({card,dialog,closeDialog,submit}){
         el('img',{src:binding.qr,alt:'验证器绑定二维码',width:210,height:210}),
         el('details',{},el('summary',{},'手动添加密钥'),el('code',{},binding.secret),button('复制密钥',()=>copyText(binding.secret))),
         field('六位动态验证码','code','','text'),el('button',{type:'submit',class:'wb-btn primary'},'验证并启用'));
-      verify.elements.code.autocomplete='one-time-code';verify.elements.code.inputMode='numeric';verify.elements.code.maxLength=6;verify.elements.code.required=true;
+      allowCredentialAutofill(verify.elements.code,'one-time-code');verify.elements.code.inputMode='numeric';verify.elements.code.maxLength=6;verify.elements.code.required=true;
       verify.onsubmit=e=>{e.preventDefault();submit(verify,async d=>{
         const result=await api(endpoint+'/confirm',{data:{setup_id:binding.setup_id,code:d.code}});
         binding.secret='';binding.qr='';verify.reset();box.replaceChildren();await refresh();recoveryCodes(result.recovery_codes);
@@ -41,7 +42,7 @@ export async function twoFactorCard({card,dialog,closeDialog,submit}){
   function reauth(action){
     const form=el('form',{},field('当前访问密码','password','','password'),field('动态验证码或恢复码','code','','text'),
       el('button',{type:'submit',class:'wb-btn '+(action==='disable'?'danger':'primary')},action==='disable'?'确认关闭':'重新生成'));
-    form.elements.password.autocomplete='current-password';form.elements.code.autocomplete='one-time-code';
+    allowCredentialAutofill(form.elements.password,'current-password');allowCredentialAutofill(form.elements.code,'one-time-code');
     form.elements.password.required=form.elements.code.required=true;
     dialog(action==='disable'?'关闭两步验证':'重新生成恢复码',form);
     form.onsubmit=e=>{e.preventDefault();submit(form,async d=>{

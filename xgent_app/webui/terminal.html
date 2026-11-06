@@ -73,10 +73,12 @@
     <h2>终端登录验证</h2>
     <p class="sub">终端拥有系统级执行权限，仅授权用户可用。</p>
     <div id="err"></div>
-    <input id="pw" type="password" aria-label="访问密码" placeholder="访问密码" autocomplete="current-password">
-    <input id="otp" type="text" aria-label="动态验证码或恢复码" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
-    <button type="button" id="loginBack" hidden>返回密码登录</button>
-    <button class="btn-primary" id="loginBtn">登录终端</button>
+    <form id="terminal-login-credentials" autocomplete="on">
+      <input id="pw" type="password" aria-label="访问密码" placeholder="访问密码" autocomplete="current-password">
+      <input id="otp" type="text" aria-label="动态验证码或恢复码" placeholder="动态验证码或恢复码" autocomplete="one-time-code" maxlength="32" hidden>
+      <button type="button" id="loginBack" hidden>返回密码登录</button>
+      <button class="btn-primary" id="loginBtn" type="button">登录终端</button>
+    </form>
     <div class="muted">在 Telegram 菜单中打开时可自动免密。</div>
   </div>
 </div>
@@ -95,7 +97,7 @@
   <div class="card">
     <h2>粘贴到终端</h2>
     <p class="sub">当前环境不允许直接读取剪贴板，请在下方粘贴内容。</p>
-    <textarea id="pasteBox" placeholder="在此长按粘贴，或按 Ctrl/⌘ + V"></textarea>
+    <textarea id="pasteBox" placeholder="在此长按粘贴，或按 Ctrl/⌘ + V" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></textarea>
     <button class="btn-primary" id="pasteSendBtn">发送至终端</button>
     <button class="btn-ghost" id="pasteCancelBtn">取消</button>
   </div>

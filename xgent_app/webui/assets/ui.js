@@ -1,4 +1,5 @@
 /* Presentation only: no requests, stored conversation state or model decisions. */
+import {preventAutofill} from './input-policy.js';
 export const $ = id => document.getElementById(id);
 export function readPreference(key,fallback=null){try{return localStorage.getItem(key)??fallback;}catch{return fallback;}}
 export function writePreference(key,value){try{if(value===null)localStorage.removeItem(key);else localStorage.setItem(key,String(value));}catch{}}
@@ -28,6 +29,7 @@ export function el(tag, attributes = {}, ...children) {
     else if (['checked', 'disabled', 'hidden', 'selected'].includes(name)) node[name] = !!value;
     else if (value !== null && value !== undefined) node.setAttribute(name, value);
   }
+  preventAutofill(node);
   for (const child of children.flat(Infinity)) {
     if (child !== null && child !== undefined) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }

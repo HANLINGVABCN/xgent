@@ -2,6 +2,7 @@ import {el,button,field,select,check,wb,api,message,tag} from './components.js';
 import {panelNames} from './navigation.js';
 import {readPreference,writePreference} from './ui.js';
 import {themePicker} from './theme-settings.js';
+import {allowCredentialAutofill} from './input-policy.js';
 
 export async function settingsView({logout,boot,health,state,render,dialog,closeDialog,submit,dirtyForm,confirmAction,refreshBootstrap,setTheme,filter,heading,card,actions,read,localFilters,detail,closeDetail,toolbar,managementModule,sideNav}) {
   const settings=boot.settings;
@@ -73,7 +74,7 @@ export async function settingsView({logout,boot,health,state,render,dialog,close
     grid.append(card('服务入口',form));
     grid.append(card('账号与访问',el('p',{},'改密将撤销所有网页登录并关闭网页终端会话。'),button('修改访问密码',()=>{
       const f=el('form',{},field('新密码','password','','password','至少 6 位，建议使用长且唯一的密码。'),field('再次输入','repeat','','password'),check('我知道这会让全部浏览器下线并关闭终端','confirm'),el('button',{type:'submit',class:'wb-btn primary'},'保存并重新登录'));
-      f.querySelectorAll('input[type=password]').forEach(n=>n.autocomplete='new-password');dirtyForm(f);
+      f.querySelectorAll('input[type=password]').forEach(n=>allowCredentialAutofill(n,'new-password'));dirtyForm(f);
       f.onsubmit=e=>{e.preventDefault();submit(f,async d=>{if(d.password!==d.repeat)throw new Error('两次密码不一致');if(d.password.length<6)throw new Error('密码至少 6 位');await wb('password',{data:{password:d.password,confirm:d.confirm}});f.reset();state.dirty=false;sessionStorage.clear();f.append(message('已修改，正在撤销会话并重新登录…','success'));setTimeout(()=>location.reload(),1000);});};dialog('修改 Web 密码',f);
     }),button('退出当前登录',logout)));
     lazyCards('两步验证（2FA）',async()=>{const {twoFactorCard}=await managementModule('two-factor');return twoFactorCard({card,dialog,closeDialog,submit});});

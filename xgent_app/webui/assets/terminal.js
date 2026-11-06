@@ -1,5 +1,6 @@
 import './appearance.js';
 import {initializeTheme,acceptTheme} from './theme.js';
+import {preventAutofill} from './input-policy.js';
 
 var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
@@ -45,7 +46,7 @@ function copyText(text) {
   return new Promise(function (resolve, reject) {
     function legacy() {
       try {
-        var ta = document.createElement('textarea');
+        var ta = preventAutofill(document.createElement('textarea'));
         ta.value = text;
         ta.setAttribute('readonly', '');
         ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;';
@@ -192,8 +193,9 @@ $('loginBtn').onclick = function () {
   api('/api/login',{method:'POST',body:JSON.stringify(payload)}).then(function(data){if(acceptLogin(data)){hideLogin();initTerm();}})
     .catch(function(e){$('err').textContent=e.message||'登录失败';if(e.status===410)acceptLogin({});}).finally(function(){$('loginBtn').disabled=false;});
 };
-$('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('loginBtn').click(); });
-$('otp').addEventListener('keydown',function(e){if(e.key==='Enter')$('loginBtn').click();});
+$('pw').addEventListener('keydown', function (e) { if (e.key === 'Enter') {e.preventDefault();$('loginBtn').click();} });
+$('otp').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();$('loginBtn').click();}});
+$('terminal-login-credentials').addEventListener('submit',event=>{event.preventDefault();$('loginBtn').click();});
 
 var outputCursor = 0;
 var inputChain = Promise.resolve();

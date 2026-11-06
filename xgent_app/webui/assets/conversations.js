@@ -1,10 +1,12 @@
 /* Conversation navigation is independent of optional workbench pages. */
 import {ConversationSearch} from './global-search.js';
+import {preventAutofill,guardSearchAutofill} from './input-policy.js';
 const $ = id => document.getElementById(id);
 const sidebar = $('wb-nav');
 const list = $('conversation-list');
 const scroll = $('conversation-scroll');
 const search = $('conversation-search');
+const searchAutofill=guardSearchAutofill(search);
 const globalResults = new ConversationSearch(list, {compact: true});
 const menu = $('conversation-item-menu');
 const renameDialog = $('conversation-rename-dialog');
@@ -88,6 +90,7 @@ function node(tag, attributes = {}, ...children) {
   for (const [key, value] of Object.entries(attributes)) {
     if (value != null) element.setAttribute(key, String(value));
   }
+  preventAutofill(element);
   for (const child of children.flat()) {
     if (child != null) element.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
@@ -478,6 +481,7 @@ function renderRunning() {
   banner.replaceChildren(...entries);
 }
 function render() {
+  searchAutofill.remember();
   const selected = itemById(state.current_chat_id);
   $('wb-conversation-title').textContent = title(selected);
   $('wb-conversation-title').title = title(selected);

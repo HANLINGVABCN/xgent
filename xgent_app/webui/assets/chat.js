@@ -3,6 +3,7 @@ import {syncAskForm} from './ask-form.js';
 import {installCommandSeries} from './command-series.js';
 import {decorateBrandAuthor} from './branding.js';
 import {initializeTheme} from './theme.js';
+import {preventAutofill} from './input-policy.js';
 (function () {
   "use strict";
 
@@ -198,7 +199,7 @@ import {initializeTheme} from './theme.js';
     return new Promise(function (resolve, reject) {
       function legacy() {
         try {
-          var ta = document.createElement("textarea");
+          var ta = preventAutofill(document.createElement("textarea"));
           ta.value = text;
           ta.setAttribute("readonly", "");
           ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;";
@@ -2997,7 +2998,7 @@ import {initializeTheme} from './theme.js';
           ["input", "output", "cached"].forEach(function (f) {
             var td = document.createElement("td");
             td.style.textAlign = "center";
-            var inp = document.createElement("input");
+            var inp = preventAutofill(document.createElement("input"));
             inp.type = "number"; inp.step = "0.01"; inp.min = "0";
             inp.value = draft[k][f];
             inp.style.cssText = "width:64px;padding:4px;border:1px solid var(--line);border-radius:4px;background:var(--surface-2);color:var(--text);text-align:right;";
@@ -3024,14 +3025,14 @@ import {initializeTheme} from './theme.js';
 
       var add = document.createElement("div");
       add.style.cssText = "display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;align-items:center;";
-      var nameInp = document.createElement("input");
+      var nameInp = preventAutofill(document.createElement("input"));
       nameInp.type = "text"; nameInp.placeholder = "模型名 (如 gemini-2.5 或 default)";
       nameInp.style.cssText = "flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface-2);color:var(--text);";
-      var inInp = document.createElement("input");
+      var inInp = preventAutofill(document.createElement("input"));
       inInp.type = "number"; inInp.step = "0.01"; inInp.placeholder = "输入"; inInp.style.cssText = "width:60px;padding:6px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface-2);color:var(--text);";
-      var outInp = document.createElement("input");
+      var outInp = preventAutofill(document.createElement("input"));
       outInp.type = "number"; outInp.step = "0.01"; outInp.placeholder = "输出"; outInp.style.cssText = "width:60px;padding:6px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface-2);color:var(--text);";
-      var cacheInp = document.createElement("input");
+      var cacheInp = preventAutofill(document.createElement("input"));
       cacheInp.type = "number"; cacheInp.step = "0.01"; cacheInp.placeholder = "缓存"; cacheInp.style.cssText = "width:60px;padding:6px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface-2);color:var(--text);";
       var addBtn = document.createElement("button");
       addBtn.type = "button"; addBtn.textContent = "+ 添加";
@@ -3094,7 +3095,7 @@ import {initializeTheme} from './theme.js';
           tr.style.borderBottom = "1px solid var(--line)";
           var tdName = document.createElement("td");
           tdName.style.padding = "6px 4px";
-          var nameInp = document.createElement("input");
+          var nameInp = preventAutofill(document.createElement("input"));
           nameInp.type = "text"; nameInp.value = k;
           nameInp.style.cssText = "width:100%;padding:4px;border:1px solid var(--line);border-radius:4px;background:var(--surface-2);color:var(--text);";
           var oldName = k;
@@ -3110,7 +3111,7 @@ import {initializeTheme} from './theme.js';
 
           var tdMem = document.createElement("td");
           tdMem.style.padding = "6px 4px";
-          var memInp = document.createElement("input");
+          var memInp = preventAutofill(document.createElement("input"));
           memInp.type = "text"; memInp.value = (draft[k] || []).join(", ");
           memInp.style.cssText = "width:100%;padding:4px;border:1px solid var(--line);border-radius:4px;background:var(--surface-2);color:var(--text);";
           memInp.addEventListener("change", function () {
@@ -3135,10 +3136,10 @@ import {initializeTheme} from './theme.js';
 
       var add = document.createElement("div");
       add.style.cssText = "display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;";
-      var nameInp = document.createElement("input");
+      var nameInp = preventAutofill(document.createElement("input"));
       nameInp.type = "text"; nameInp.placeholder = "规范名 (如 claude-3-7)";
       nameInp.style.cssText = "flex:1;min-width:140px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface-2);color:var(--text);";
-      var memInp = document.createElement("input");
+      var memInp = preventAutofill(document.createElement("input"));
       memInp.type = "text"; memInp.placeholder = "成员 (如 1-claude-3-7, 2-claude-3-7)";
       memInp.style.cssText = "flex:2;min-width:200px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--surface-2);color:var(--text);";
       var addBtn = document.createElement("button");
@@ -3287,7 +3288,7 @@ import {initializeTheme} from './theme.js';
         } else if (field.type === "merge_map") {
           row.appendChild(renderMergeMapEditor(row, data.values[field.key] || {}));
         } else {
-          var num = document.createElement("input");
+          var num = preventAutofill(document.createElement("input"));
           num.type = "number";
           if (field.min != null) num.min = field.min;
           if (field.max != null) num.max = field.max;
@@ -3347,9 +3348,10 @@ import {initializeTheme} from './theme.js';
     tryLogin(payload).catch(function(err){loginErr.textContent=err.message;if(err.status===410)resetLoginFactor();}).finally(function(){button.disabled=false;});
   });
   document.getElementById("password").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") document.getElementById("btn-login").click();
+    if (e.key === "Enter") {e.preventDefault();document.getElementById("btn-login").click();}
   });
-  document.getElementById('login-code').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('btn-login').click();});
+  document.getElementById('login-code').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();document.getElementById('btn-login').click();}});
+  document.getElementById('login-credentials').addEventListener('submit',event=>{event.preventDefault();document.getElementById('btn-login').click();});
 
   btnSend.addEventListener("click", send);
   bindContentClicks(log);
