@@ -36,37 +36,48 @@ let renameTarget = null, renameReturn = null, renameSaving = false;
 let feedbackTimer = null;
 const controllers = new Set();
 const locationParams = () => new URLSearchParams(location.hash.split('?')[1] || '');
+const chatLocation = () => !location.hash || (location.hash.replace(/^#\/?/, '').split('?')[0] || 'chat') === 'chat';
 let localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
-try{if(!localCurrent&&!locationParams().has('message'))localCurrent=sessionStorage.getItem('xgent-selected-conversation');}catch{}
+let listReady = false, draftToken = null;
+try{if(!chatLocation())localCurrent=sessionStorage.getItem('xgent-selected-conversation');draftToken=sessionStorage.getItem('xgent-new-conversation-token');}catch{}
+function newToken(){
+  if(!draftToken){draftToken=globalThis.crypto?.randomUUID?.()||('new'+Date.now().toString(36)+Math.random().toString(36).slice(2));try{sessionStorage.setItem('xgent-new-conversation-token',draftToken);}catch{}}
+  return draftToken;
+}
 function conversationHref(id) { return id ? '#/chat?conversation=' + encodeURIComponent(id) : '#/chat'; }
 function keepConversationUrl() {
-  if (!localCurrent || locationParams().has('message')) return;
+  if (locationParams().has('message')) return;
   const route = location.hash.replace(/^#\/?/, '').split('?')[0] || 'chat';
-  try{sessionStorage.setItem('xgent-selected-conversation',localCurrent);}catch{}
+  try{if(localCurrent)sessionStorage.setItem('xgent-selected-conversation',localCurrent);else sessionStorage.removeItem('xgent-selected-conversation');}catch{}
   if(route!=='chat')return;
+  if(!localCurrent){if(location.hash!=='#/chat')history.replaceState(null,'','#/chat');return;}
   const params = locationParams(); params.set('conversation', localCurrent);
   const hash = '#/' + route + '?' + params.toString();
   if (location.hash !== hash) history.replaceState(null, '', hash);
 }
-function selectLocal(id, writeUrl = true) {
-  if (!id) return false;
+function selectLocal(id, writeUrl = true, detail = {}) {
+  id = id || null;
   const previous = state.current_chat_id;
   localCurrent = id;
-  try{sessionStorage.setItem('xgent-selected-conversation',id);}catch{}
+  if(!id)newToken();
+  try{if(id)sessionStorage.setItem('xgent-selected-conversation',id);else sessionStorage.removeItem('xgent-selected-conversation');}catch{}
   state = {...state, current_chat_id: id, running: runningFor(id)};
-  if (writeUrl && locationParams().get('conversation') !== id) history.pushState(null, '', conversationHref(id));
+  if (writeUrl && location.hash !== conversationHref(id)) history[writeUrl==='replace'?'replaceState':'pushState'](null, '', conversationHref(id));
   if (!writeUrl) keepConversationUrl();
   revealAncestors(id); render();
   window.dispatchEvent(new CustomEvent('xgent-conversation-state', {detail: state}));
   if (previous !== id) window.dispatchEvent(new CustomEvent('xgent-conversation-changed', {
-    detail: {previous, conversation_id: id},
+    detail: {previous, conversation_id: id, ...detail},
   }));
+  if(!id)window.dispatchEvent(new Event('xgent-new-conversation'));
   return true;
 }
 function followConversationLocation() {
-  if (locationParams().has('message')) return;
+  if(!chatLocation())return;
   const id = locationParams().get('conversation');
-  if (id && id !== localCurrent && state.items.length) selectLocal(id, false);
+  if(id&&listReady&&!itemById(id)){selectLocal(null,'replace');return;}
+  if (locationParams().has('message')) return;
+  if (id !== localCurrent && (!id || listReady)) selectLocal(id, false);
   else keepConversationUrl();
 }
 window.addEventListener('hashchange', followConversationLocation);
@@ -167,29 +178,33 @@ async function groupMutation(resource, data = {}) {
 }
 
 function accept(next) {
-  if (!next?.current_chat_id || !Array.isArray(next.items) || Number(next.revision) < state.revision) return;
+  if (!Array.isArray(next?.items) || Number(next.revision) < state.revision) return;
   $('conversation-sync-error').hidden = true;
   const previous = state.current_chat_id;
-  localCurrent ||= next.current_chat_id;
-  const combined = {...state, ...next, current_chat_id: localCurrent};
+  itemIndex = new Map(next.items.map(item => [item.id, item]));
+  listReady = true;
+  const missing = localCurrent && !itemById(localCurrent) || chatLocation() && locationParams().get('conversation') && !itemById(locationParams().get('conversation'));
+  if(missing){localCurrent=null;newToken();if(chatLocation())history.replaceState(null,'','#/chat');}
+  const combined = {...state, ...next, server_current_chat_id:next.current_chat_id, current_chat_id: localCurrent};
   if (JSON.stringify(combined) === JSON.stringify(state)) return;
   state = {...combined, running: combined.runs ? combined.runs[combined.current_chat_id] || null : combined.running};
   keepConversationUrl();
-  itemIndex = new Map(state.items.map(item => [item.id, item]));
   for (const id of expandedChildren) if (!itemIndex.has(id)) expandedChildren.delete(id);
   saveExpandedChildren();
   if (previous !== state.current_chat_id || !rows.size) revealAncestors(state.current_chat_id);
   render();
   window.dispatchEvent(new CustomEvent('xgent-conversation-state', {detail: state}));
-  if (previous !== state.current_chat_id) {
+  if (previous !== state.current_chat_id || missing) {
     window.dispatchEvent(new CustomEvent('xgent-conversation-changed', {
       detail: {previous, conversation_id: state.current_chat_id},
     }));
   }
+  if(missing)window.dispatchEvent(new Event('xgent-new-conversation'));
 }
 async function refresh() {
   if (request) return request;
-  const pending = api('/api/workbench/conversations').then(accept).catch(error => {
+  const pending = api('/api/workbench/conversations').then(next=>{if(request===pending)accept(next);}).catch(error => {
+    if(request!==pending)return;
     if (error.name === 'AbortError' || error.status === 401) return;
     if (!state.current_chat_id) renderLoadError(error);
     else {
@@ -239,11 +254,10 @@ async function selectConversation(id) {
   } catch (error) { if (error.name !== 'AbortError') notify('切换失败：' + error.message, {error: true, retry: () => selectConversation(id)}); }
 }
 async function createConversation() {
-  if (mutation || !state.current_chat_id || !await prepareChat()) return;
+  if (mutation || !await prepareChat()) return;
   try {
     search.value = '';
-    const result = await mutate('create');if(!result)return;
-    if(groupView!=='all'&&groupView!=='ungrouped')await groupMutation('/api/workbench/conversations/move',{id:result.conversation_id||result.current_chat_id,group_id:groupView});
+    selectLocal(null);
     scroll.scrollTop = 0;
     closeMenu(false); setDrawer(false, false);
     requestAnimationFrame(() => $('input')?.focus({preventScroll: true}));
@@ -467,7 +481,8 @@ function render() {
   const selected = itemById(state.current_chat_id);
   $('wb-conversation-title').textContent = title(selected);
   $('wb-conversation-title').title = title(selected);
-  $('conversation-new').disabled = !state.current_chat_id || !!mutation;
+  document.querySelector('.wb-brand')?.setAttribute('href',conversationHref(localCurrent));
+  $('conversation-new').disabled = !authenticated || !!mutation;
   $('conversation-new').setAttribute('aria-busy', String(mutation?.name === 'create'));
   $('conversation-search-clear').hidden = !search.value;
   $('conversation-list-title').textContent = search.value.trim() ? '全局搜索' : groupView === 'all' ? '全部对话' : groupName(groupView);
@@ -478,7 +493,7 @@ function render() {
     if(!options.some(item => item.id === groupView))groupView='ungrouped';
     select.value = groupView;
   }
-  if (state.current_chat_id) renderList();
+  if (listReady) renderList();
   renderRunning();
 }
 
@@ -736,15 +751,30 @@ document.addEventListener('keydown', event => {
 }, true);
 
 window.XGentConversations = {
+  new:async()=>{if(await prepareChat())selectLocal(null,'replace');},
+  materialize:(result,token,groupId='ungrouped')=>{
+    const id=result.conversation_id;if(!id)return false;
+    const adopted=!localCurrent&&draftToken===token;
+    if(Number.isSafeInteger(result.conversation_revision))state.revision=Math.max(state.revision,result.conversation_revision);
+    if(!itemById(id)){const item={id,name:'新对话',generation:result.generation,archived:0,group_id:groupId,created_at:Date.now()/1000};state.items=[item,...state.items];itemIndex.set(id,item);listSignature='';}
+    window.dispatchEvent(new CustomEvent('xgent-conversation-materialized',{detail:{conversation_id:id,generation:result.generation,token,adopted}}));
+    if(draftToken===token){draftToken=null;try{sessionStorage.removeItem('xgent-new-conversation-token');}catch{}}
+    if(adopted){if(groupId!=='all')groupView=groupId;selectLocal(id,'replace',{materialized:true,token,generation:result.generation});}
+    else render();
+    request=null;refresh();return adopted;
+  },
+  get isNew(){return !localCurrent;},
+  get newToken(){return newToken();},
+  get newGroup(){return groupView==='all'?'ungrouped':groupView;},
   restore:id=>restoreConversation(id),
   enter:async(id,message)=>{if(isArchived(itemById(id))){enteredArchives.add(id);try{sessionStorage.setItem('xgent-entered-archives',JSON.stringify([...enteredArchives]));}catch{}}if(!await selectConversation(id))return false;if(message)location.hash=conversationHref(id)+'&message='+encodeURIComponent(message);return true;},
   enteredArchive:id=>enteredArchives.has(id),
   createChild:createChildConversation,
   menu:(id,trigger)=>openMenu(id,trigger),
   accept, refresh, get items(){return state.items;},
-  async select(id){if(mutation)throw new Error('正在切换对话，请稍后重试');if(!itemById(id))throw new Error('对话已不存在');if(isArchived(itemById(id))&&!enteredArchives.has(id)){await window.XGentWorkbench?.revealArchive(id);return false;}selectLocal(id);closeMenu(false);setDrawer(false);return state.current_chat_id===id;},
+  async select(id){if(mutation)throw new Error('正在切换对话，请稍后重试');if(!itemById(id)){selectLocal(null,'replace');return false;}if(isArchived(itemById(id))&&!enteredArchives.has(id)){await window.XGentWorkbench?.revealArchive(id);return false;}selectLocal(id);closeMenu(false);setDrawer(false);return state.current_chat_id===id;},
   href: conversationHref, followLocation: followConversationLocation,
-  get readOnly(){return !!state.items.length&&!itemById(state.current_chat_id);},
+  get readOnly(){return !!state.current_chat_id&&listReady&&!itemById(state.current_chat_id);},
   get archived(){return isArchived(itemById(state.current_chat_id));},
   get current() { return state.current_chat_id; }, get running() { return runningFor(state.current_chat_id); }, get runs() { return activeRuns(); },
 };
@@ -774,7 +804,7 @@ $('conversation-group-edit')?.addEventListener('click',()=>{
   if(groupView==='all'){notify('请先选择一个分组');return;}
   groupDialog(groups().find(item=>item.id===groupView));
 });
-function start() { authenticated = true; refresh(); }
+function start() { authenticated = true; render(); refresh(); }
 window.addEventListener('xgent-authenticated', start);
 window.addEventListener('xgent-auth-expired', () => {
   enteredArchives.clear();try{sessionStorage.removeItem('xgent-entered-archives');}catch{}
@@ -787,6 +817,7 @@ window.addEventListener('xgent-auth-expired', () => {
   $('conversation-sync-error').hidden = true;
   state = {current_chat_id: null, revision: -1, items: [], running: null};
   localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
+  listReady=false;
   rows.clear(); itemIndex.clear(); listSignature = ''; search.value = '';
   list.replaceChildren(); render();
 });

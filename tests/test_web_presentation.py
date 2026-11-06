@@ -86,7 +86,10 @@ def test_live_refresh_and_pagination_have_identical_dom(full_output_server,reply
                 async def history(limit):return records
                 server.config.read_history=history
                 server.outbox.put({'type':'history_reset'})
-                page.goto(base);page.wait_for_function('!document.getElementById("btn-send").disabled')
+                target=base+'/#/chat?conversation=global_memory'
+                if page.url==target:page.reload()
+                else:page.goto(target)
+                page.wait_for_function('!document.getElementById("btn-send").disabled')
                 for frame in case['frames']:server.outbox.put(frame)
                 selector=f'.msg-row[data-record-id="{case["history"]["id"]}"]'
                 page.locator(selector).wait_for()
@@ -110,6 +113,7 @@ def test_live_refresh_and_pagination_have_identical_dom(full_output_server,reply
                         **({} if older else {'live':server.outbox.snapshot()})})
                 page.route('**/api/workbench/history?*',paged)
                 page.reload();page.wait_for_function('!document.getElementById("btn-send").disabled')
+                page.locator('#log').evaluate('node=>{node.scrollTop=0;node.dispatchEvent(new WheelEvent("wheel",{deltaY:-1}));}')
                 page.locator(selector).wait_for()
                 assert page.locator(selector+' .body').inner_html()==before,case['name']
                 assert page.locator(selector).get_attribute('class')==role
@@ -125,7 +129,7 @@ def test_identical_edit_preserves_expanded_block_and_error_layout(full_output_se
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base);page.locator('.pb-head').first.wait_for()
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory');page.locator('.pb-head').first.wait_for()
             server.outbox.put({'type':'message','message_id':991,'text':canonical,'parse_mode':'HTML'})
             page.wait_for_function('document.querySelectorAll(".pb-head").length>=2')
             block=page.locator('.msg-row').last.locator('.pb-head');block.click()
@@ -201,7 +205,7 @@ def test_late_saved_reply_cannot_return_after_clear(full_output_server):
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_function('!document.getElementById("btn-send").disabled')
             frame={'type':'record_snapshot','record_id':13,'role':'assistant','msg_type':'ai_reply',
                 'text':'<b>old-generation</b>','parse_mode':'HTML','ui_generation':1}

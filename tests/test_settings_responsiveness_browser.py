@@ -81,7 +81,7 @@ def test_error_and_normal_headers_keep_original_layout_and_avatar_inline(full_ou
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.set_viewport_size({'width':width,'height':844});page.goto(base)
+            page=context.new_page();page.set_viewport_size({'width':width,'height':844});page.goto(base+'/#/chat?conversation=global_memory')
             for identifier in (702,704):
                 row=page.locator(f'[data-record-id="{identifier}"]');row.locator('.ai-generation-meta').wait_for()
                 metrics=row.evaluate('''node=>{

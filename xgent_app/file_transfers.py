@@ -95,9 +95,11 @@ class FileTransfers:
         return result
 
     def begin(self, data):
-        key, cid = data.get('idempotency_key'), data.get('conversation_id')
+        key, cid, token = data.get('idempotency_key'), data.get('conversation_id'), data.get('new_conversation')
         files, mode = data.get('files'), data.get('mode')
-        if not isinstance(key, str) or not 1 <= len(key) <= 200 or not isinstance(cid, str) or not cid:
+        target = 'web-new:' + token if isinstance(token, str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', token) and not cid else cid
+        if (not isinstance(key, str) or not 1 <= len(key) <= 200 or not isinstance(target, str) or not target
+                or token is not None and target == cid):
             raise TransferError('缺少上传标识或目标会话', 400)
         if mode not in {'attachment', 'server_upload'} or not isinstance(files, list) or not files:
             raise TransferError('文件清单或上传模式无效', 400)
@@ -115,8 +117,10 @@ class FileTransfers:
         spec = {'files': normalized, 'mode': mode, 'text': text, 'modes': modes,
                 'captions': captions, 'conversation_id': cid, 'idempotency_key': key,
                 'queue':data.get('queue') is True,'generation':data.get('generation')}
+        if token is not None:
+            spec.update(new_conversation=token, group_id=data.get('group_id') or 'ungrouped')
         signature = hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        identifier = hashlib.sha256((cid + '\0' + key).encode()).hexdigest()
+        identifier = hashlib.sha256((target + '\0' + key).encode()).hexdigest()
         with self.lock(identifier):
             directory = self.directory(identifier)
             if directory.exists():
@@ -209,6 +213,8 @@ class FileTransfers:
                     'queue':manifest.get('queue',False),'generation':manifest.get('generation'),
                     'modes': json.dumps(manifest['modes']), 'captions': json.dumps(manifest['captions']),
                     '_temporary': TransferLease()}
+            if manifest.get('new_conversation'):
+                data.update(new_conversation=manifest['new_conversation'], group_id=manifest.get('group_id') or 'ungrouped')
             receipt = submit(data, manifest['mode'], manifest['conversation_id'])
             if isinstance(receipt, Future):
                 def finished(future):

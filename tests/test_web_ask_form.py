@@ -58,7 +58,7 @@ async def main():
                         page=await context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
                         try:
                             with patch.object(bot,'_web_external_outbox',h.outbox),patch.object(bot.ModelClient,'think_and_reply',complete):
-                                await page.goto(base)
+                                await page.goto(base+'/#/chat?conversation=global_memory')
                                 await page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
                                 await h.turn('发起表单')
                                 form=page.get_by_role('form',name='Agent 提问表单');await form.wait_for()

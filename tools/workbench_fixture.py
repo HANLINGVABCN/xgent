@@ -13,7 +13,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-async def serve(port, count, conversation_count=0, workbench_demo=False, version_demo=False):
+async def serve(port, count, conversation_count=0, workbench_demo=False, version_demo=False, new_chat_demo=False):
     os.environ["PYTHON_DOTENV_DISABLED"]="1"
     os.environ["HOME"]=str(Path.cwd())
     os.environ["SHELL"]="/bin/sh" if os.name!="nt" else ""
@@ -130,6 +130,14 @@ async def serve(port, count, conversation_count=0, workbench_demo=False, version
                 demo['original_version']=saved['seed']
                 demo['current_version']=saved['current']
     service=Workbench(ns)
+    if new_chat_demo:
+        async def answer(*args,**kwargs):
+            return '隔离测试回复，已收到消息。',None
+        async def answer_stream(*args,**kwargs):
+            yield '隔离测试回复，已收到消息。'
+        ns['ModelClient'].think_and_reply=answer
+        ns['ModelClient'].think_and_reply_stream=answer_stream
+        ns['UserDataManager'].set('agent_mode',False)
     async def history(limit):return (await service.handle('GET','history',{'limit':limit}))['messages']
     password_hash=hash_password('preview-only')
     await db.set_config('web_password_hash',password_hash)
@@ -142,6 +150,8 @@ async def serve(port, count, conversation_count=0, workbench_demo=False, version
         read_health=lambda:{'components':{'web':{'state':'up'},'telegram':{'state':'degraded','error':'演示：连接重试中'},'triggers':{'state':'up'}}},
         media_allowed_roots=[ns['ArtifactManager'].ROOT_DIR],is_terminal_enabled=lambda:True,workbench=service.handle,
         security_api=WebTwoFactor(lambda: ns['BotMemoryDB'].get_instance()).handle)
+    if new_chat_demo:
+        config.accept_text=ns['_web_accept_text'];config.queue_api=ns['queue_api'];config.submit_file_batch=ns['_web_submit_file_batch']
     server=WebChatServer(config);server.start()
     ns['_web_chat_server']=server
     ns['get_conversations']().start()
@@ -153,8 +163,9 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--port',type=int,default=0);parser.add_argument('--messages',type=int,default=4)
     parser.add_argument('--conversations',type=int,default=0);parser.add_argument('--workbench-demo',action='store_true')
     parser.add_argument('--version-demo',action='store_true')
+    parser.add_argument('--new-chat-demo',action='store_true')
     args=parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='xgent-workbench-') as temporary:
         os.chdir(temporary)
-        try:asyncio.run(serve(args.port,args.messages,args.conversations,args.workbench_demo,args.version_demo))
+        try:asyncio.run(serve(args.port,args.messages,args.conversations,args.workbench_demo,args.version_demo,args.new_chat_demo))
         except KeyboardInterrupt:pass

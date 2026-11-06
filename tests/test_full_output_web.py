@@ -102,7 +102,7 @@ def test_browser_full_expand_copy_live_restore_and_archive_paging(full_output_se
             page = context.new_page()
             errors = []
             page.on('pageerror', lambda exc: errors.append(str(exc)))
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             block = page.locator('blockquote.pb').first
             block.wait_for()
             assert block.locator('pre').is_hidden()

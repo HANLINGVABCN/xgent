@@ -14,7 +14,7 @@ def test_alert_toast_on_other_conversation_does_not_add_context_message(full_out
             pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_function('!document.getElementById("btn-send").disabled')
             before=page.locator('#log>.msg-row').count()
             text='🚨 访问控制通知：来自电报端的未授权请求 🚨'

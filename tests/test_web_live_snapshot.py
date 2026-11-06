@@ -63,7 +63,7 @@ def test_browser_refresh_restores_live_placeholder_before_next_chunk(full_output
             page.on('pageerror',lambda e:errors.append(str(e)))
             page.on('request',lambda r:requests.append(r.url))
             for _ in range(3):
-                page.goto(base)
+                page.goto(base+'/#/chat?conversation=global_memory')
                 page.get_by_text('实时生成占位-A',exact=True).wait_for(timeout=5000)
                 assert page.get_by_text('实时生成占位-A',exact=True).count()==1
                 assert page.locator('#btn-stop').is_visible()
@@ -109,7 +109,7 @@ def test_snapshot_race_replays_newer_update_and_long_poll_is_immediate(full_outp
                 server.outbox.put({'type':'edit','message_id':444,'text':'snapshot new','reply_markup':STOP})
                 route.fulfill(response=response)
             page.route('**/api/workbench/history?*',history)
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.get_by_text('snapshot new',exact=True).wait_for(timeout=5000)
             assert page.get_by_text('snapshot old',exact=True).count()==0
             page.wait_for_function("!document.getElementById('status-text').textContent.includes('连接中')")
@@ -142,7 +142,7 @@ def test_snapshot_finalization_does_not_duplicate_committed_reply(full_output_se
         try:
             context=browser.new_context();context.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base) else r.abort())
             context.request.post(base+'/api/login',data={'password':'temporary-test-only'})
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.get_by_text('saved final reply',exact=True).wait_for()
             page.wait_for_timeout(250)
             assert page.get_by_text('saved final reply',exact=True).count()==1
@@ -222,7 +222,7 @@ def test_idle_long_poll_does_not_disable_composer_for_twenty_seconds(full_output
             context=browser.new_context();context.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base) else r.abort())
             context.request.post(base+'/api/login',data={'password':'temporary-test-only'})
             page=context.new_page();page.add_init_script('window.EventSource=undefined;')
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_function('!document.getElementById("btn-send").disabled',timeout=4000)
             assert '连接中' not in page.locator('#status-text').inner_text()
         finally:browser.close()

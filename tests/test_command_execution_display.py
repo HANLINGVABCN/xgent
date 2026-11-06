@@ -81,7 +81,7 @@ async def main():
                         page=await context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
                         task=None
                         try:
-                            await page.goto(base)
+                            await page.goto(base+'/#/chat?conversation=global_memory')
                             await page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
                             with patch.object(bot.ModelClient,'think_and_reply',complete),patch.object(bot.ModelClient,'think_and_reply_stream',chunks),patch('asyncio.create_subprocess_shell',spawn):
                                 task=asyncio.create_task(h.turn('运行长命令'))
@@ -131,10 +131,9 @@ async def main():
                                 if interrupt_command:
                                     assert not any('已完成' in row['content'] for row in rows if row['msg_type']=='agent_status')
                                     terminal=page.locator('.msg-row.sys').filter(has_text='已有结果保留')
-                                    await page.wait_for_function('Array.from(document.querySelectorAll(".msg-row.sys")).some(n=>n.textContent.includes("总耗时"))')
+                                    await terminal.wait_for()
                                     assert await terminal.count()==1,await page.locator('#log').inner_text()
                                     assert (await terminal.locator('.body').inner_text()).count('已有结果保留')==1
-                                    assert (await terminal.inner_text()).count('总耗时')==1
                                     terminal_text=await terminal.inner_text()
                                 await page.reload()
                                 await page.locator('.bubble.cmd .execution-dot.state-'+state).wait_for()

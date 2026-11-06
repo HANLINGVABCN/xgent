@@ -46,7 +46,7 @@ def test_terminal_error_folds_commands_even_when_live_rows_only_have_run_id(chat
     server, page, base = chat_browser
     async def history(limit): return []
     server.config.read_history = history
-    page.goto(base);page.wait_for_function('!document.getElementById("btn-send").disabled')
+    page.goto(base+'/#/chat?conversation=global_memory');page.wait_for_function('!document.getElementById("btn-send").disabled')
     server.outbox.put({'type': 'chat_action', 'action': 'typing', 'conversation_id': 'global_memory', 'run_id': 'failed-run'})
     for message in commands(): server.outbox.put({**message, 'type': 'record_snapshot'})
     server.outbox.put({'type': 'record_snapshot', 'conversation_id': 'global_memory', 'run_id': 'failed-run',
@@ -65,7 +65,7 @@ def test_failure_collapse_keeps_the_latest_error_visible(chat_browser):
     async def history(limit):return [{'id':i,'role':'assistant','msg_type':'agent_status',
         'content':f'Agent 第 {i} 轮 · 1 个操作','timestamp':i} for i in range(1,31)]
     server.config.read_history=history
-    page.goto(base);page.wait_for_function('!document.getElementById("btn-send").disabled')
+    page.goto(base+'/#/chat?conversation=global_memory');page.wait_for_function('!document.getElementById("btn-send").disabled')
     server.outbox.put({'type':'chat_action','action':'typing','conversation_id':'global_memory','run_id':'failed-run'})
     for message in commands(100,32):server.outbox.put({**message,'type':'record_snapshot'})
     server.outbox.put({'type':'record_snapshot','id':200,'record_id':200,'role':'assistant','msg_type':'runtime_error',
@@ -89,7 +89,7 @@ def test_real_model_error_has_avatar_and_raw_text_before_and_after_refresh(chat_
                         'model_error': True, 'segments': []}}
     async def history(limit): return [error]
     server.config.read_history = history
-    page.goto(base);page.locator('[data-record-id="41"]').wait_for()
+    page.goto(base+'/#/chat?conversation=global_memory');page.locator('[data-record-id="41"]').wait_for()
     for _ in range(2):
         entry = page.locator('[data-record-id="41"]')
         assert entry.locator('.bubble-header').is_visible()
@@ -108,7 +108,7 @@ def test_send_file_image_uses_image_preview_and_keeps_download(chat_browser):
     async def history(limit): return [message]
     server.config.read_history = history
     page.route('**/api/media/preview-image*', lambda route: route.fulfill(body=image_bytes('PNG'), content_type='image/png'))
-    page.goto(base)
+    page.goto(base+'/#/chat?conversation=global_memory')
     image = page.locator('[data-record-id="42"] .media-photo')
     image.wait_for()
     assert page.locator('[data-record-id="42"] .file-card').count() == 0
@@ -129,7 +129,7 @@ def test_send_file_text_preview_uses_the_existing_scoped_preview_service(chat_br
         query=parse_qs(urlsplit(route.request.url).query);requested.append(query)
         route.fulfill(json={'text':'ACTUAL_CONFIG: true\n','offset':0,'next_offset':20,'eof':True,'size':20,'encoding':'UTF-8'})
     page.route('**/api/workbench/artifacts/preview?*',preview)
-    page.goto(base);page.locator('[data-record-id="43"] .fc-preview').wait_for()
+    page.goto(base+'/#/chat?conversation=global_memory');page.locator('[data-record-id="43"] .fc-preview').wait_for()
     page.locator('[data-record-id="43"] .fc-preview').click()
     page.get_by_text('ACTUAL_CONFIG: true',exact=False).first.wait_for()
     assert requested[0]['id']==['43:0']
@@ -153,7 +153,7 @@ def test_history_pruning_keeps_an_entire_visible_collapsed_series(chat_browser):
         request.fulfill(json={'messages': rows, 'conversation_id': 'global_memory', 'ui_generation': 7,
             'next_cursor': str(rows[0]['id']), 'busy': False, 'live': server.outbox.snapshot()})
     page.route('**/api/workbench/history?*', route)
-    page.goto(base);page.locator('.command-series-toggle').wait_for()
+    page.goto(base+'/#/chat?conversation=global_memory');page.locator('.command-series-toggle').wait_for()
     ids = [str(row['id']) for row in group]
     page.locator('#log').evaluate('''log=>{
         const anchor=document.querySelector('[data-record-id="601"]');

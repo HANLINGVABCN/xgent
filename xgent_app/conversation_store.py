@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from xgent_app.conversations import (
     DEFAULT_CONVERSATION_ID, DEFAULT_CONVERSATION_NAME, SCHEMA_VERSION,
-    ConversationError, ConversationBusy, ExecutionFileLock, current_scope, require_conversation_id,
+    ConversationError, ConversationBusy, ConversationScope, ExecutionFileLock, current_scope, require_conversation_id,
 )
 from xgent_app.queue_store import QueueStore, migrate_queue
 from xgent_app.child_conversations import ChildConversationStore, migrate_children, descendant_ids
@@ -609,6 +610,70 @@ class ConversationStore(ChildConversationStore, QueueStore):
                            'VALUES(?,?,NULL,?,?,0,?,0,?)',
                            (cid, name or '新对话', now, now, generation,int(name is None)))
         return cid
+
+    async def _new_web_target(self, conn, token, group_id):
+        """A browser draft gets an identity only inside its first admission transaction."""
+        from .archive_conversations import ARCHIVE_GROUP_ID
+        from .queue_store import one
+        if not isinstance(token, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', token):
+            raise ConversationError('新对话草稿标识无效。')
+        request_id = 'web-new:' + token
+        saved = await one(conn, 'SELECT * FROM conversation_mutation_requests WHERE request_id=?', (request_id,))
+        if saved:
+            result = json.loads(saved['response'])
+            session = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (saved['conversation_id'],))
+            if (saved['operation'] != 'create_web' or not session or session['deleting']
+                    or session['generation'] != result['generation']):
+                raise ConversationError('已发送的新对话发生变化，请从对话列表进入后继续。')
+            cid, generation = session['id'], session['generation']
+        else:
+            group_id = str(group_id or 'ungrouped')
+            group = await one(conn, 'SELECT id FROM conversation_groups WHERE id=? AND id<>?', (group_id, ARCHIVE_GROUP_ID))
+            if group is None:
+                raise ConversationError('所选分组已不存在，请重新选择后发送。')
+            cid = await self._new_conversation(conn)
+            session = await one(conn, 'SELECT generation FROM chat_sessions WHERE id=?', (cid,))
+            generation = session['generation']
+            await conn.execute('UPDATE chat_sessions SET group_id=? WHERE id=?', (group_id, cid))
+            await conn.execute('INSERT INTO conversation_mutation_requests VALUES(?,?,?,?,?)',
+                               (request_id, 'create_web', cid, json.dumps({'generation': generation}), time.time()))
+            await _set_config(conn, 'current_chat_id', cid)
+            await self._bump_conversation_revision(conn)
+        return ConversationScope(cid, generation, origin='web', purpose='chat', telegram_delivery=False)
+
+    async def new_web_target(self, token):
+        from .queue_store import one
+        conn = await self._get_conn()
+        saved = await one(conn, 'SELECT conversation_id FROM conversation_mutation_requests WHERE request_id=? AND operation=?',
+                          ('web-new:' + token, 'create_web'))
+        return saved['conversation_id'] if saved else None
+
+    async def queue_enqueue_new_web(self, *, token, group_id, instance, request_key, text, chat_id, metadata=None):
+        async with self._transaction() as conn:
+            scope = await self._new_web_target(conn, token, group_id)
+            if metadata is not None:
+                metadata = {**metadata, 'attachment_generation': scope.generation}
+            item = await self._queue_enqueue(conn, scope=scope, instance=instance, request_key=request_key,
+                                             text=text, chat_id=chat_id, metadata=metadata)
+            item = {**item, 'conversation_revision': int(await _config(conn, 'conversation_revision', 0))}
+        self._config_cache.pop('current_chat_id', None)
+        return item
+
+    async def accept_new_web_command(self, *, token, group_id, request_key):
+        from .queue_store import one
+        async with self._transaction() as conn:
+            scope = await self._new_web_target(conn, token, group_id)
+            previous = await one(conn, 'SELECT * FROM message_queue_requests WHERE id=?', (request_key,))
+            if previous and previous['conversation_id'] != scope.conversation_id:
+                raise ConversationError('请求标识已属于另一段对话。')
+            if await one(conn, 'SELECT id FROM message_queue WHERE request_key=?', (request_key,)):
+                raise ConversationError('此请求已作为聊天消息接收。')
+            if not previous:
+                await conn.execute('INSERT INTO message_queue_requests VALUES(?,?,?,?)',
+                                   (request_key, scope.conversation_id, scope.generation, 'management'))
+            revision = int(await _config(conn, 'conversation_revision', 0))
+        self._config_cache.pop('current_chat_id', None)
+        return scope, previous is None, revision
 
     async def get_conversation_state(self):
         # One statement gives an atomic selection/revision/run snapshot.

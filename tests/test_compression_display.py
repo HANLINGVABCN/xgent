@@ -174,7 +174,7 @@ def test_compression_browser_shows_preview_and_keeps_final_reply_after_refresh(f
             page = context.new_page()
             errors = []
             page.on('pageerror', lambda e: errors.append(str(e)))
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_function('!document.getElementById("btn-send").disabled')
             for frame in case['frames']:
                 if frame['type'] == 'context_reset':

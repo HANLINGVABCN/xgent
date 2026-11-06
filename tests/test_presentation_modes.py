@@ -196,7 +196,7 @@ def test_browser_retired_mode_events_preserve_expansion_and_reject_stale_snapsho
         assert context.request.post(base+'/api/login',data={'password':'temporary-test-only'}).ok
         page=context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('.token-hud').first.wait_for()
             assert page.locator('.msg-row').count()==5
             command=page.locator('blockquote.execution-block').first

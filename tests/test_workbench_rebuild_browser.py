@@ -137,7 +137,7 @@ def test_complete_output_can_close_during_loading(full_output_server):
         browser=p.chromium.launch(headless=True);context=browser.new_context()
         context.route('**/*',lambda r:r.continue_() if r.request.url.startswith(base) else r.abort())
         assert context.request.post(base+'/api/login',data={'password':'temporary-test-only'}).ok
-        page=context.new_page();page.goto(base)
+        page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
         block=page.locator('blockquote.pb[data-output-path]').first;block.wait_for()
         pending=[];page.route('**/api/output/page',lambda r:pending.append(r))
         block.locator('.execution-row').click();page.wait_for_timeout(300)

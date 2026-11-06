@@ -43,7 +43,7 @@ def test_semantics_weights_spacing_safe_rendering_and_screenshots(full_output_se
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.emulate_media(reduced_motion='reduce')
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('[data-record-id="102"] h1').wait_for()
             page.evaluate('(theme)=>document.body.classList.toggle("dark",theme==="dark")', theme)
             body = page.locator('[data-record-id="102"] .body')
@@ -84,7 +84,7 @@ def test_stream_fragments_merge_semantically_and_preserve_expanded_blocks(full_o
             pytest.skip('Chromium unavailable')
         browser, context, base = browser_session(server, p)
         try:
-            page = context.new_page(); page.goto(base)
+            page = context.new_page(); page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_function('!document.getElementById("btn-send").disabled')
             server.outbox.put({'type': 'message', 'message_id': 501, 'text': '<b>Telegram heading</b>', 'parse_mode': 'HTML',
                               'web_display': build_web_display(RAW, reply_message_id=501)})

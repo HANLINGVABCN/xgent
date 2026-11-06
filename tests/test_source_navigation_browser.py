@@ -97,6 +97,13 @@ def test_source_hint_can_be_closed_while_loading_or_after_failure(browser_contex
         page.evaluate('()=>{window.XGentConversations.refresh=()=>new Promise(resolve=>{window.__sourceRelease=resolve;});}')
     cid=source_record['id'] if state=='loading' else 'ffffffffffffffffffffffffffffffff'
     page.evaluate('(route)=>location.hash=route','#/chat?conversation='+cid+'&message='+source_record['anchor'])
+    if state=='error':
+        page.wait_for_function('location.hash==="#/chat"&&window.XGentConversations.current===null')
+        assert page.locator('#source-navigation').is_hidden()
+        assert page.locator('#log .msg-row').count()==0
+        page.evaluate('window.XGentConversations.select("global_memory")')
+        page.wait_for_function('document.querySelector("#input").value==="不应被跳转清除"')
+        page.close();return
     page.get_by_text('正在定位来源消息…' if state=='loading' else '来源对话已不存在',exact=True).wait_for()
     close=page.get_by_role('button',name='关闭来源定位提示',exact=True)
     page.mouse.move(1,1);assert close.is_visible()

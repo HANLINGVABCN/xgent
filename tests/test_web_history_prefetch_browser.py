@@ -40,7 +40,7 @@ def page_data(server, start, stop, *, cid='A', next_cursor=None, baseline=False,
 
 
 def ready(page, base):
-    page.goto(base)
+    page.goto(base+'/#/chat?conversation=A')
     page.wait_for_function('!document.getElementById("btn-send").disabled')
 
 

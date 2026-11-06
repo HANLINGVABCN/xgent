@@ -86,7 +86,9 @@ def test_reply_output_round_and_next_reply_are_tightly_spaced(full_output_server
             for size in (16,24):
                 if page.url!='about:blank':
                     page.evaluate('sessionStorage.removeItem("xgent-fold-state")')
-                page.goto(base)
+                target=base+'/#/chat?conversation=global_memory'
+                if page.url==target:page.reload()
+                else:page.goto(target)
                 page.locator('.agent-round-message').first.wait_for()
                 page.evaluate('(size)=>{document.documentElement.style.setProperty("--web-message-font-size",size+"px");document.body.classList.add("dark");}',size)
                 assert page.locator('.agent-round-message').count()==2

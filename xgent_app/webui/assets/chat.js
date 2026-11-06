@@ -23,7 +23,8 @@ import {initializeTheme} from './theme.js';
   var conversationFiles = Object.create(null);
   var serverDrafts = Object.create(null);
   const seenAccessNotices = new Set();
-  function draftKey(cid) { return 'xgent-draft:' + (cid || selectedConversationId || 'global_memory'); }
+  function draftId(cid) { return cid || 'new'; }
+  function draftKey(cid=selectedConversationId) { return 'xgent-draft:' + draftId(cid); }
 
   var btnSend = document.getElementById("btn-send");
   var btnStop = document.getElementById("btn-stop");
@@ -72,6 +73,7 @@ import {initializeTheme} from './theme.js';
   const observedRuns=new Map(),finishedRuns=new Set();
   function currentRun(){
     const cid=selectedConversationId||window.XGentConversations?.current;
+    if(!cid)return null;
     const run=observedRuns.get(cid)||window.XGentConversations?.running;
     return run&&run.conversation_id===cid&&!finishedRuns.has(run.run_id)?run:null;
   }
@@ -1612,6 +1614,7 @@ import {initializeTheme} from './theme.js';
   }
 
   function refreshMenus() {
+    if(!selectedConversationId)return Promise.resolve();
     var generation = historyGen;
     return api("/api/workbench/history?limit=50").then(function (data) {
       if (!historyReady || generation !== historyGen) return;
@@ -1690,12 +1693,13 @@ import {initializeTheme} from './theme.js';
       // Ignore obsolete mode-switch notifications from older clients.
       return;
     }
-    if(frame.conversation_id && selectedConversationId && frame.conversation_id !== selectedConversationId) {
+    if(frame.conversation_id && frame.conversation_id !== selectedConversationId) {
       if(uploadQueue?.conversation_id===frame.conversation_id && ['turn_end','turn_error'].includes(frame.type) && uploadQueue.finish){
         uploadQueue.awaitingTurn=false;uploadQueue.finish(frame.type==='turn_error'?frame.text:null);
       }
       return;
     }
+    if(!selectedConversationId&&window.XGentConversations?.isNew)return;
     if(frame.generation!=null && uiGeneration!=null && frame.generation<uiGeneration)return;
     var running=currentRun();
     var completion=['turn_end','turn_error','generation_end'].includes(frame.type)||(frame.type==='compression_state'&&!frame.busy);
@@ -2212,6 +2216,20 @@ import {initializeTheme} from './theme.js';
   document.getElementById('history-retry').onclick=function(){const direction=!!historyError?.forward;historyPreloads.forEach(item=>item.controller.abort());historyPreloads.clear();historyPage(direction);};
   function returnToLatest(){if(location.hash.includes('?conversation=')){history.replaceState(null,'',window.XGentConversations?.href(selectedConversationId)||'#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true,true).then(scrollDown).catch(function(){});}
   function loadHistory(replaceView=false) {
+    if(!selectedConversationId){
+      cancelHistoryPage();historyLoadController?.abort();historyGen++;
+      const gen=historyGen,controller=historyLoadController=new AbortController();
+      return api('/api/events',{signal:controller.signal}).then(data=>{
+        if(gen!==historyGen||selectedConversationId)return;
+        if(data.epoch&&Number.isSafeInteger(data.cursor)){streamEpoch=data.epoch;streamCursor=data.cursor;}
+        uiGeneration=null;queueEnabled=true;historyAnchor=null;historyControls({messages:[]});
+        const uploading=uploadQueue?.conversation_id===null?uploadQueue.entry:null;
+        Array.from(new Set(Object.values(byMessageId))).forEach(entry=>{if(entry!==uploading)removeEntry(entry);});
+        byMessageId={};log.replaceChildren();msgCount=0;lastStreamEntry=null;
+        if(uploading)log.append(uploading.row);
+        setBusy(false);hideTyping();updateEmptyState();updateHistoryState();syncSendState();
+      }).finally(()=>{if(historyLoadController===controller)historyLoadController=null;});
+    }
     const visible=scrollAnchor(),row=visible?.row;
     const readingAnchor=!replaceView&&(viewingPast||!isNearBottom())&&
       (row?.dataset.uiMessageId?'ui:'+row.dataset.uiMessageId:row?.dataset.recordId?'history:'+row.dataset.recordId:null);
@@ -2223,7 +2241,11 @@ import {initializeTheme} from './theme.js';
     var wasNearBottom=isNearBottom();
     var top=log.scrollTop;
     let unavailableAnchor=false;
-    const response=api(historyUrl(readingAnchor||historyAnchor),{signal:controller.signal}).catch(function(error){
+    const response=api(historyUrl(readingAnchor||historyAnchor),{signal:controller.signal}).catch(async function(error){
+      if([404,409].includes(error.status)&&window.XGentConversations){
+        await window.XGentConversations.refresh();
+        if(controller.signal.aborted||gen!==historyGen||requestedCid!==selectedConversationId)return;
+      }
       if(!readingAnchor||error.status!==404||controller.signal.aborted||gen!==historyGen||requestedCid!==selectedConversationId)throw error;
       unavailableAnchor=true;
       return api(historyUrl(null),{signal:controller.signal});
@@ -2449,20 +2471,26 @@ import {initializeTheme} from './theme.js';
 
   async function sendQueuedText(text){
     var cid=selectedConversationId,draft=input.value;
-    if(!textSubmission||textSubmission.cid!==cid||textSubmission.text!==text){textSubmission={cid,text,generation:uiGeneration,request_id:queueRequestId()};}
+    const token=cid?null:window.XGentConversations?.newToken;
+    if(token&&!textSubmission){try{const saved=JSON.parse(sessionStorage.getItem('xgent-new-chat-submission')||'null');if(saved?.token===token)textSubmission=saved;}catch{}}
+    if(!textSubmission||textSubmission.cid!==cid||textSubmission.token!==token||textSubmission.text!==text){textSubmission={cid,token,text,group_id:window.XGentConversations?.newGroup||'ungrouped',generation:uiGeneration,request_id:queueRequestId()};}
     var submission=textSubmission;textSubmitting=true;updateSendAvailability();
+    if(token){try{sessionStorage.setItem('xgent-new-chat-submission',JSON.stringify(submission));}catch{}}
     try{
-      var result=await api('/api/chat',{method:'POST',body:JSON.stringify({text,conversation_id:cid,generation:submission.generation,request_id:submission.request_id})});
+      var result=await api('/api/chat',{method:'POST',body:JSON.stringify({text,request_id:submission.request_id,
+        ...(token?{new_conversation:token,group_id:submission.group_id}:{conversation_id:cid,generation:submission.generation})})});
+      if(token){window.XGentConversations?.materialize(result,token,submission.group_id);cid=result.conversation_id;try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}
       if(result.ok||result.queued||result.management)setServerDraft(cid,null);
       if(cid===selectedConversationId&&input.value===draft){input.value='';input.style.height='auto';conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
       else if(cid!==selectedConversationId&&conversationDrafts[cid]===draft){conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
       if(!result.queued&&!result.management&&cid===selectedConversationId)makeBubble('user',text);
       textSubmission=null;await refreshQueue(true);triggerHaptic();
-    }catch(e){if(e.status>=400&&e.status<500)textSubmission=null;toast(e.message+'；内容已保留，可重试发送。',true);}
+    }catch(e){if(e.status>=400&&e.status<500){textSubmission=null;if(token){try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}}toast(e.message+'；内容已保留，可重试发送。',true);}
     finally{textSubmitting=false;syncSendState();}
   }
 
   function send() {
+    if(!selectedConversationId&&!pendingFiles.length){const text=input.value.trim();if(text&&!btnSend.disabled)sendQueuedText(text);return;}
     if(queueEnabled&&!pendingFiles.length&&!input.value.trim().startsWith('/')){
       var queuedText=input.value.trim()||serverDrafts[selectedConversationId]?.send_text||'';if(!queuedText||btnSend.disabled)return;
       sendQueuedText(queuedText);return;
@@ -2523,6 +2551,7 @@ import {initializeTheme} from './theme.js';
     }
     var transfer=await control('/api/file-transfers/init',{
       idempotency_key:key,conversation_id:batch.conversation_id,mode:mode,text:text,modes:modes,queue:queueEnabled,generation:batch.generation,
+      ...(batch.new_conversation?{new_conversation:batch.new_conversation,group_id:batch.group_id}:{}),
       files:batch.files.map(file=>({filename:file.name,size:file.size}))
     });
     if(transfer.state==='accepted')return {...transfer,duplicate:true};
@@ -2579,7 +2608,9 @@ import {initializeTheme} from './theme.js';
   }
 
   async function sendFiles(text, selected) {
-    var batch = { conversation_id:selectedConversationId,generation:uiGeneration, files: selected || pendingFiles.slice(), next: 0, cancelled: false, finish: null, awaitingTurn: false };
+    var batch = { conversation_id:selectedConversationId,generation:uiGeneration,
+      new_conversation:selectedConversationId?null:window.XGentConversations?.newToken,group_id:window.XGentConversations?.newGroup||'ungrouped',
+      files: selected || pendingFiles.slice(), next: 0, cancelled: false, finish: null, awaitingTurn: false };
     uploadQueue = batch;
     if (selected) { pendingFiles=pendingFiles.filter(function(f){return selected.indexOf(f)<0;});renderPendingFiles(); }
     else clearPendingFiles();
@@ -2610,13 +2641,14 @@ import {initializeTheme} from './theme.js';
         fd.append('modes',JSON.stringify(modes));
         if(queueEnabled)fd.append('queue','1');
         if(batch.generation!==null)fd.append('generation',String(batch.generation));
-        var signature = JSON.stringify([mode,text,modes,batch.generation,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
+        var signature = JSON.stringify([mode,text,modes,batch.generation,batch.new_conversation||batch.conversation_id,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
         var previous = fileBatchKeys.get(f);
         var requestKey = previous?.signature===signature ? previous.key : (crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());
         byMessageId['upload:'+requestKey]=entry;
         batch.files.forEach(file=>fileBatchKeys.set(file,{signature:signature,key:requestKey}));
         fd.append('idempotency_key',requestKey);
         if(batch.conversation_id)fd.append("conversation_id",batch.conversation_id);
+        else if(batch.new_conversation){fd.append('new_conversation',batch.new_conversation);fd.append('group_id',batch.group_id);}
         try {
           var progress=document.createElement('small');progress.className='upload-progress';progress.textContent='正在上传…';
           entry.uploadProgress=progress;entry.bubble.insertBefore(progress,entry.footer||null);
@@ -2641,6 +2673,7 @@ import {initializeTheme} from './theme.js';
           if (!response.ok) throw new Error(body.error || (response.status===413?'反向代理拒绝了上传（HTTP 413），请调整代理请求体限制后重试。':response.status===524?'代理等待服务器响应超时（HTTP 524），请先核对历史；不要重复提交已确认文件。':"HTTP " + response.status));
           }
           if(body.queued){
+            if(batch.new_conversation){batch.conversation_id=body.conversation_id;batch.generation=body.generation;window.XGentConversations?.materialize(body,batch.new_conversation,batch.group_id);}
             batch.next=batch.files.length;batch.awaitingTurn=false;
             progress.textContent='已保存到待发队列';setServerDraft(batch.conversation_id,null);
             if(!entry.durable)removeEntry(entry);
@@ -2677,14 +2710,16 @@ import {initializeTheme} from './theme.js';
     } finally {
       var remaining = batch.files.slice(batch.next);
       if(batch.conversation_id!==selectedConversationId){
-        conversationFiles[batch.conversation_id]=remaining.concat(conversationFiles[batch.conversation_id]||[]);
-        if(batch.next===0)conversationDrafts[batch.conversation_id]=text;
+        const key=draftId(batch.conversation_id);conversationFiles[key]=remaining.concat(conversationFiles[key]||[]);
+        if(batch.next===0)conversationDrafts[key]=text;
         uploadQueue=null;
         return;
       }
       pendingFiles = remaining.concat(pendingFiles);
       if (remaining.length) {
         if (batch.next === 0 && !input.value) input.value = text;
+        conversationDrafts[draftId(selectedConversationId)]=input.value;
+        try{sessionStorage.setItem(draftKey(),input.value);}catch{}
       }
       uploadQueue = null;
       renderPendingFiles();
@@ -3390,7 +3425,7 @@ import {initializeTheme} from './theme.js';
   });
 
   function renderPendingFiles() {
-    if(selectedConversationId)conversationFiles[selectedConversationId]=pendingFiles.slice();
+    conversationFiles[draftId(selectedConversationId)]=pendingFiles.slice();
     const retained=new Set([...pendingFiles,...Object.values(conversationFiles).flat(),...(uploadQueue?.files||[])]);
     pendingPreviews.forEach((value,file)=>{if(!retained.has(file)){URL.revokeObjectURL(value.url);pendingPreviews.delete(file);}});
     pendingFilesEl.innerHTML = "";
@@ -3687,18 +3722,24 @@ import {initializeTheme} from './theme.js';
     cancelCardFollow();
     var next=event.detail.conversation_id;
     if(next===selectedConversationId)return;
-    if(selectedConversationId){
-      conversationDrafts[selectedConversationId]=input.value;
-      conversationFiles[selectedConversationId]=pendingFiles.slice();
+    if(event.detail.materialized){
+      selectedConversationId=next;uiGeneration=event.detail.generation;
+      queueController?.abort();queueController=null;queueVersion++;queueState=null;drawQueue();
+      if(!loggedOut){resync(true).catch(function(){});loadConversationLineage().catch(function(){});}
+      return;
+    }
+    {
+      const key=draftId(selectedConversationId);conversationDrafts[key]=input.value;
+      conversationFiles[key]=pendingFiles.slice();
       try{sessionStorage.setItem(draftKey(),input.value);}catch(e){}
     }
     if(uploadQueue)uploadQueue.cancelled=true;
     selectedConversationId=next;
     setBusy(!!currentRun());
     queueController?.abort();queueController=null;queueVersion++;queueState=null;queueExpanded=false;drawQueue();
-    input.value=conversationDrafts[next]||'';
+    input.value=conversationDrafts[draftId(next)]||'';
     try{input.value=input.value||sessionStorage.getItem(draftKey(next))||'';}catch(e){}
-    pendingFiles=(conversationFiles[next]||[]).slice();renderPendingFiles();
+    pendingFiles=(conversationFiles[draftId(next)]||[]).slice();renderPendingFiles();
     historyGen++;historyAnchor=null;historyCursor=null;viewingPast=false;keepLoadedHistory=false;newFrames=0;newerAvailable=false;
     uiGeneration=null;uiRevisions={};uiDeleted={};pendingFrames=[];
     Array.from(new Set(Object.values(byMessageId))).forEach(removeEntry);
@@ -3706,6 +3747,14 @@ import {initializeTheme} from './theme.js';
     updateEmptyState();syncSendState();
     if(!loggedOut){resync(true).catch(function(){});loadConversationLineage().catch(function(){});}
   });
+  window.addEventListener('xgent-conversation-materialized',event=>{
+    const {conversation_id:cid,adopted}=event.detail;
+    conversationDrafts[cid]=adopted?input.value:conversationDrafts.new||'';
+    conversationFiles[cid]=adopted?pendingFiles.slice():conversationFiles.new||[];
+    delete conversationDrafts.new;delete conversationFiles.new;
+    try{sessionStorage.setItem(draftKey(cid),conversationDrafts[cid]);sessionStorage.removeItem(draftKey(null));}catch{}
+  });
+  window.addEventListener('xgent-new-conversation',()=>{if(!selectedConversationId&&!loggedOut)resync(true,true).catch(()=>{});});
   window.addEventListener('xgent-conversation-state',function(event){
     const state=event.detail;
     if(state.runs){
@@ -3787,6 +3836,7 @@ import {initializeTheme} from './theme.js';
     enhance: enhanceBubbleContent
   };
   try { input.value=sessionStorage.getItem(draftKey())||""; syncSendState(); } catch(e) {}
+  try{const saved=JSON.parse(sessionStorage.getItem('xgent-new-chat-submission')||'null');if(saved&&saved.token===window.XGentConversations?.newToken)textSubmission=saved;}catch{}
   input.addEventListener("input",function(){try{sessionStorage.setItem(draftKey(),input.value);}catch(e){}});
   window.addEventListener('xgent-auth-expired',function(){
     closeCommands(false);

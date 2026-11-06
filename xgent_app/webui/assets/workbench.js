@@ -121,7 +121,7 @@ async function followSource(){
   showBanner(el('span',{class:'wb-source-label'},'正在定位来源消息…'));
   try{
     await window.XGentConversations.refresh();if(!stillHere())return;
-    const owner=window.XGentConversations.items.find(c=>c.id===cid);if(!owner)throw new Error('来源对话已不存在');
+    const owner=window.XGentConversations.items.find(c=>c.id===cid);if(!owner){await window.XGentConversations.new();return;}
     const back=el('a',{class:'wb-source-return',href:'#/'+(state.sourceReturn||'tasks')},'返回'+(pages.find(p=>p[0]===state.sourceReturn)?.[1]||'设置'));
     clearSourceReader(true);state.navigatingSource=true;
     try{await window.XGentConversations.select(cid);}finally{state.navigatingSource=false;}
@@ -130,6 +130,7 @@ async function followSource(){
   }catch(error){if(stillHere())showBanner(el('span',{class:'wb-source-label wb-source-error'},error.message),el('a',{class:'wb-source-return',href:'#/'+(state.sourceReturn||'tasks')},'返回设置'));}
 }
 document.addEventListener('click',event=>{const link=event.target.closest('.wb-source-link');if(link&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&event.button===0){state.sourceReturn=state.route;sourceVisit='';if(link.dataset.archiveConversation){event.preventDefault();revealArchive(link.dataset.archiveConversation,link.dataset.archiveMessage);}}});
+window.addEventListener('xgent-new-conversation',()=>{sourceNavigationSequence++;sourceVisit='';clearSourceReader();});
 
 function currentAppUrl(){return state.route==='chat'?(window.XGentConversations?.href(window.XGentConversations.current)||'#/chat'):'#/settings';}
 function panelRoute(panel){return SETTINGS_SECTIONS.some(([id])=>id===panel)?'settings':panel;}

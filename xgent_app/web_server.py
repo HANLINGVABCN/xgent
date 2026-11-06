@@ -978,10 +978,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True, **result, "settings": result})
 
-    def _conversation_arguments(self, data, *, background=False):
+    def _conversation_arguments(self, data, *, background=False, allow_new=False):
         if self.config.read_conversations is None:
             return {}
         cid = str(data.get('conversation_id') or '')
+        token = data.get('new_conversation')
+        if token is not None:
+            if (not allow_new or cid or data.get('generation') is not None
+                    or not isinstance(token, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', token)):
+                self._send_json({'error': '新对话草稿标识或目标无效；输入未发送。'}, status=400)
+                return None
+            return {'new_conversation': token, 'group_id': data.get('group_id') or 'ungrouped'}
         if not cid:
             state = self._run_coro(self.config.read_conversations())
             self._send_json({'error': '缺少目标会话；输入未发送。',
@@ -999,7 +1006,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         data = self._read_json()
         if data is None:
             return
-        options = self._conversation_arguments(data)
+        options = self._conversation_arguments(data, allow_new=self.config.accept_text is not None)
         if options is None:
             return
         text = str(data.get("text") or "").strip()
@@ -1086,7 +1093,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             if action == 'init':
                 data = self._read_json()
-                if data is None or self._conversation_arguments(data) is None:
+                if data is None or self._conversation_arguments(data, allow_new=True) is None:
                     return
                 result = store.begin(data)
             elif action == 'status':
@@ -1104,7 +1111,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if data is None:
                     return
                 result = store.complete(identifier, lambda files, mode, cid:
-                    self.config.submit_file_batch(files, mode, self.server.outbox, conversation_id=cid))
+                    self.config.submit_file_batch(files, mode, self.server.outbox,
+                        **({'new_conversation': files['new_conversation'], 'group_id': files.get('group_id') or 'ungrouped'}
+                           if files.get('new_conversation') else {'conversation_id': cid})))
             self._send_json(result, extra_headers={'Cache-Control': 'private, no-store'})
         except (TransferError, ValueError, OSError) as exc:
             if action == 'chunk':
@@ -1153,7 +1162,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         handed_off = False
         try:
-            options = self._conversation_arguments(data)
+            options = self._conversation_arguments(data, allow_new=self.config.submit_file_batch is not None)
             if options is None:
                 return
             outbox = self.server.outbox

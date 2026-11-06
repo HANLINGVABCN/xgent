@@ -129,47 +129,51 @@ class QueueStore:
             await bump(conn)
 
     async def queue_enqueue(self, *, scope, instance, request_key, text, chat_id, metadata=None, draft_revision=None):
+        async with self._transaction() as conn:
+            return await self._queue_enqueue(conn, scope=scope, instance=instance, request_key=request_key,
+                                             text=text, chat_id=chat_id, metadata=metadata, draft_revision=draft_revision)
+
+    async def _queue_enqueue(self, conn, *, scope, instance, request_key, text, chat_id, metadata=None, draft_revision=None):
         if not isinstance(text, str) or not text.strip():
             raise ConversationError('消息不能为空。')
-        async with self._transaction() as conn:
-            encoded=json.dumps(metadata or {},ensure_ascii=False,sort_keys=True)
-            previous = await one(conn, 'SELECT * FROM message_queue WHERE request_key=?', (request_key,))
-            if previous:
-                if previous['text'] != text or previous['conversation_id'] != scope.conversation_id or previous['generation'] != scope.generation or (metadata is not None and item_metadata(previous)!=metadata):
-                    raise ConversationChanged('请求标识已用于另一条消息，请重新提交。')
-                return previous
-            if await one(conn, 'SELECT id FROM message_queue_requests WHERE id=?', (request_key,)):
-                raise ConversationChanged('此请求已作为管理输入接收，不会再次发给 AI。')
-            if request_key.startswith('conversation-job:'):
-                job = await one(conn, 'SELECT * FROM conversation_jobs WHERE id=?', (request_key.split(':', 1)[1],))
-                parent = await one(conn, 'SELECT generation,deleting FROM chat_sessions WHERE id=?',
-                                   (job['parent_conversation_id'],)) if job else None
-                if (not job or job['status'] == 'cancelled' or job['conversation_id'] != scope.conversation_id
-                        or not parent or parent['deleting']):
-                    raise ConversationChanged('后台任务的所属对话已改变，任务未入队。')
-            session = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (scope.conversation_id,))
-            if not session or session['deleting'] or session['generation'] != scope.generation:
-                raise ConversationChanged('会话已变化，消息尚未入队。')
-            if draft_revision is not None:
-                draft=await one(conn,'SELECT created_at FROM conversation_branch_drafts WHERE conversation_id=?',(scope.conversation_id,))
-                if not draft or draft['created_at']!=draft_revision:
-                    raise ConversationChanged('附件草稿已变化，本批文件尚未入队，请重新确认。')
-                await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=?',(scope.conversation_id,))
-            await self._queue_sync(conn)
-            control = await one(conn, 'SELECT * FROM message_queue_controls WHERE conversation_id=? AND generation=?',
-                                (scope.conversation_id, scope.generation))
-            paused = control and control['state'] != 'ready'
-            run = await one(conn, "SELECT value FROM config WHERE key='conversation_runs'")
-            running = json.loads(run['value']).get(scope.conversation_id) if run else None
-            earlier = await one(conn, "SELECT id FROM message_queue WHERE conversation_id=? AND status IN ('pending','paused') LIMIT 1", (scope.conversation_id,))
-            receipt = bool(scope.origin == 'telegram' and (paused or earlier or running))
-            now, identifier = time.time(), uuid.uuid4().hex
-            await conn.execute('INSERT INTO message_queue(id,request_key,conversation_id,generation,text,origin,'
-                'source_instance,dispatch_instance,chat_id,status,reason,created_at,updated_at,receipt_requested,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (identifier, request_key, scope.conversation_id, scope.generation, text, scope.origin, instance, instance,
-                 chat_id, 'paused' if paused else 'pending', control['reason'] if paused else 'waiting', now, now, bool(receipt),encoded))
-            await bump(conn)
-            return await one(conn, 'SELECT * FROM message_queue WHERE id=?', (identifier,))
+        encoded=json.dumps(metadata or {},ensure_ascii=False,sort_keys=True)
+        previous = await one(conn, 'SELECT * FROM message_queue WHERE request_key=?', (request_key,))
+        if previous:
+            if previous['text'] != text or previous['conversation_id'] != scope.conversation_id or previous['generation'] != scope.generation or (metadata is not None and item_metadata(previous)!=metadata):
+                raise ConversationChanged('请求标识已用于另一条消息，请重新提交。')
+            return previous
+        if await one(conn, 'SELECT id FROM message_queue_requests WHERE id=?', (request_key,)):
+            raise ConversationChanged('此请求已作为管理输入接收，不会再次发给 AI。')
+        if request_key.startswith('conversation-job:'):
+            job = await one(conn, 'SELECT * FROM conversation_jobs WHERE id=?', (request_key.split(':', 1)[1],))
+            parent = await one(conn, 'SELECT generation,deleting FROM chat_sessions WHERE id=?',
+                               (job['parent_conversation_id'],)) if job else None
+            if (not job or job['status'] == 'cancelled' or job['conversation_id'] != scope.conversation_id
+                    or not parent or parent['deleting']):
+                raise ConversationChanged('后台任务的所属对话已改变，任务未入队。')
+        session = await one(conn, 'SELECT * FROM chat_sessions WHERE id=?', (scope.conversation_id,))
+        if not session or session['deleting'] or session['generation'] != scope.generation:
+            raise ConversationChanged('会话已变化，消息尚未入队。')
+        if draft_revision is not None:
+            draft=await one(conn,'SELECT created_at FROM conversation_branch_drafts WHERE conversation_id=?',(scope.conversation_id,))
+            if not draft or draft['created_at']!=draft_revision:
+                raise ConversationChanged('附件草稿已变化，本批文件尚未入队，请重新确认。')
+            await conn.execute('DELETE FROM conversation_branch_drafts WHERE conversation_id=?',(scope.conversation_id,))
+        await self._queue_sync(conn)
+        control = await one(conn, 'SELECT * FROM message_queue_controls WHERE conversation_id=? AND generation=?',
+                            (scope.conversation_id, scope.generation))
+        paused = control and control['state'] != 'ready'
+        run = await one(conn, "SELECT value FROM config WHERE key='conversation_runs'")
+        running = json.loads(run['value']).get(scope.conversation_id) if run else None
+        earlier = await one(conn, "SELECT id FROM message_queue WHERE conversation_id=? AND status IN ('pending','paused') LIMIT 1", (scope.conversation_id,))
+        receipt = bool(scope.origin == 'telegram' and (paused or earlier or running))
+        now, identifier = time.time(), uuid.uuid4().hex
+        await conn.execute('INSERT INTO message_queue(id,request_key,conversation_id,generation,text,origin,'
+            'source_instance,dispatch_instance,chat_id,status,reason,created_at,updated_at,receipt_requested,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (identifier, request_key, scope.conversation_id, scope.generation, text, scope.origin, instance, instance,
+             chat_id, 'paused' if paused else 'pending', control['reason'] if paused else 'waiting', now, now, bool(receipt),encoded))
+        await bump(conn)
+        return await one(conn, 'SELECT * FROM message_queue WHERE id=?', (identifier,))
 
     async def queue_snapshot(self, cid):
         async with self._transaction() as conn:

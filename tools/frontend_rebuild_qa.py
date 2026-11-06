@@ -63,7 +63,7 @@ def main(default_output='workspace/frontend-rebuild/qa'):
                         page=context.new_page();page.on('pageerror',lambda error:errors.append(str(error)))
                         page.emulate_media(reduced_motion='reduce')
                         page.add_init_script("localStorage.setItem('xgent-theme', '"+theme+"')")
-                        page.goto(fixture['url']);page.locator('#composer-model').wait_for();page.locator('#log .msg-row').first.wait_for()
+                        page.goto(fixture['url']+'/#/chat?conversation=global_memory');page.locator('#composer-model').wait_for();page.locator('#log .msg-row').first.wait_for()
 
                         def capture(name):
                             nonlocal screens

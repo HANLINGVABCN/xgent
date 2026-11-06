@@ -49,7 +49,10 @@ def browser_context(workspace_url):
 
 
 def ready(page,url,route='chat'):
-    page.goto(url+'/#/'+route)
+    if route=='chat':
+        state=page.context.request.get(url+'/api/workbench/conversations').json()
+        page.goto(url+'/#/chat?conversation='+str(state.get('current_chat_id') or 'global_memory'))
+    else:page.goto(url+'/#/'+route)
     if route=='chat':page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
     else:page.locator('#wb-page .wb-page-head').wait_for()
 
@@ -111,7 +114,7 @@ def test_history_is_paged_search_locates_unloaded_messages_and_draft_survives(br
     original_ids=set(page.locator('#log>.msg-row[data-record-id]').evaluate_all('rows=>rows.map(row=>row.dataset.recordId)'))
     page.locator('#input').fill('跨页保留的输入草稿')
     page.evaluate('location.hash="/tasks"');page.locator('#wb-page h1').wait_for()
-    page.evaluate('location.hash="/chat"')
+    page.evaluate('(cid)=>location.hash="/chat?conversation="+cid',cid)
     assert page.locator('#input').input_value()=='跨页保留的输入草稿'
     for _ in range(5):
         with page.expect_response('**/api/workbench/history?limit=50&before=*'):

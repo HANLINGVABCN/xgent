@@ -13,7 +13,7 @@ from .queue_store import REASONS,item_metadata
 
 def public_item(item):
     result={key: item[key] for key in ('id', 'seq', 'conversation_id', 'generation', 'text', 'origin',
-            'status', 'reason', 'revision', 'created_at', 'record_id') if key in item}
+            'status', 'reason', 'revision', 'created_at', 'record_id', 'conversation_revision') if key in item}
     metadata=item_metadata(item)
     refs=[*metadata.get('attachments',[]),*metadata.get('server_uploads',[])]
     if refs:
@@ -80,6 +80,17 @@ class MessageQueue:
     async def snapshot(self, cid):
         await self.start()
         return public_snapshot(await (await self.manager.factory()).queue_snapshot(cid))
+
+    async def submit_new_web(self, text, *, token, group_id='ungrouped', chat_id, request_key, metadata=None):
+        await self.start()
+        try:
+            return await (await self.manager.factory()).queue_enqueue_new_web(
+                token=token, group_id=group_id, instance=self.instance, request_key=request_key,
+                text=text, chat_id=chat_id, metadata=metadata)
+        except ConversationError:
+            raise
+        except Exception as exc:
+            raise ConversationError('新对话消息保存失败，输入尚未提交，请重试。') from exc
 
     async def recover_sources(self, db):
         for row in await db.queue_instances():

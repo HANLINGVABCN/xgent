@@ -66,7 +66,7 @@ def queue_browser(full_output_server):
 
 
 def ready(page, base):
-    page.goto(base)
+    page.goto(base+'/#/chat?conversation=A')
     page.wait_for_function('!document.querySelector("#btn-send").disabled')
 
 

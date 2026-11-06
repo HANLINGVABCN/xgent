@@ -139,7 +139,7 @@ def test_media_form_and_authors_are_identical_after_refresh(full_output_server, 
             page = context.new_page()
             if mobile:
                 page.set_viewport_size({'width': 390, 'height': 844})
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_selector('#input:not([disabled])')
             for frame in workflow_case['frames']:
                 # Replay the isolated producer into this server's transport epoch.
@@ -203,7 +203,7 @@ def test_form_continuation_keeps_author_group_across_runs_and_new_user_starts_a_
         browser, context, base = browser_session(server, p)
         try:
             page = context.new_page()
-            page.goto(base)
+            page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('[data-record-id="804"]').wait_for()
             assert page.locator('.msg-row.ai .bubble-header:visible').count() == 2
             assert 'turn-continuation' in page.locator('[data-record-id="802"]').get_attribute('class')

@@ -63,7 +63,7 @@ def browser(version_server):
 def test_version_detail_text_paging_download_and_restore_without_new_messages(browser, tmp_path):
     page, context, base, demo, _ = browser
     page.set_viewport_size({'width':1440,'height':1000})
-    page.goto(base)
+    page.goto(base+'/#/chat?conversation=global_memory')
     page.locator('.media-versions').last.wait_for()
     before=page.locator('#log>.msg-row').count()
     page.locator('.media-versions').last.click()
@@ -112,7 +112,7 @@ def test_versions_from_files_and_identity_validation(browser):
 
 def test_set_bot_menu_updates_only_bot_selection_and_keeps_draft(browser, tmp_path):
     page,context,base,_,_=browser
-    page.goto(base)
+    page.goto(base+'/#/chat?conversation=global_memory')
     page.wait_for_function('!!window.XGentConversations?.current')
     current=page.evaluate('window.XGentConversations.current')
     items=context.request.get(base+'/api/workbench/conversations').json()['items']

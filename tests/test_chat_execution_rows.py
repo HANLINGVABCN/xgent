@@ -113,7 +113,9 @@ def test_real_shell_single_rows_inline_actions_and_copying(full_output_server, t
             page.set_viewport_size({'width':width,'height':height})
             for current in ('folded',):
                 mode[0]=current
-                page.goto(base)
+                target=base+'/#/chat?conversation=global_memory'
+                if page.url==target:page.reload()
+                else:page.goto(target)
                 page.locator('.token-hud').first.wait_for()
                 assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
                 first=page.locator('.execution-block').first
@@ -210,7 +212,7 @@ def test_reply_footer_and_single_author_survive_live_adoption_pruning_and_refres
             page.set_viewport_size({'width':width,'height':height})
             for current in ('folded',):
                 mode[0]=current
-                page.goto(base)
+                page.goto(base+'/#/chat?conversation=global_memory')
                 page.locator('[data-record-id="13"]').wait_for()
                 page.wait_for_function('document.querySelectorAll(".msg-row.ai.turn-continuation").length===3')
                 assert page.locator('.bubble.ai .bubble-header:visible').count()==3

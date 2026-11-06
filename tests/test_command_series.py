@@ -59,7 +59,7 @@ def test_series_fold_only_after_completion_and_count_each_series_independently(f
             page=context.new_page()
             if mobile:page.set_viewport_size({'width':390,'height':844})
             else:page.set_viewport_size({'width':1871,'height':950})
-            page.goto(base);page.wait_for_function('!document.getElementById("btn-send").disabled')
+            page.goto(base+'/#/chat?conversation=global_memory');page.wait_for_function('!document.getElementById("btn-send").disabled')
             page.evaluate('(dark)=>document.body.classList.toggle("dark",dark)',dark)
             server.outbox.put({'type':'chat_action','action':'typing','conversation_id':'global_memory','run_id':'series-run'})
             for value in frames():server.outbox.put({**value,'type':'record_snapshot','conversation_id':'global_memory'})
@@ -75,7 +75,8 @@ def test_series_fold_only_after_completion_and_count_each_series_independently(f
             assert page.locator('.command-series-toggle em').all_inner_texts()==[
                 '共执行 2 轮，3 个操作 · 总耗时约 40 秒', '共执行 2 轮，2 个操作 · 总耗时约 30 秒']
             assert head.is_visible()
-            assert head.inner_text()=='X\nXGent\nfixture-provider / fixture-model'
+            assert head.inner_text()=='XGent\nfixture-provider / fixture-model'
+            assert head.locator('.bubble-author-icon[data-brand-logo]').count()==1
             assert page.locator('.msg-row.ai .bubble-header:visible').count()==1
             assert abs(page.locator('.command-series-toggle').first.bounding_box()['x']-body_left)<1
             assert page.locator('[data-record-id="901"] .thinking-block').is_hidden()
@@ -154,7 +155,7 @@ def test_sent_files_stay_visible_between_collapsed_command_sequences(full_output
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.wait_for_function('document.querySelectorAll(".command-series-toggle").length===2')
             card=page.locator('[data-record-id="905"] .file-card')
             assert card.is_visible()
@@ -180,7 +181,7 @@ def test_touch_and_keyboard_can_collapse_without_hover(full_output_server):
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('.command-series-toggle').first.wait_for()
             page.locator('.command-series-toggle').first.focus()
             page.keyboard.press('Enter')
@@ -191,7 +192,7 @@ def test_touch_and_keyboard_can_collapse_without_hover(full_output_server):
             touch=browser.new_context(viewport={'width':390,'height':844},is_mobile=True,has_touch=True)
             touch.route('**/*',lambda route:route.continue_() if route.request.url.startswith(base) else route.abort())
             assert touch.request.post(base+'/api/login',data={'password':'temporary-test-only'}).ok
-            phone=touch.new_page();phone.goto(base)
+            phone=touch.new_page();phone.goto(base+'/#/chat?conversation=global_memory')
             phone.locator('.command-series-toggle').first.wait_for()
             assert phone.evaluate('matchMedia("(hover: none) and (pointer: coarse)").matches')
             phone.locator('.command-series-toggle').first.tap()
@@ -213,7 +214,7 @@ def test_removed_command_sequence_removes_its_side_button(full_output_server):
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('.command-series-toggle').first.wait_for()
             page.locator('.command-series-toggle').first.click()
             page.locator('[data-record-id="901"] .execution-row').first.hover()
@@ -242,7 +243,7 @@ def test_stop_notice_is_single_live_and_after_refresh_without_hiding_raw_errors(
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base);page.wait_for_function('!document.getElementById("btn-send").disabled')
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory');page.wait_for_function('!document.getElementById("btn-send").disabled')
             for value in values:server.outbox.put({**value,'type':'record_snapshot'})
             page.locator('[data-record-id="703"]').wait_for()
             page.wait_for_function('document.querySelector(".stop-notice").hidden')
@@ -286,7 +287,7 @@ def test_replies_with_dialog_and_commands_never_enter_the_large_fold(full_output
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('[data-record-id="910"]').wait_for()
             assert page.locator('.command-series-control').count()==0
             assert page.locator('.command-series-collapsed').count()==0
@@ -323,7 +324,7 @@ def test_only_consecutive_command_replies_count_toward_the_two_round_threshold(f
         if not Path(p.chromium.executable_path).exists():pytest.skip('Chromium unavailable')
         browser,context,base=browser_session(server,p)
         try:
-            page=context.new_page();page.goto(base)
+            page=context.new_page();page.goto(base+'/#/chat?conversation=global_memory')
             page.locator('[data-record-id="899"]').wait_for()
             assert page.locator('[data-record-id="801"] .body').is_visible()
             assert '开场说明留在外面' in page.locator('[data-record-id="801"] .body').inner_text()

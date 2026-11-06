@@ -261,9 +261,46 @@ async def submit_ordinary_text(text, *, chat_id, request_key=None):
     return item
 
 
-async def _web_accept_text(text, *, conversation_id=None, request_id=None, generation=None):
+async def _web_accept_new_text(text, *, token, group_id, request_id):
     from xgent_app.interaction import interaction
     from xgent_app.message_queue import public_item
+    if not request_id:
+        raise ConversationError('首次发送需要请求标识，请重新发送。')
+    with interaction('web', 'chat'), bind_conversation(None):
+        await UserDataManager.init()
+        db = await BotMemoryDB.get_instance()
+        _ensure_web_command_map()
+        command = text.strip().split(' ', 1)[0].lstrip('/').split('@', 1)[0].lower() if text.startswith('/') else None
+        request_key = 'web:' + request_id
+        if command in _WEB_COMMAND_MAP:
+            scope, accepted, revision = await db.accept_new_web_command(token=token, group_id=group_id, request_key=request_key)
+            if accepted:
+                outbox = get_web_outbox() or _web_external_outbox
+                task = asyncio.create_task(_web_scoped_call(_web_handle_command(text, outbox), scope.conversation_id,
+                    outbox, execution=command == 'compress', purpose='management'))
+                get_conversations().track_background(task)
+            return {'ok': True, 'management': True, 'new_conversation': True,
+                    'conversation_id': scope.conversation_id, 'generation': scope.generation,
+                    'conversation_revision': revision}
+        queue = get_text_queue()
+        item = await queue.submit_new_web(text, token=token, group_id=group_id,
+                                          chat_id=BotConfig.AUTHORIZED_USER_ID, request_key=request_key)
+        get_conversations().start()
+        try:
+            await queue.poll()
+        except Exception:
+            logger.exception('新对话消息已保存，后台轮询将继续处理')
+        return {'ok': True, 'queued': True, 'new_conversation': True, **public_item(item)}
+
+
+async def _web_accept_text(text, *, conversation_id=None, request_id=None, generation=None,
+                           new_conversation=None, group_id='ungrouped'):
+    from xgent_app.interaction import interaction
+    from xgent_app.message_queue import public_item
+    if new_conversation is not None:
+        if conversation_id or generation is not None:
+            raise ConversationError('首次发送不能指定已有对话或上下文版本。')
+        return await _web_accept_new_text(text, token=new_conversation, group_id=group_id, request_id=request_id)
     # Each browser tab supplies its target; the shared selection is a fallback.
     with interaction('web', 'management'):
         async with conversation_operation(conversation_id, fresh=True, selector='shared'):
@@ -1673,8 +1710,86 @@ _web_file_receipts = {}
 _web_file_receipts_lock = threading.RLock()
 
 
+async def _web_prepare_file_batch(data, mode, draft_metadata, payloads, key, signature):
+    from xgent_app.file_ingress import describe_file
+    captions = json.loads(data.get('captions') or '[]')
+    modes = json.loads(data.get('modes') or '[]')
+    if not isinstance(modes, list) or modes and (len(modes) != len(data['files']) or any(m not in {'attachment', 'server_upload'} for m in modes)):
+        raise ValueError('文件模式格式错误')
+    if not isinstance(captions, list) or any(not isinstance(c, str) for c in captions):
+        raise ValueError('文件说明格式错误')
+    restored_refs = [*draft_metadata.get('attachments', []), *draft_metadata.get('server_uploads', [])]
+    next_order = max((ref.get('order') if type(ref.get('order')) is int else i
+                      for i, ref in enumerate(restored_refs) if isinstance(ref, dict)), default=-1) + 1
+    for i, item in enumerate(data['files']):
+        item_mode = modes[i] if modes else mode
+        payloads.append(await asyncio.to_thread(ArtifactManager.adopt_upload,
+            item['filename'], item['path'], captions[i] if i < len(captions) else '',
+            order=next_order + i, backup=item_mode == 'attachment', path_only=item_mode == 'server_upload'))
+        payloads[-1]['mode'] = item_mode
+    refs = [p['attachment'] for p in payloads]
+    content = '\n\n'.join(filter(None, [data.get('text', ''), *[
+        describe_file(ref, ArtifactManager.UPLOAD_DIR) if p['mode'] == 'server_upload' else p['index_text']
+        for ref, p in zip(refs, payloads)]]))
+    metadata = {**draft_metadata, 'upload_request_key': key, 'upload_signature': signature, 'file_ingress_mode': mode,
+                'web_file_message': {'version': 1, 'text': data.get('text', '')},
+                'attachments': [*draft_metadata.get('attachments', []),
+                                *[p['attachment'] for p in payloads if p['mode'] == 'attachment']]}
+    upload_refs = [*draft_metadata.get('server_uploads', []), *[p['attachment'] for p in payloads if p['mode'] == 'server_upload']]
+    if upload_refs:
+        metadata['server_uploads'] = upload_refs
+    return content, metadata
+
+
+async def _web_accept_new_file_batch(data, mode, outbox, receipt, token, group_id):
+    from xgent_app.file_ingress import cleanup_payloads
+    from xgent_app.interaction import interaction
+    from xgent_app.queue_store import item_metadata
+    from xgent_app.message_queue import public_item
+    payloads, committed = [], False
+    try:
+        with interaction('web', 'chat'), bind_conversation(None):
+            await UserDataManager.init()
+            db = await BotMemoryDB.get_instance()
+            key = data['idempotency_key']
+            signature = hashlib.sha256(json.dumps([mode, data.get('modes', ''), data.get('text', ''), data.get('captions', ''),
+                [(f['filename'], f['size'], f['sha256']) for f in data['files']]], ensure_ascii=False).encode()).hexdigest()
+            previous = await db.queue_request('web-file:' + key)
+            if previous:
+                target = await db.new_web_target(token)
+                item = previous.get('item') or {}
+                session = await db.get_session(target) if target else None
+                if (previous['kind'] != 'chat' or item.get('conversation_id') != target or not session
+                        or session['deleting'] or session['generation'] != item['generation']
+                        or item_metadata(item).get('upload_signature') != signature):
+                    raise ConversationError('本批上传标识已失效，请核对对话后重新发送。')
+                receipt.set_result({'ok': True, 'queued': True, 'duplicate': True,
+                                    'new_conversation': True, **public_item(item),
+                                    'conversation_revision': (await db.get_conversation_state())['revision']})
+                return
+            content, metadata = await _web_prepare_file_batch(data, mode, {}, payloads, key, signature)
+            metadata['queue_file_message'] = True
+            queue = get_text_queue()
+            item = await queue.submit_new_web(content, token=token, group_id=group_id,
+                chat_id=BotConfig.AUTHORIZED_USER_ID, request_key='web-file:' + key, metadata=metadata)
+            committed = True
+            receipt.set_result({'ok': True, 'queued': True, 'new_conversation': True, **public_item(item)})
+            get_conversations().start()
+            try:
+                await queue.poll()
+            except Exception:
+                logger.exception('新对话附件已保存，后台轮询将继续处理')
+    except Exception as exc:
+        if not receipt.done():
+            receipt.set_result({'ok': False, 'error': str(exc)})
+    finally:
+        if payloads and not committed:
+            await asyncio.to_thread(cleanup_payloads, payloads, ArtifactManager.UPLOAD_DIR)
+        data['_temporary'].cleanup()
+
+
 async def _web_run_file_batch(data, mode, outbox, receipt):
-    from xgent_app.file_ingress import describe_file, cleanup_payloads
+    from xgent_app.file_ingress import cleanup_payloads
     from xgent_app.attachment_versions import upload_receipt_scope
     payloads, committed = [], False
     try:
@@ -1722,12 +1837,6 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
             with upload_receipt_scope(receipt):
                 await _web_run_upload(item['filename'], content, data['text'], outbox)
             return
-        captions = json.loads(data.get('captions') or '[]')
-        modes = json.loads(data.get('modes') or '[]')
-        if modes and (len(modes) != len(data['files']) or any(m not in {'attachment', 'server_upload'} for m in modes)):
-            raise ValueError('文件模式格式错误')
-        if not isinstance(captions, list) or any(not isinstance(c, str) for c in captions):
-            raise ValueError('文件说明格式错误')
         conn = await db._get_conn()
         cursor = await conn.execute('SELECT * FROM conversation_branch_drafts WHERE conversation_id=?',
                                     (current_scope().conversation_id,))
@@ -1741,27 +1850,8 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
                 draft_metadata = {}
             if not isinstance(draft_metadata, dict):
                 draft_metadata = {}
-        restored_refs = [*draft_metadata.get('attachments', []), *draft_metadata.get('server_uploads', [])]
-        next_order = max((ref.get('order') if type(ref.get('order')) is int else i
-                          for i, ref in enumerate(restored_refs) if isinstance(ref, dict)), default=-1) + 1
-        for i, item in enumerate(data['files']):
-            item_mode = modes[i] if modes else mode
-            payloads.append(await asyncio.to_thread(ArtifactManager.adopt_upload,
-                item['filename'], item['path'], captions[i] if i < len(captions) else '',
-                order=next_order + i, backup=item_mode == 'attachment', path_only=item_mode == 'server_upload'))
-            payloads[-1]['mode'] = item_mode
-        refs = [p['attachment'] for p in payloads]
-        content = '\n\n'.join(filter(None, [data.get('text', ''), *[
-            describe_file(ref, ArtifactManager.UPLOAD_DIR) if p['mode'] == 'server_upload' else p['index_text']
-            for ref, p in zip(refs, payloads)]]))
-        metadata = {**draft_metadata, 'upload_request_key': key, 'upload_signature': signature, 'file_ingress_mode': mode,
-                    'web_file_message': {'version': 1, 'text': data.get('text', '')}}
-        attachment_refs = [*draft_metadata.get('attachments', []),
-                           *[p['attachment'] for p in payloads if p['mode'] == 'attachment']]
-        upload_refs = [*draft_metadata.get('server_uploads', []),
-                       *[p['attachment'] for p in payloads if p['mode'] == 'server_upload']]
-        if upload_refs:
-            metadata['server_uploads'] = upload_refs
+        content, metadata = await _web_prepare_file_batch(data, mode, draft_metadata, payloads, key, signature)
+        attachment_refs, upload_refs = metadata['attachments'], metadata.get('server_uploads', [])
         if state==BotState.IDLE and data.get('queue') in (True,'1'):
             from xgent_app.message_queue import public_item
             metadata.update(attachments=attachment_refs,attachment_generation=generation,queue_file_message=True)
@@ -1780,6 +1870,7 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
             row_id = await GlobalRecorder.record_attachment_message(content, MessageType.USER_FILE,
                 BotConfig.AUTHORIZED_USER_ID, attachment_refs, generation, metadata=metadata)
         else:
+            metadata.pop('attachments', None)
             row_id = await GlobalRecorder.record_user_message(content, MessageType.USER_TEXT,
                 BotConfig.AUTHORIZED_USER_ID, metadata={**metadata, 'server_uploads': upload_refs,
                                                       'attachment_generation': generation})
@@ -1814,13 +1905,13 @@ async def _web_run_file_batch(data, mode, outbox, receipt):
         data['_temporary'].cleanup()
 
 
-def _web_submit_file_batch(data, mode, outbox, *, conversation_id=None):
+def _web_submit_file_batch(data, mode, outbox, *, conversation_id=None, new_conversation=None, group_id='ungrouped'):
     from concurrent.futures import Future
     key = data.get('idempotency_key') or data.get('batch_id') or uuid.uuid4().hex
     data['idempotency_key'] = key
     signature = hashlib.sha256(json.dumps([mode, data.get('modes', ''), data.get('text', ''), data.get('captions', ''),
         [(f['filename'], f['size'], f['sha256']) for f in data['files']]], ensure_ascii=False).encode()).hexdigest()
-    cache_key = (conversation_id, key)
+    cache_key = ('web-new:' + new_conversation if new_conversation else conversation_id, key)
     with _web_file_receipts_lock:
         existing = _web_file_receipts.get(cache_key)
         if existing:
@@ -1844,8 +1935,11 @@ def _web_submit_file_batch(data, mode, outbox, *, conversation_id=None):
         return receipt
     async def receive():
         try:
-            await _web_scoped_call(_web_run_file_batch(data, mode, outbox, receipt), conversation_id,
-                outbox, execution=lambda:not(data.get('queue') in (True,'1') and UserDataManager.get('state')==BotState.IDLE))
+            if new_conversation:
+                await _web_accept_new_file_batch(data, mode, outbox, receipt, new_conversation, group_id)
+            else:
+                await _web_scoped_call(_web_run_file_batch(data, mode, outbox, receipt), conversation_id,
+                    outbox, execution=lambda:not(data.get('queue') in (True,'1') and UserDataManager.get('state')==BotState.IDLE))
         except Exception as exc:
             logger.exception('Web 文件批次接纳失败')
             if not receipt.done():

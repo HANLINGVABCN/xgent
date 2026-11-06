@@ -64,7 +64,7 @@ def test_one_click_switch_and_new_keep_independent_drafts(conversation_page, bro
     page.locator('#input').fill('新对话草稿')
     select(page, original)
     page.wait_for_function('document.querySelector("#input").value==="原对话草稿"')
-    select(page, created)
+    page.get_by_role('button', name='新对话', exact=True).click()
     page.wait_for_function('document.querySelector("#input").value==="新对话草稿"')
     ids = page.locator('.conv-row').evaluate_all('(rows)=>rows.map(row=>row.dataset.conversationId)')
     select(page, original)
@@ -159,14 +159,14 @@ def test_rename_failure_preserves_draft_and_retries_same_target(conversation_pag
     assert row(page, target).locator('.conv-row-title').inner_text() == '还没有保存的名称'
 
 
-def test_double_new_only_creates_one_chat(conversation_page, browser_context, workspace_url):
+def test_double_new_does_not_create_chat_until_sending(conversation_page, browser_context, workspace_url):
     page = conversation_page
     original = current(page)
     before = len(browser_context.request.get(workspace_url['url'] + '/api/workbench/conversations').json()['items'])
     page.evaluate('()=>{const button=document.getElementById("conversation-new");button.click();button.click();}')
     page.wait_for_function('(id)=>window.XGentConversations.current!==id', arg=original)
     after = len(browser_context.request.get(workspace_url['url'] + '/api/workbench/conversations').json()['items'])
-    assert after == before + 1
+    assert after == before and current(page) is None and page.url.endswith('#/chat')
 
 
 def test_each_running_conversation_has_its_own_busy_state_and_stop_target(conversation_page, browser_context, workspace_url):
@@ -243,17 +243,18 @@ def test_mobile_drawer_keyboard_backdrop_and_resize(conversation_page, tmp_path)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth+1')
 
 
-def test_cross_tab_new_chat_updates_list_without_switching_other_tab(browser_context, workspace_url):
+def test_cross_tab_empty_chat_does_not_change_list_or_switch_other_tab(browser_context, workspace_url):
     first = browser_context.new_page(); second = browser_context.new_page()
     ready(first, workspace_url['url']); ready(second, workspace_url['url'])
     first.locator('.conv-row').first.wait_for(); second.locator('.conv-row').first.wait_for()
     original = current(first)
+    count=len(browser_context.request.get(workspace_url['url']+'/api/workbench/conversations').json()['items'])
     first.get_by_role('searchbox', name='搜索对话名称和内容').fill('保留搜索输入')
     second.get_by_role('button', name='新对话', exact=True).click()
     second.wait_for_function('(id)=>window.XGentConversations.current!==id', arg=original)
-    selected = current(second)
     first.evaluate('window.XGentConversations.refresh()')
-    first.wait_for_function('(id)=>window.XGentConversations.items.some(item=>item.id===id)', arg=selected)
+    assert current(second) is None
+    assert len(browser_context.request.get(workspace_url['url']+'/api/workbench/conversations').json()['items'])==count
     assert current(first) == original
     assert first.get_by_role('searchbox', name='搜索对话名称和内容').input_value() == '保留搜索输入'
     first.close(); second.close()
@@ -263,7 +264,7 @@ def test_sidebar_survives_optional_workbench_script_failure(browser_context, wor
     page = browser_context.new_page()
     page.route('**/assets/workbench.js*', lambda route: route.fulfill(status=404, body='not found'))
     page.route('**/assets/components.js*', lambda route: route.fulfill(status=404, body='not found'))
-    page.goto(workspace_url['url'])
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory')
     page.locator('.conv-row').first.wait_for()
     original = current(page)
     page.get_by_role('button', name='新对话', exact=True).click()
@@ -294,7 +295,7 @@ def test_initial_list_error_has_retry_without_breaking_chat(browser_context, wor
     page.route('**/api/workbench/bootstrap', lambda route: route.fulfill(status=503, json={'error': '配置暂时不可用'}))
     page.goto(workspace_url['url'])
     page.locator('#conversation-list').get_by_text('对话列表暂时不可用', exact=True).wait_for()
-    assert page.get_by_role('button', name='新对话', exact=True).is_disabled()
+    assert page.get_by_role('button', name='新对话', exact=True).is_enabled()
     assert page.evaluate('!!window.XGentChat')
     page.unroute('**/api/workbench/conversations')
     page.locator('#conversation-list').get_by_role('button', name='重新加载', exact=True).click()

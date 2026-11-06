@@ -26,7 +26,7 @@ def test_touch_menu_and_logout_do_not_depend_on_workbench(touch_context,workspac
     elif failure=='dependency_404':page.route('**/assets/page-cache.js*',lambda r:r.fulfill(status=404,body='not found'))
     elif failure=='syntax_error':page.route('**/assets/workbench.js*',lambda r:r.fulfill(content_type='text/javascript',body='export const broken = ;'))
     else:page.add_init_script("Storage.prototype.getItem=function(){throw new DOMException('storage blocked','SecurityError')};Storage.prototype.removeItem=function(){throw new DOMException('storage blocked','SecurityError')};Storage.prototype.setItem=function(){throw new DOMException('storage blocked','SecurityError')};")
-    page.goto(workspace_url['url']);page.wait_for_function('!!window.XGentChat && !document.getElementById("btn-send").disabled')
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('!!window.XGentChat && !document.getElementById("btn-send").disabled')
     assert page.evaluate('!!window.XGentWorkbench') == (failure=='storage_denied')
     draft='基础按钮必须能用';page.locator('#input').fill(draft)
     assert page.locator('#btn-menu,#menu-panel').count() == 0
@@ -53,7 +53,7 @@ def test_optional_page_import_failure_is_local_to_that_page(touch_context,worksp
     page=touch_context.new_page();reads=[]
     page.on('request',lambda r:reads.append(r.url))
     page.route('**/assets/'+module+'.js*',lambda r:r.fulfill(status=404,body='not found'))
-    page.goto(workspace_url['url']);page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
     assert not any('/assets/'+module+'.js' in url for url in reads)
     page.locator('#btn-composer-menu').tap();expect(page.locator('#composer-commands')).to_be_visible();page.keyboard.press('Escape')
     page.evaluate('(name)=>location.hash="/"+name',module)
@@ -68,7 +68,7 @@ def test_failure_fallback_retry_and_no_duplicate_logout(touch_context,workspace_
     page=touch_context.new_page();requests=[]
     page.route('**/assets/workbench.js*',lambda r:r.abort())
     page.route('**/api/workbench/bootstrap',lambda r:r.fulfill(status=503,json={'error':'fixture offline'}))
-    page.goto(workspace_url['url']);page.wait_for_function('!!window.XGentChat')
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('!!window.XGentChat')
     page.locator('#btn-composer-menu').tap()
     expect(page.locator('#composer-commands')).to_contain_text('fixture offline')
     page.unroute('**/api/workbench/bootstrap')
@@ -90,7 +90,7 @@ def test_fallback_request_timeout_is_visible(touch_context,workspace_url):
     page.add_init_script("const timer=window.setTimeout;window.setTimeout=(fn,ms,...args)=>timer(fn,ms===12000?100:ms,...args);")
     page.route('**/assets/workbench.js*',lambda r:r.abort())
     page.route('**/api/workbench/bootstrap',lambda r:None)
-    page.goto(workspace_url['url']);page.wait_for_function('!!window.XGentChat')
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('!!window.XGentChat')
     page.locator('#btn-composer-menu').tap()
     expect(page.locator('#composer-commands')).to_contain_text('请求超时')
     assert page.get_by_role('button',name='重新读取',exact=True).is_visible()
@@ -100,7 +100,7 @@ def test_fallback_request_timeout_is_visible(touch_context,workspace_url):
 def test_normal_touch_controls_and_screenshot(touch_context,workspace_url):
     expect=pytest.importorskip('playwright.sync_api').expect
     page=touch_context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
-    page.goto(workspace_url['url']);page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
     page.locator('#btn-composer-menu').tap();expect(page.locator('#composer-commands .composer-command strong').first).to_have_text('/start')
     output=Path(__file__).resolve().parents[1]/'workspace'/'web-basic-actions-qa';output.mkdir(parents=True,exist_ok=True)
     page.screenshot(path=str(output/'390-menu.png'))
@@ -111,7 +111,7 @@ def test_normal_touch_controls_and_screenshot(touch_context,workspace_url):
 
 def test_composer_menu_is_anchored_nonmodal_toggle_and_outside_dismiss(touch_context,workspace_url):
     expect=pytest.importorskip('playwright.sync_api').expect
-    page=touch_context.new_page();page.goto(workspace_url['url']);page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
+    page=touch_context.new_page();page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('document.getElementById("composer-model")?.disabled===false')
     page.locator('#input').fill('草稿不被菜单覆盖')
     panel=page.locator('#composer-commands');trigger=page.locator('#btn-composer-menu')
     for height in [844,560]:
@@ -140,7 +140,7 @@ def test_menu_dismissed_request_cannot_reopen_and_dangerous_command_confirms(tou
     expect=pytest.importorskip('playwright.sync_api').expect
     page=touch_context.new_page();page.route('**/assets/workbench.js*',lambda r:r.abort())
     reads=[];page.route('**/api/workbench/bootstrap',lambda r:reads.append(r))
-    page.goto(workspace_url['url']);page.wait_for_function('!!window.XGentChat && !document.getElementById("btn-send").disabled')
+    page.goto(workspace_url['url']+'/#/chat?conversation=global_memory');page.wait_for_function('!!window.XGentChat && !document.getElementById("btn-send").disabled')
     page.locator('#btn-composer-menu').tap();expect(page.locator('#composer-commands')).to_contain_text('正在读取')
     page.locator('#btn-composer-menu').tap();expect(page.locator('#composer-commands')).not_to_be_visible()
     for route in reads:route.fulfill(json={'commands':[{'cmd':'/start','desc':'打开主菜单'}]})
@@ -159,7 +159,7 @@ def test_only_primary_reset_command_is_listed_and_legacy_alias_still_executes(to
     data=touch_context.request.get(url+'/api/workbench/bootstrap').json()
     resets=[item['cmd'] for item in data['commands'] if item['cmd'] in ('/clear','/clear_memory')]
     assert resets==['/clear']
-    page=touch_context.new_page();page.goto(url)
+    page=touch_context.new_page();page.goto(url+'/#/chat?conversation=global_memory')
     page.wait_for_function('!!window.XGentWorkbench')
     page.locator('#btn-composer-menu').tap()
     assert page.locator('#composer-commands .composer-command strong').filter(has_text='/clear_memory').count()==0

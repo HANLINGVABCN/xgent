@@ -38,7 +38,7 @@ async function taskPage(read){
   const status=filter('status')||'',q=filter('q')||'',kind=filter('trigger')||'',source=filter('source')||'';
   const data=await read('tasks'+query({status,q,kind,source_conversation_id:source,offset:filter('offset')||0}));
   const page=el('div',{class:'wb-task-page'},heading('任务中心','管理 Trigger 的计划、条件与执行结果；所有通道共享同一份任务。',
-    [button('创建任务',()=>taskForm(data.timezone),'primary')]));
+    [button('创建任务',()=>taskForm(data.timezone,data.sources),'primary')]));
   const counts=data.counts||{},stats=el('div',{class:'wb-task-stats'});
   for(const [label,value] of [['待执行',(counts.scheduled||0)+(counts.pending||0)],['运行 / 待通知',(counts.running||0)+(counts.waiting_delivery||0)],['已完成',counts.completed||0],['失败',counts.failed||0]])
     stats.append(el('div',{},el('span',{},label),el('strong',{},fmt(value))));
@@ -60,7 +60,7 @@ async function taskPage(read){
   all.disabled=!data.items.some(activeTask);
   if(!data.items.length){
     page.append(status||q||kind||source?empty('没有匹配的任务','试试其他状态、触发方式或关键词。',button('清除筛选',()=>{for(const k of ['status','q','trigger','source'])filter(k,'');filter('offset',0);render();})):
-      empty('暂时没有任务','支持延时、指定时间、Cron 和输出条件触发。查看本页不会执行命令。',button('创建第一个任务',()=>taskForm(data.timezone),'primary')));
+      empty('暂时没有任务','支持延时、指定时间、Cron 和输出条件触发。查看本页不会执行命令。',button('创建第一个任务',()=>taskForm(data.timezone,data.sources),'primary')));
   }else{
     const labels=['选择','任务','命令','触发规则','状态','执行时间 / 下次执行','执行次数','操作'];
     const list=table(labels,data.items.map(t=>{
@@ -82,11 +82,15 @@ async function taskPage(read){
   page.append(el('div',{class:'wb-pagination'},el('span',{class:'wb-note'},data.total?`共 ${fmt(data.total)} 项 · 当前 ${offset+1}–${offset+data.items.length}`:'共 0 项'),actions(previous,next)));
   return page;
 }
-function taskForm(timezone) {
+function taskForm(timezone,sources=[]) {
   const zone=timezone||'Asia/Shanghai',drafts={};let currentMode;
   const target=window.XGentConversations?.current;
   const targetName=document.getElementById('wb-conversation-title')?.textContent||target;
-  const form=el('form',{},el('p',{class:'wb-note'},'任务来源：'+targetName+' · '+String(target||'').slice(0,6)),field('任务名称','task','','text','描述任务目的，便于查看执行记录'),
+  const available=sources.filter(item=>!item.archived&&!item.deleting);
+  const defaultTarget=available.find(item=>item.id===state.boot?.conversations?.current_chat_id)?.id||available[0]?.id||'';
+  const origin=target?el('p',{class:'wb-note'},'任务来源：'+targetName+' · '+target.slice(0,6)):
+    select('任务来源对话','conversation_id',available.length?available.map(item=>({value:item.id,label:(item.name||'新对话')+' · '+item.id.slice(0,6)})):[{value:'',label:'还没有可用的已保存对话'}],defaultTarget);
+  const form=el('form',{},origin,!target?el('p',{class:'wb-note'},available.length?'选择接收任务结果的已保存对话。':'先发送一条消息保存对话，即可在这里为它创建任务。'):null,field('任务名称','task','','text','描述任务目的，便于查看执行记录'),
     field('执行命令','command','','textarea','使用服务运行账号执行；不会提供沙箱隔离。'),
     select('触发方式','mode',[{value:'after',label:'延时执行'},{value:'at',label:'指定时间'},{value:'cron',label:'Cron 定时'},{value:'when',label:'输出条件触发'}],'after'));
   const schedule=el('div'),summary=el('div',{class:'wb-callout','aria-live':'polite'});
@@ -113,12 +117,14 @@ function taskForm(timezone) {
   form.append(schedule,field('时区','timezone',zone,'text','所有计划按此时区执行，例如 Asia/Shanghai。'),summary);scheduleForm();
   let id=requestId();form.addEventListener('input',()=>{id=requestId();updateSummary();});form.addEventListener('change',()=>{id=requestId();updateSummary();});
   form.elements.task.required=true;form.elements.command.required=true;form.elements.timezone.required=true;
+  if(!target)form.elements.conversation_id.required=true;
   form.append(actions(button('取消',closeDialog),el('button',{class:'wb-btn primary',type:'submit'},'确认创建任务')));dirtyForm(form);
+  form.querySelector('[type=submit]').disabled=!target&&!available.length;
   form.onsubmit=e=>{e.preventDefault();submit(form,async d=>{
     if(!d.task.trim()||!d.command.trim())throw new Error('请填写任务名称和执行命令');
     if(!d.expression)throw new Error('请填写触发时间或条件');
     const expression=d.mode==='at'?d.expression.replace('T',' '):d.expression;
-    await wb('tasks/create',{data:{conversation_id:target,request_id:id,task:d.task,command:d.command,timezone:d.timezone,
+    await wb('tasks/create',{data:{conversation_id:target||d.conversation_id,request_id:id,task:d.task,command:d.command,timezone:d.timezone,
       [d.mode]:expression,...(d.mode==='when'?{repeat:!!d.repeat}:{})}});
     state.dirty=false;closeDialog();for(const key of ['status','q','trigger','source'])filter(key,'');filter('offset',0);await render();
   });};dialog('创建后台任务',form);

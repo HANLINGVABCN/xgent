@@ -138,7 +138,9 @@ def test_live_model_header_system_menu_and_stop_target(full_output_server,tmp_pa
         for index,(width,height) in enumerate(((1440,900),(390,844),(320,640))):
             page.set_viewport_size({'width':width,'height':height})
             history_state['saved']=False
-            page.goto(base)
+            target=base+'/#/chat?conversation='+cid
+            if page.url==target:page.reload()
+            else:page.goto(target)
             page.locator('[data-record-id="1"]').wait_for()
             assert page.locator('#btn-stop').is_hidden()
             server.outbox.put({'type':'message','conversation_id':cid,'run_id':run_id,'message_id':91,

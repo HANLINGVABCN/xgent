@@ -132,9 +132,11 @@ def test_trigger_browser_refresh_keeps_receipt_fold_and_no_extra_message(full_ou
 
                 server.config.read_history = history
                 server.outbox.put({'type': 'history_reset'})
-                page.goto(base)
+                if page.url!='about:blank':page.evaluate('sessionStorage.removeItem("xgent-fold-state")')
+                target=base+'/#/chat?conversation=global_memory'
+                if page.url==target:page.reload()
+                else:page.goto(target)
                 page.wait_for_function('!document.getElementById("btn-send").disabled')
-                page.evaluate('sessionStorage.removeItem("xgent-fold-state")')
                 for frame in case['frames']:
                     server.outbox.put(frame)
                 selector = f'.msg-row[data-record-id="{case["history"]["id"]}"]'
