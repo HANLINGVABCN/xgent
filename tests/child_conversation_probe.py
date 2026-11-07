@@ -42,7 +42,8 @@ async def queue_and_callback(bot, root, mode='toolcall', style='nonstream'):
         parent_request = json.dumps(h.requests[-1])
         assert 'CHILD_FINAL_RESULT' in parent_request and 'PARENT_CONTEXT_ONLY' in parent_request
         if mode == 'toolcall':
-            assert all(len(request['tools']) == 16 for request in h.requests)
+            from xgent_app.tool_calls import TOOLS
+            assert all(len(request['tools']) == len(TOOLS) for request in h.requests)
         parent_rows = await h.db.get_display_history(100)
         assert any(row['content'] == 'PARENT_AFTER_CHILD' for row in parent_rows)
         assert not any(row['content'] == 'CHILD_FINAL_RESULT' for row in parent_rows)
