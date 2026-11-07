@@ -26,6 +26,7 @@ PBKDF2_SALT_BYTES = 16
 
 SESSION_COOKIE_NAME = "xgent_web_session"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
+SESSION_SECRET_CONFIG_KEY = 'web_session_secret'
 
 # 登录限速：连续失败达到上限后锁定一段时间。
 LOGIN_MAX_FAILS = 5
@@ -277,8 +278,40 @@ def is_same_origin(origin_header: str, referer_header: str, host_header: str) ->
 
 
 def generate_session_secret() -> bytes:
-    """每次启动生成新的签名密钥——重启即让所有旧会话失效。"""
+    """Generate a fresh key for an instance or an ephemeral embedded server."""
     return secrets.token_bytes(32)
+
+
+async def load_session_secret(database) -> bytes:
+    """Keep one instance secret across updates, without exposing public config."""
+    async with database._transaction() as connection:
+        cursor = await connection.execute('SELECT value FROM config WHERE key=?', (SESSION_SECRET_CONFIG_KEY,))
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            secret = generate_session_secret()
+            await connection.execute('INSERT INTO config(key,value) VALUES(?,?)',
+                (SESSION_SECRET_CONFIG_KEY, json.dumps(secret.hex())))
+            return secret
+        try:
+            value = json.loads(row[0])
+            if not isinstance(value, str) or len(value) != 64:
+                raise ValueError
+            secret = bytes.fromhex(value)
+            if len(secret) != 32:
+                raise ValueError
+        except (ValueError, TypeError) as exc:
+            raise ValueError('网页登录凭据配置异常') from exc
+        return secret
+
+
+def instance_session_key(secret: bytes, password_hash: str, bot_token: str, user_id: int) -> bytes:
+    """Credential changes invalidate cookies; code updates and ports do not."""
+    if not isinstance(secret, bytes) or len(secret) != 32:
+        raise ValueError('网页登录签名密钥无效')
+    identity = json.dumps(['xgent-web-session-v1', password_hash, bot_token, user_id],
+                          ensure_ascii=False, separators=(',', ':'))
+    return hmac.new(secret, identity.encode('utf-8'), hashlib.sha256).digest()
 
 
 def is_https_request(headers: Dict[str, str]) -> bool:
@@ -300,6 +333,7 @@ __all__ = [
     "PBKDF2_ROUNDS",
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_SECONDS",
+    "SESSION_SECRET_CONFIG_KEY",
     "LOGIN_MAX_FAILS",
     "LOGIN_LOCKOUT_SECONDS",
     "INIT_DATA_MAX_AGE_SECONDS",
@@ -316,6 +350,8 @@ __all__ = [
     "init_data_user_id",
     "is_same_origin",
     "generate_session_secret",
+    "load_session_secret",
+    "instance_session_key",
     "is_https_request",
     "constant_time_equals",
 ]

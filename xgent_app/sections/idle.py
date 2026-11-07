@@ -2203,6 +2203,7 @@ async def start_web_chat_if_enabled(app: Optional[Any] = None, *,
         password_hash=password_hash,
         bot_token=BotConfig.TOKEN,
         authorized_user_id=BotConfig.AUTHORIZED_USER_ID,
+        session_secret=await web_auth.load_session_secret(await BotMemoryDB.get_instance()),
         loop=asyncio.get_running_loop(),
         submit_message=_web_submit_message,
         accept_text=_web_accept_text,
@@ -2378,8 +2379,8 @@ async def reconcile_web_config_once() -> None:
         state.set(COMPONENT_DISABLED, reason="未开启或未设置访问密码")
         return
 
-    # 3) 端口或密码变化都重启 Web：复用停服清理，撤销旧 Cookie、SSE 和终端。
-    #    只换密码哈希会让已泄漏的会话继续有效，用户改密码无法收回访问权限。
+    # 3) 端口或密码变化都重启 Web，清理旧 SSE 和终端。普通重启沿用签名，
+    #    密码哈希参与签名派生，所以改密仍撤销旧 Cookie。
     server = _web_chat_server
     if server is None:
         return

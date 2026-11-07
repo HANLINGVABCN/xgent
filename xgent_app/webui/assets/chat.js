@@ -3356,18 +3356,25 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
   }
   document.getElementById('login-back').onclick=resetLoginFactor;
 
+  function checkLoginSession(){
   api("/api/session").then(function (data) {
     if (data.authenticated) { boot(); return; }
     var initData = tg && tg.initData ? tg.initData : "";
     if (initData) {
-      return tryLogin({ init_data: initData }).catch(function () {
+      return tryLogin({ init_data: initData }).catch(function (error) {
+        if(!error.status||error.status>=500)throw error;
         loginErr.textContent = "Telegram 免密登录失败，请输入访问密码";
-        loginDlg.showModal();
+        if(!loginDlg.open)loginDlg.showModal();
       });
     }
     loginSub.textContent = '请输入访问密码以继续使用 '+(window.XGentBranding?.name||'XGent')+' Web';
     loginDlg.showModal();
-  }).catch(function () { loginDlg.showModal(); });
+  }).catch(function (error) {
+    if(!error.status||error.status>=500){setConnState('connecting');setTimeout(checkLoginSession,1500);return;}
+    if(!loginDlg.open)loginDlg.showModal();
+  });
+  }
+  checkLoginSession();
 
   document.getElementById("btn-login").addEventListener("click", function () {
     loginErr.textContent = "";

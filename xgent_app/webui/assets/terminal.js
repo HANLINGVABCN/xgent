@@ -183,7 +183,10 @@ function startLogin() {
   login().then(function (ok) {
     if (ok) { hideLogin(); initTerm(); }
     else { showLogin(); $('pw').focus(); }
-  }).catch(function () { showLogin(); });
+  }).catch(function (error) {
+    if(!error.status||error.status>=500){setConnState('connecting');setTimeout(startLogin,1500);return;}
+    showLogin();
+  });
 }
 
 $('loginBtn').onclick = function () {

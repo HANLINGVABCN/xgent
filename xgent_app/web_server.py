@@ -176,8 +176,10 @@ class WebChatConfig:
         security_api: Optional[Callable[..., Any]] = None,
         read_branding: Optional[Callable[[], Any]] = None,
         read_settings_revision: Optional[Callable[[], Any]] = None,
+        session_secret: Optional[bytes] = None,
     ):
         self.accept_text = accept_text
+        self.session_secret = session_secret
         self.security_api = security_api
         self.read_branding = read_branding
         # 轻量回调：只读外观 revision（一次 DB 读）。/api/config?since= 用它做
@@ -423,9 +425,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({'error': str(exc)}, status=exc.status, extra_headers={'Cache-Control': 'private, no-store'})
 
     def _require_auth(self) -> bool:
+        if not self._require_service_ready():
+            return False
         if self._is_authenticated():
             return True
         self._send_json({"error": "未登录"}, status=401)
+        return False
+
+    def _require_service_ready(self) -> bool:
+        if not self.server.shutdown_event.is_set():
+            return True
+        self._send_json({'error': '服务正在重启，请稍后重试'}, status=503,
+                        extra_headers={'Retry-After': '1', 'Cache-Control': 'private, no-store'})
         return False
 
     def _require_same_origin(self) -> bool:
@@ -455,6 +466,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path.startswith('/api/') and not self._require_service_ready():
+                return
             if path.startswith("/assets/"):
                 self._serve_workbench_asset(path)
             elif path.startswith("/api/workbench/"):
@@ -511,6 +524,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         try:
+            if path.startswith('/api/') and not self._require_service_ready():
+                return
             if not self._require_same_origin():
                 return
             if path.startswith("/api/workbench/"):
@@ -1720,9 +1735,12 @@ class WebChatServer:
             transfer_directory = self._transfer_temporary.name
         self.file_transfers = FileTransfers(transfer_directory)
 
+        session_key = (web_auth.instance_session_key(self.config.session_secret, self.config.password_hash,
+            self.config.bot_token, self.config.authorized_user_id) if self.config.session_secret is not None
+            else web_auth.generate_session_secret())
         httpd = _ThreadingHTTPServer((self.config.host, self.config.port), _Handler)
         httpd.config = self.config          # type: ignore[attr-defined]
-        httpd.session_key = web_auth.generate_session_secret()  # type: ignore[attr-defined]
+        httpd.session_key = session_key  # type: ignore[attr-defined]
         httpd.limiter = web_auth.LoginRateLimiter()             # type: ignore[attr-defined]
         # 2FA policy 的共享缓存：所有 HTTP 工作线程读写同一份（带锁）。
         httpd.auth_policy_cache = {'lock': threading.Lock(), 'entry': None}  # type: ignore[attr-defined]
