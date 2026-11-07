@@ -57,15 +57,37 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   viewport.style.height=(pending?viewport.getBoundingClientRect().height:360)+'px';
   const skeleton=viewport.querySelector('.visual-page-skeleton')||document.createElement('div');skeleton.className='visual-page-skeleton';skeleton.setAttribute('aria-hidden','true');
   if(!skeleton.children.length)skeleton.innerHTML='<span></span><span></span><span></span>';
-  const sourceView=document.createElement('pre');sourceView.className='visual-page-source';sourceView.hidden=true;const code=document.createElement('code');sourceView.append(code);
+  const sourceView=document.createElement('pre');sourceView.className='visual-page-source';sourceView.dataset.enhanced='1';sourceView.hidden=true;const code=document.createElement('code'),sourceText=document.createTextNode('');code.append(sourceText);sourceView.append(code);
   let frame=document.createElement('iframe');frame.className='visual-page-frame';frame.setAttribute('sandbox','allow-scripts');frame.referrerPolicy='no-referrer';
   viewport.replaceChildren(frame,skeleton,sourceView);card.replaceChildren(bar,viewport);if(!pending)mount.replaceChildren(card);
   let controller,token='',revision=0,expanded=false,previousFocus,sourceMode=false,pageHeight=360;
   let current,owner=recordId,source=null,complete=false,draftReady=false,draftStarted=false,timer,blobUrl,destroyed=false,renderedSource=null,downloadKey;
+  let sourcePaint=0,sourceScroll=0,sourceAtEnd=true,autoScrollTop=null,printedSource='',sentDraft=null,draftInFlight=false;
+  sourceView.addEventListener('scroll',()=>{
+    if(sourceView.scrollTop===autoScrollTop){autoScrollTop=null;return;}
+    sourceAtEnd=sourceView.scrollHeight-sourceView.scrollTop-sourceView.clientHeight<32;
+  },{passive:true});
+  function sourceSelected(){const selection=getSelection();return selection&&!selection.isCollapsed&&(sourceView.contains(selection.anchorNode)||sourceView.contains(selection.focusNode));}
+  function paintSource(){
+    sourcePaint=0;if(destroyed||!sourceMode||source===null||printedSource===source)return;
+    const append=source.startsWith(printedSource),selected=sourceSelected();
+    // Append to the same text node so a range in existing code stays selected.
+    // A rare rewrite waits until the reader finishes selecting the old source.
+    if(!append&&selected)return;
+    const follow=!selected&&(printedSource?sourceAtEnd:!complete);
+    if(append)sourceText.appendData(source.slice(printedSource.length));else sourceText.replaceData(0,sourceText.length,source);
+    printedSource=source;
+    if(follow&&!sourceScroll)sourceScroll=requestAnimationFrame(()=>{
+      sourceScroll=0;if(sourceMode&&sourceAtEnd&&!sourceSelected()){sourceView.scrollTop=sourceView.scrollHeight;autoScrollTop=sourceView.scrollTop;}
+    });
+  }
+  function scheduleSource(){if(sourceMode&&!sourcePaint)sourcePaint=requestAnimationFrame(paintSource);}
   function setSourceMode(value){
     sourceMode=value;sourceView.hidden=!value;viewport.querySelectorAll('iframe').forEach(node=>node.hidden=value);card.classList.toggle('visual-source-mode',value);
     copy.hidden=download.hidden=!value;sourceToggle.title=value?'预览':'源码';sourceToggle.setAttribute('aria-label',sourceToggle.title);sourceToggle.setAttribute('aria-pressed',String(value));
     viewport.style.height=(value?Math.max(240,Math.min(600,pageHeight)):pageHeight)+'px';
+    if(value){clearTimeout(timer);timer=null;cancelAnimationFrame(sourcePaint);sourcePaint=0;paintSource();}
+    else{cancelAnimationFrame(sourcePaint);cancelAnimationFrame(sourceScroll);sourcePaint=sourceScroll=0;if(complete)renderComplete();else renderDraft();}
   }
   function setExpanded(value){
     expanded=value;card.classList.toggle('visual-page-expanded',value);card.setAttribute('role',value?'dialog':'region');
@@ -83,17 +105,20 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     download.download='page.'+(current.format||'html');
   }
   function flushDraft(){
-    timer=null;if(destroyed||complete||!draftReady)return;
+    timer=null;if(destroyed||complete||sourceMode||!draftReady||draftInFlight||sentDraft===source)return;
+    draftInFlight=true;sentDraft=source;
     frame.contentWindow.postMessage({type:'xgent-visual-draft',token,source:source||''},'*');
   }
   function renderDraft(){
+    if(sourceMode||destroyed)return;
     if(!draftStarted){
-      draftStarted=true;draftReady=false;token=crypto.randomUUID();
+      draftStarted=true;draftReady=false;draftInFlight=false;sentDraft=null;token=crypto.randomUUID();
       frame.srcdoc='<!doctype html><html><head>'+base+'</head><body><script>('+draftRuntime.toString()+')('+JSON.stringify(token)+');</script></body></html>';
     }
     if(!timer)timer=setTimeout(flushDraft,120);
   }
   function renderComplete(){
+    if(sourceMode||destroyed)return;
     if(renderedSource===source)return;renderedSource=source;clearTimeout(timer);timer=null;draftReady=false;
     token=crypto.randomUUID();const activeToken=token;
     const bridge=`<script>(()=>{const send=()=>{if(document.body)parent.postMessage({type:'xgent-visual-size',token:${JSON.stringify(token)},height:Math.ceil(document.body.getBoundingClientRect().height)},'*');};addEventListener('load',send);addEventListener('resize',send);addEventListener('DOMContentLoaded',()=>{new ResizeObserver(send).observe(document.body);send();});})();</script>`;
@@ -108,10 +133,10 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     const isComplete=page.streaming!==true;
     if(complete&&!isComplete)return;
     const unchanged=source===page.source&&complete===isComplete;
-    source=page.source;complete=isComplete;if(code.textContent!==source)code.textContent=source;
-    status.textContent=complete?'准备预览…':'生成中…';status.hidden=complete&&renderedSource===source;
+    source=page.source;complete=isComplete;if(!unchanged)scheduleSource();
+    status.textContent=complete?'准备预览…':'生成中…';status.hidden=complete&&(sourceMode||renderedSource===source);
     if(!unchanged)card.setAttribute('aria-busy','true');frame.title=current.title||'渲染页面';updateDownload();
-    if(!unchanged){if(complete)renderComplete();else renderDraft();}
+    if(!unchanged){if(sourceMode){card.setAttribute('aria-busy',String(!complete));}else if(complete)renderComplete();else renderDraft();}
   }
   async function load(){
     controller?.abort();controller=new AbortController();const activeRevision=++revision;retry.hidden=true;
@@ -131,11 +156,11 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
       if(requested(owner,page.index||0))setExpanded(true);
     },
     expand:()=>setExpanded(true),
-    destroy:()=>{destroyed=true;clearTimeout(timer);controller?.abort();if(blobUrl)URL.revokeObjectURL(blobUrl);instances.delete(instance);card.remove();},
+    destroy:()=>{destroyed=true;clearTimeout(timer);cancelAnimationFrame(sourcePaint);cancelAnimationFrame(sourceScroll);document.removeEventListener('selectionchange',scheduleSource);controller?.abort();if(blobUrl)URL.revokeObjectURL(blobUrl);instances.delete(instance);card.remove();},
     receive(data){
       if(data.token!==token)return;
       if(data.type==='xgent-visual-draft-ready'){draftReady=true;flushDraft();}
-      else if(data.type==='xgent-visual-painted'&&data.visible)showPreview();
+      else if(data.type==='xgent-visual-painted'){draftInFlight=false;if(data.visible)showPreview();if(sentDraft!==source&&!sourceMode)renderDraft();}
       else if(data.type==='xgent-visual-size'&&Number.isFinite(data.height)&&!sourceMode){pageHeight=Math.max(120,Math.min(1600,data.height));viewport.style.height=pageHeight+'px';}
     },
     close:()=>{if(expanded)setExpanded(false);}
@@ -143,7 +168,8 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   entry.visualPage=instance;instances.add(instance);
   expand.onclick=()=>setExpanded(!expanded);retry.onclick=()=>{renderedSource=null;if(current.url)load();else if(complete)renderComplete();else{draftStarted=false;renderDraft();}};
   sourceToggle.onclick=()=>setSourceMode(!sourceMode);
-  copy.onclick=async()=>{try{await navigator.clipboard.writeText(code.textContent);copy.textContent='已复制';setTimeout(()=>copy.textContent='复制',1600);}catch{copy.textContent='复制失败';}};
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(source||'');copy.textContent='已复制';setTimeout(()=>copy.textContent='复制',1600);}catch{copy.textContent='复制失败';}};
+  document.addEventListener('selectionchange',scheduleSource);
   instance.update(descriptor,recordId);
 }
 

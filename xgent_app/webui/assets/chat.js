@@ -1376,7 +1376,11 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
         segments:[{kind:'html',text:escapeHtml(plain).replace(/\n/g,'<br>')}]}};
     }
     var newRole = classifyMessageText(role, frame.text, frame.msg_type??entry?.messageType, frame.message_policy??entry?.messagePolicy);
-    var displayKey=JSON.stringify(frame.web_display||null);
+    // The page component owns source/status updates. New tokens in SVG/HTML
+    // must not rebuild the surrounding reply or detach the reader's selection.
+    var displayKey=JSON.stringify(Array.isArray(frame.web_display?.segments)?{...frame.web_display,segments:frame.web_display.segments.map(part=>
+      part&&Number.isSafeInteger(part.visual_index)&&part.visual_index>=0&&part.visual_index<4?
+        {kind:'visual',index:part.visual_index}:part)}:frame.web_display||null);
     if(entry)entry.webDisplay=frame.web_display;
     if (entry && entry.rawText !== undefined && entry.role === newRole) {
       if(entry.displayKey!==displayKey || (!frame.web_display &&
