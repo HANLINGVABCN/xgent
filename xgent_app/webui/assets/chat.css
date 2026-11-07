@@ -86,6 +86,8 @@ body:not([data-page="chat"]) #wb-conversation-title,body:not([data-page="chat"])
 .code-actions { display:flex; gap:3px; margin-left:auto; }
 .code-btn { display:inline-flex; align-items:center; justify-content:center; width:27px; height:25px; min-height:0; padding:4px; border:0; border-radius:5px; background:transparent; color:#a2b6a6; font:var(--font-caption)/1.4 var(--mono); }
 .code-btn .icon { width:14px; height:14px; }
+.code-block-wrap>.code-header .code-btn { width:auto; flex:0 0 auto; gap:4px; padding:4px 7px; white-space:nowrap; }
+.code-block-wrap>.code-header .code-btn span { flex:0 0 auto; }
 .code-btn:hover,.code-btn.active { color:#e5efe6; background:#ffffff12; }
 .code-btn.copied { color:#9fd6b4; }
 .code-block-wrap pre { margin:0; padding:13px 15px; border:0; border-radius:0; background:transparent; }

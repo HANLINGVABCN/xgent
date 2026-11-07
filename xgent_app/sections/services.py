@@ -209,6 +209,8 @@ class GlobalRecorder:
             tool_scope.row_ids.append(rowid)
         turn = current_turn()
         if turn is not None and rowid is not None:
+            if msg_type==MessageType.AGENT_RESULT and turn.active_operation and stamped_metadata.get('presentation',{}).get('operation'):
+                turn.active_operation['result_record_id']=rowid
             if not hasattr(turn, 'record_ids'):
                 turn.record_ids = {}
             if not hasattr(turn, 'record_contents'):

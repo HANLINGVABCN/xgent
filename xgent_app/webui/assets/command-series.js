@@ -15,7 +15,7 @@ export function installCommandSeries(log, {conversation, currentRun, captureAnch
   const owner=row=>(row.dataset.presentationConversationId||conversation()||'global_memory')+':'+
     (row.dataset.replyGroupId||row.dataset.runId||row.dataset.turnId||'legacy');
   const runKey=row=>row.dataset.runId?(row.dataset.presentationConversationId||conversation()||'global_memory')+':'+row.dataset.runId:null;
-  const rows=()=>Array.from(log.children).filter(node=>node.classList.contains('msg-row'));
+  const rows=()=>Array.from(log.children).filter(node=>node.classList.contains('msg-row')&&!node.classList.contains('command-result-attached'));
   const commands=row=>{
     const value=entry(row),segments=value?.webDisplay?.segments;
     if(value?.messageType!=='ai_reply'||!Array.isArray(segments))return 0;

@@ -133,7 +133,7 @@ async def _sync_protocol_states(context, *, terminal=False):
             from xgent_app.web_display import operation_state
             operation['state'] = operation_state(operation)
     for reply in turn.replies:
-        states = [{key: operation.get(key) for key in ('kind', 'sequence', 'command', 'path', 'state', 'native_call_id')}
+        states = [{key: operation.get(key) for key in ('kind', 'sequence', 'command', 'path', 'state', 'native_call_id','command_key','result_record_id','return_code','elapsed_seconds')}
                   for operation in turn.operations if operation.get('reply_record_id') == reply.get('record_id')]
         if not states or reply.get('operations') == states:
             continue

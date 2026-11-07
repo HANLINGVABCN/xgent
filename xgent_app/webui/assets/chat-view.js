@@ -115,7 +115,7 @@ function sanitizeHtml(htmlStr) {
         if (c.tagName === "A" && a.name === "href") {
           if (!/^(https?:|mailto:)/i.test(a.value)) c.removeAttribute(a.name);
         } else if (c.tagName === "A" && (a.name === "target" || a.name === "rel")) {
-        } else if (c.tagName === "BLOCKQUOTE" && (a.name === "expandable" || a.name === "data-raw" || a.name === "data-output-path" || ['data-protocol','data-state','data-preview','data-operation-details'].includes(a.name) || (a.name === "data-web-fold" && a.value === "1") || (a.name === "data-compact" && a.value === "1"))) {
+        } else if (c.tagName === "BLOCKQUOTE" && (a.name === "expandable" || a.name === "data-raw" || a.name === "data-output-path" || ['data-protocol','data-state','data-preview','data-operation-details','data-command-key'].includes(a.name) || (a.name === "data-web-fold" && a.value === "1") || (a.name === "data-compact" && a.value === "1"))) {
           // 保留：服务端 render_folded_html 用 <blockquote expandable> 标记
           // 「可展开折叠的协议代码块」（与电报原生 expandable 同源），网页据此做
           // 折叠交互（CSS blockquote[expandable] + bindContentClicks 里的点击切换）。

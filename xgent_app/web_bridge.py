@@ -281,6 +281,8 @@ class WebOutbox:
         if self._closed.is_set():
             return
         saved = copy.deepcopy(stamp_frame(frame))
+        from .command_output import project_web_frame
+        saved=project_web_frame(saved)
         if defer_completion(saved, lambda: self.put(saved)):
             return
         size = len(json.dumps(saved, ensure_ascii=False).encode('utf-8'))

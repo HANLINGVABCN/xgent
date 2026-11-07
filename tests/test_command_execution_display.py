@@ -94,9 +94,9 @@ async def main():
                                 async def process_started():
                                     while not started.is_file():await asyncio.sleep(.01)
                                 await asyncio.wait_for(process_started(),5)
-                                command_output=page.locator('.bubble.cmd')
-                                await command_output.get_by_text('执行中',exact=True).wait_for()
-                                interrupt=command_output.get_by_role('button',name='❌ 停止回答',exact=True)
+                                command_output=page.locator('.bubble.ai .command-with-output')
+                                await page.locator('.bubble.ai .command-with-output[data-state="running"]').wait_for()
+                                interrupt=page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True)
                                 assert await interrupt.is_visible()
                                 assert 'cache 0' in await page.locator('.bubble.ai').inner_text()
                                 assert not task.done() and not done.exists()
@@ -105,23 +105,24 @@ async def main():
                                 active=next(frame for frame in snapshot['frames'] if frame.get('msg_type')=='agent_result')
                                 assert active['reply_markup'] and 'data-state="running"' in active['web_display']['segments'][0]['text']
                                 await page.reload()
-                                await page.locator('.bubble.cmd').get_by_text('执行中',exact=True).wait_for()
-                                assert await page.locator('.bubble.cmd').count()==1
-                                assert await page.locator('.bubble.cmd').get_by_role('button',name='❌ 停止回答',exact=True).is_visible()
-                                await page.locator('.bubble.cmd').evaluate('(node)=>window.commandRow=node.closest(".msg-row")')
+                                await page.locator('.bubble.ai .command-with-output[data-state="running"]').wait_for()
+                                assert await command_output.count()==1
+                                assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).is_visible()
+                                await command_output.evaluate('(node)=>window.commandCard=node')
                                 await page.screenshot(path=str(Path(os.environ['COMMAND_TEST_SCREENSHOTS'])/f'command-running-{width}-{interrupt_command}.png'))
                                 if interrupt_command:
-                                    await page.locator('.bubble.cmd').get_by_role('button',name='❌ 停止回答',exact=True).click()
+                                    await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).click()
                                 else:
                                     release.write_text('finish')
                                 await asyncio.wait_for(task,8)
                                 assert spawned[0].returncode is not None and done.exists()==(not interrupt_command)
                                 state='stopped' if interrupt_command else 'success'
-                                await page.locator('.bubble.cmd .execution-dot.state-'+state).wait_for()
-                                assert await page.locator('.bubble.cmd .execution-label').inner_text()==('输出 · 已停止' if interrupt_command else '输出')
-                                assert await page.locator('.bubble.cmd').count()==1
-                                assert await page.evaluate('window.commandRow.isConnected && window.commandRow===document.querySelector(".msg-row.cmd")')
-                                assert await page.locator('.bubble.cmd').get_by_role('button',name='❌ 停止回答',exact=True).count()==0
+                                await page.locator('.bubble.ai .command-with-output[data-state="'+state+'"]').wait_for()
+                                assert ('已停止' if interrupt_command else '已运行') in await command_output.locator('.execution-label').inner_text()
+                                assert await command_output.count()==1
+                                assert await page.evaluate('window.commandCard.isConnected && window.commandCard===document.querySelector(".bubble.ai .command-with-output")')
+                                assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).count()==0
+                                assert await page.locator('.output-page-text').count()==0
                                 rows=await h.db.get_display_history(0)
                                 output=next(row for row in rows if row['msg_type']=='agent_result')
                                 metadata=json.loads(output['metadata']) if isinstance(output['metadata'],str) else output['metadata']
@@ -136,9 +137,9 @@ async def main():
                                     assert (await terminal.locator('.body').inner_text()).count('已有结果保留')==1
                                     terminal_text=await terminal.inner_text()
                                 await page.reload()
-                                await page.locator('.bubble.cmd .execution-dot.state-'+state).wait_for()
-                                assert await page.locator('.bubble.cmd').count()==1
-                                assert await page.locator('.bubble.cmd').get_by_role('button',name='❌ 停止回答',exact=True).count()==0
+                                await page.locator('.bubble.ai .command-with-output[data-state="'+state+'"]').wait_for()
+                                assert await command_output.count()==1
+                                assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).count()==0
                                 if interrupt_command:
                                     terminal=page.locator('.msg-row.sys').filter(has_text='已有结果保留')
                                     assert await terminal.count()==1

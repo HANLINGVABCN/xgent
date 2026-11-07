@@ -334,6 +334,7 @@ class ProtocolParser:
             )
             # 重复 nonce 不执行，但标记出来以便从展示文本里剥离。
             block["executable"] = nonce not in seen_nonces
+            block['nonce']=nonce
             block["smart_matched"] = smart_matched
             block["similarity"] = similarity
             seen_nonces.add(nonce)

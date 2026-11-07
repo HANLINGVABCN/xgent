@@ -261,6 +261,9 @@ class PresentationTurn:
                                  'reply_record_id': self.replies[-1].get('record_id') if self.replies else None}
         if block.get('native_call_id'):
             self.active_operation['native_call_id'] = block['native_call_id']
+            self.active_operation['command_key']='call:'+block['native_call_id']
+        elif block.get('nonce'):
+            self.active_operation['command_key']='fence:'+block['nonce']
         from .conversations import current_scope
         from .stop_targets import begin_phase
         scope = current_scope(required=False)

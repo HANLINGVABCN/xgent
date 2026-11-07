@@ -5,6 +5,7 @@ import {decorateBrandAuthor} from './branding.js';
 import {initializeTheme} from './theme.js';
 import {preventAutofill} from './input-policy.js';
 import {syncVisualPage,syncReplyPages} from './visual-pages.js';
+import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './command-output.js';
 (function () {
   "use strict";
 
@@ -16,6 +17,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
   var IS_TOUCH = !!(window.matchMedia && window.matchMedia("(hover: none) and (pointer: coarse)").matches);
 
   var log = document.getElementById("log");
+  const commandResults=installCommandResults(log);
   var input = document.getElementById("input");
   var initialConversationParams = new URLSearchParams(location.hash.split('?')[1] || '');
   var selectedConversationId = initialConversationParams.has('message') ? null : initialConversationParams.get('conversation');
@@ -235,7 +237,8 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
       if(index>=0){
         const old=oldBlocks.splice(index,1)[0];
         const same=['data-state','data-operation-details','data-protocol'].every(key=>old.getAttribute(key)===block.getAttribute(key));
-        if(same)block.replaceWith(old);else block.classList.toggle('expanded',old.classList.contains('expanded'));
+        if(old.dataset.commandKey&&old.dataset.commandKey===block.dataset.commandKey){old.dataset.state=block.dataset.state;block.replaceWith(old);old._commandUI?.update(null);}
+        else if(same)block.replaceWith(old);else block.classList.toggle('expanded',old.classList.contains('expanded'));
       }
     });
     oldBlocks.forEach(block=>{clearTimeout(block._ft);block._outputRequest?.abort();});
@@ -306,7 +309,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
     const relationships=new Map(Array.from(root.children,row=>[row,new Set()]));
     let seenReply=false,turnId=null,runId=null,groupId=null,conversationId=null,previous=null;
     for(const row of root.children){
-      if(!row.classList.contains('msg-row')||row.classList.contains('presentation-hidden'))continue;
+      if(!row.classList.contains('msg-row')||row.classList.contains('presentation-hidden')||row.classList.contains('command-result-attached'))continue;
       const cid=row.dataset.presentationConversationId||null,id=row.dataset.turnId||null,run=row.dataset.runId||null;
       const group=row.dataset.replyGroupId||null;
       if(cid&&conversationId&&cid!==conversationId){seenReply=false;turnId=null;runId=null;groupId=null;previous=null;}
@@ -387,6 +390,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
   }
 
   function paintProtocolBody(bq) {
+    if(bq._commandUI){bq._commandUI.restore();return;}
     var pre = bq.querySelector("pre");
     if (!pre || bq._pbText === undefined) return;
     var expanded = bq.classList.contains("expanded") || bq.classList.contains("pb-short");
@@ -437,6 +441,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
   }
 
   function enhanceExecutionBlock(bq,pre,text,title,lang){
+    if(bq.dataset.commandKey){enhanceCommandBlock(bq,text,{api,toast,copyText,saveFold:saveFoldState});return;}
     bq.dataset.webFold='1';bq.classList.add('pb','execution-block');bq.classList.remove('pb-short');
     const raw=bq.getAttribute('data-raw')||'';
     const protocol=bq.getAttribute('data-protocol')||/^```([^\s:]+)/.exec(raw)?.[1]||null;
@@ -534,6 +539,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
   function bindContentClicks(root) {
     root.addEventListener("click", function (e) {
       if (!e.target.closest) return;
+      if(e.target.closest('.command-with-output'))return;
 
       var btn = e.target.closest(".code-btn");
       if (btn) {
@@ -1265,6 +1271,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
       entry.btns = renderButtons(markup, messageId, entry.ui);
       if (entry.btns && entry.bubble) entry.bubble.appendChild(entry.btns);
     }
+    commandResults.reconcile();
   }
 
   var conversationBusy = false;
@@ -1281,6 +1288,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
   function hideTyping() { typing.classList.add("hidden"); }
 
   function removeEntry(entry) {
+    commandResults.remove(entry);
     if(entry?.visualPage){entry.visualPage.destroy();entry.visualPage=null;}
     if(entry?.visualPages){entry.visualPages.forEach(child=>child.visualPage?.destroy());entry.visualPages.clear();}
     if (!entry) return;
@@ -1406,6 +1414,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
     if(frame.visual_pages||frame.web_display?.segments?.some(s=>Number.isSafeInteger(s.visual_index)))
       syncReplyPages(entry,frame.visual_pages||[],frame.record_id??frame.id,frame.web_display);
     if(frame.conversation_actions)setConversationActions(entry,{...frame,id:frame.record_id??frame.id});
+    commandResults.sync(entry,frame);
     if (frame.message_id != null && !frame.ui_message_id) byMessageId[frame.message_id] = entry;
     return entry;
   }
@@ -3858,6 +3867,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
       if(message.media?.length)setInlineMedia(entry,message.media);
       if(message.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,message.visual_page,message.id);}
       if(message.visual_pages)syncReplyPages(entry,message.visual_pages,message.id,message.web_display);
+      updateCommandCards(entry,message);
       if(message.ask_form)syncAskForm(entry,message.ask_form);
       entry.row.dataset.sourceMessage=message.history_key||'history:'+message.id;
       syncTurnAuthors(target);

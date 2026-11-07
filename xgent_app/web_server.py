@@ -263,6 +263,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _send_json(self, data: Any, status: int = 200,
                    extra_headers: Optional[Dict[str, str]] = None) -> None:
+        from .command_output import project_web_payload
+        data=project_web_payload(data)
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -641,6 +643,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         allowed = {"access-security.js", "telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "branding.js", "branding-settings.js", "branding.css", "logo.svg", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         allowed.update({"design-system.css", "themes.css", "theme-presets.js", "theme-settings.js", "ui.js", "input-policy.js", "visual-pages.js", "visual-pages.css", "navigation.js", "settings-archive.js", "settings-updates.js", "workspace-shell.js", "theme.js", "chat-view.js", "workbench-tasks.js", "workbench-files.js", "workbench-models.js"})
         name = path.removeprefix("/assets/")
+        allowed.add('command-output.js')
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
             return

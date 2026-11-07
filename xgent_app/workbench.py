@@ -136,12 +136,18 @@ class Workbench:
             with interaction('web', 'management'):
                 # A tab's explicit target is independent of the shared default.
                 # Scope generation, callback ownership and mutation guards remain.
-                async with conversation_operation(cid, allow_archived=conversation_export or method=='GET' and (version_operation or resource in {'history','search','artifacts/preview','artifacts/cover','visual','visual/source'}), fresh=True, selector='shared'):
+                async with conversation_operation(cid, allow_archived=conversation_export or method=='GET' and (version_operation or resource in {'history','search','artifacts/preview','artifacts/cover','visual','visual/source','command-output'}), fresh=True, selector='shared'):
                     return await self._handle_scoped(method, resource, data)
         except ConversationError as exc:
             raise WorkbenchError(str(exc), exc.status) from exc
 
     async def _handle_scoped(self, method, resource, data):
+        if resource=='command-output' and method=='GET':
+            from .command_output import load_command_output
+            from .output_archive import OutputArchiveError
+            try:
+                return await load_command_output(await self.db(),current_scope().conversation_id,data.get('record_id'),int(data.get('offset',0)),self.ns['ArtifactManager'].ROOT_DIR,view=data.get('view','output'))
+            except (ValueError,OutputArchiveError) as exc:raise WorkbenchError(str(exc),400) from exc
         await self.db()
         if resource in {'visual','visual/source'}:
             from .visual_pages import read_visual,VisualPageError

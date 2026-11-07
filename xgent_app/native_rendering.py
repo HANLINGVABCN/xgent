@@ -46,10 +46,13 @@ def segments(text, calls, operations=()):
         if block['type']=='over':
             continue
         matched = next((op for op in operations if op.get('native_call_id') == call['id']), None)
-        values.append({'kind': 'html', 'text': web_block_html(block['body'],
+        from .command_output import command_descriptor
+        info=command_descriptor(matched) if matched else None
+        values.append({'kind': 'html', **({'command_info':info} if info else {}),'text': web_block_html(block['body'],
             protocol='file-x' if block['type'] == 'file_base64' else block['type'] + '-x',
             state=matched.get('state', 'pending') if matched else 'pending', path=block.get('path'),
-            raw=json.dumps({'name': call['name'], 'arguments': call['arguments']}, ensure_ascii=False, indent=2))})
+            raw=json.dumps({'name': call['name'], 'arguments': call['arguments']}, ensure_ascii=False, indent=2),
+            command_key='call:'+call['id'] if block['type'] in {'run','shell','stdin','shellkill'} else None)})
     return values
 
 

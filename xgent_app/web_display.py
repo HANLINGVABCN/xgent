@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import html
+import re
 
 from .protocols import ProtocolParser
 from .presentation import LABELS, current_turn, current_message_presentation, normalize_mode, footer_html, usage_details
@@ -37,8 +38,9 @@ def operation_state(operation):
     return operation.get('state') or 'unknown'
 
 
-def web_block_html(body, *, protocol=None, state='unknown', raw=None, path=None, output_path=None, details=None):
+def web_block_html(body, *, protocol=None, state='unknown', raw=None, path=None, output_path=None, details=None,command_key=None):
     attrs = {'data-web-fold': '1', 'data-state': state}
+    if command_key:attrs['data-command-key']=command_key
     if protocol:
         attrs['data-protocol'] = protocol
     if path:
@@ -84,9 +86,13 @@ def _web_ai_segments(text, *, hide_unclosed=False, presentation=None):
         if matched:
             operations.remove(matched)
         state = operation_state(matched) if matched else 'generating' if part.get('generating') else (presentation or {}).get('default_protocol_state', 'pending')
-        segments.append({'kind': 'html', 'text': web_block_html(
+        from .command_output import COMMAND_KINDS,command_key,command_descriptor
+        nonce=re.search(r'<<BEGIN_([A-Za-z0-9_]+)',part.get('raw') or '')
+        key=(command_key(matched) if matched else 'fence:'+nonce[1] if nonce else '') if part['type'] in COMMAND_KINDS else ''
+        info=command_descriptor(matched) if matched and part['type'] in COMMAND_KINDS else None
+        segments.append({'kind': 'html', **({'command_info':info} if info else {}),'text': web_block_html(
             part.get('body') or '', protocol=PROTOCOL_NAMES.get(part['type'], part['type'] + '-x'),
-            state=state, raw=part.get('raw'), path=part.get('path'))})
+            state=state, raw=part.get('raw'), path=part.get('path'),command_key=key)})
     return segments
 
 
@@ -101,7 +107,10 @@ def build_operation_display(operation, mode, presentation=None):
     footer = web_footer_html(presentation or {})
     if footer:
         segments.append({'kind': 'html', 'text': footer, 'footer': True})
-    return {'version': 1, 'segments': segments, 'presentation_mode': mode, 'operation_details': details}
+    from .command_output import command_descriptor
+    descriptor=command_descriptor(operation)
+    return {'version': 1, 'segments': segments, 'presentation_mode': mode, 'operation_details': details,
+            **({'command_result':descriptor} if descriptor else {})}
 
 
 def build_web_display(text: str, *, fold: bool = True, hide_unclosed: bool = False,
