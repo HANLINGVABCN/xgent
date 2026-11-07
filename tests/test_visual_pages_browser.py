@@ -16,10 +16,10 @@ SOURCE='''<html><head><style>body{margin:0;padding:24px;background:linear-gradie
 @pytest.mark.parametrize('deep_link',[False,True])
 def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_server,width,deep_link,tmp_path):
     server=full_output_server[0]
-    visual={'version':2,'title':'完整页面演示','width':800,'height':450,'format':'html','source_path':'test.html','sha256':'a'*64}
-    record={'id':55,'msg_type':'agent_result','role':'system','content':'[render结果] 已创建','timestamp':1,'session_id':'global_memory',
-            'metadata':stamp_record_metadata('agent_result','system',{'visual_render':visual})}
-    message=build_history_message(record,str(tmp_path),str(tmp_path));assert message['visual_page']['version']==2
+    visual={'version':2,'index':0,'title':'完整页面演示','width':800,'height':450,'format':'html','source_path':'test.html','sha256':'a'*64}
+    record={'id':55,'msg_type':'ai_reply','role':'assistant','content':'正常回复前文。\n```xgent-html 完整页面演示\n'+SOURCE+'\n```\n正常回复后文。','timestamp':1,'session_id':'global_memory',
+            'metadata':stamp_record_metadata('ai_reply','assistant',{'rendered_pages':[visual]})}
+    message=build_history_message(record,str(tmp_path),str(tmp_path));assert message['visual_pages'][0]['version']==2
     async def history(limit):return [message]
     server.config.read_history=history
     playwright=pytest.importorskip('playwright.sync_api')
@@ -28,14 +28,17 @@ def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_se
         browser,context,base=browser_session(server,p)
         context.route('**/api/workbench/visual?*',lambda route:route.fulfill(json={'version':2,'source':SOURCE,'format':'html','title':'完整页面演示','width':800,'height':450}))
         page=context.new_page();page.set_viewport_size({'width':width,'height':900})
-        page.goto(base+'/#/chat?conversation=global_memory'+('&visual=55' if deep_link else ''))
+        page.goto(base+'/#/chat?conversation=global_memory'+('&visual=55&visual_full=1' if deep_link else '&visual=55'))
         iframe=page.locator('.visual-page-frame');iframe.wait_for()
+        if not deep_link:
+            assert page.locator('.visual-page-expanded').count()==0
+            assert page.locator('[data-record-id="55"] .bubble-author-icon').is_visible()
+            assert page.locator('.wb-brand').is_visible() or width==390
         frame=page.frame_locator('.visual-page-frame');frame.get_by_role('button',name='点击切换').wait_for()
         assert page.locator('#log img').count()==0
+        assert '正常回复前文' in page.locator('#log').inner_text() and '正常回复后文' in page.locator('#log').inner_text()
         assert iframe.get_attribute('sandbox')=='allow-scripts'
-        try:frame.get_by_role('button',name='点击切换').click(timeout=5000)
-        except Exception:
-            print(page.locator('#log').inner_html()[:2500]);print(iframe.bounding_box());raise
+        frame.get_by_role('button',name='点击切换').click(timeout=5000)
         assert frame.locator('#result').inner_text()=='已点击'
         assert iframe.content_frame.locator('body').evaluate('()=>window.hostBlocked')
         assert iframe.content_frame.locator('body').evaluate('()=>window.networkBlocked')

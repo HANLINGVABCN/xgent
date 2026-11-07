@@ -163,14 +163,14 @@ async def diagnostic_round_trip(bot, root, fmt, style):
         requests = [data for event, data in diagnostics if event == 'tool_request']
         replies = [data for event, data in diagnostics if event == 'tool_response']
         results = [data for event, data in diagnostics if event == 'tool_execution_result']
-        assert len(requests) == 3 and all(data['defined_tools'] == 17 for data in requests)
+        assert len(requests) == 3 and all(data['defined_tools'] == 16 for data in requests)
         assert [data['received_calls'] for data in replies] == [1, 0, 0]
         assert any(data.get('success') is True and data.get('return_code') == 0 for data in results), diagnostics
         assert h.executed == ['SYNTHETIC_ARGUMENT']
         assert 'SYNTHETIC_ARGUMENT' not in json.dumps(diagnostics) and 'PROSE_ONLY' not in json.dumps(diagnostics)
         rows = await h.db.get_display_history(100)
         assert not any(row['msg_type'] == 'runtime_error' for row in rows), rows
-        return {'defined_tools': 17, 'actual_calls': [1, 0, 0], 'no_prose_dispatch': True}
+        return {'defined_tools': 16, 'actual_calls': [1, 0, 0], 'no_prose_dispatch': True}
 
 
 async def form_sequence(bot, root, fmt, cancel=False):

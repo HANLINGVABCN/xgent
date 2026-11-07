@@ -207,7 +207,9 @@ function renderBubbleBody(role, text, parseMode, webDisplay) {
   if(webDisplay?.version===1 && Array.isArray(webDisplay.segments) &&
      webDisplay.segments.every(s=>s && ['markdown','html'].includes(s.kind) && typeof s.text==='string')){
     // Every segment uses the same allowlist. Never trust even stored/tool HTML.
-    let rendered=webDisplay.segments.map(s=>s.footer?'<div class="token-hud">'+renderText(s.text,'HTML')+'</div>':renderText(s.text,s.kind==='html'?'HTML':null)).join('\n');
+    let rendered=webDisplay.segments.map(s=>Number.isSafeInteger(s.visual_index)&&s.visual_index>=0&&s.visual_index<4?
+      '<div class="visual-output-slot" data-visual-index="'+s.visual_index+'">'+escapeHtml(s.text.replace(/<[^>]+>/g,''))+'</div>':
+      s.footer?'<div class="token-hud">'+renderText(s.text,'HTML')+'</div>':renderText(s.text,s.kind==='html'?'HTML':null)).join('\n');
     return rendered;
   }
   const rendered=renderText(text,parseMode);

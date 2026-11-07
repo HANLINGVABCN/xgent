@@ -19,6 +19,8 @@ def branding_page(browser_context, workspace_url):
     assert browser_context.request.post(base + '/api/config', data={'key': 'web_branding', 'value': DEFAULT_BRANDING}).ok
     assert browser_context.request.post(base + '/api/workbench/conversations/switch', data={'id': 'global_memory'}).ok
     page = browser_context.new_page()
+    ready(page, base)
+    page.locator('#log .bubble.ai').first.wait_for()
     ready(page, base, 'settings')
     page.locator('.branding-form').wait_for()
     yield page

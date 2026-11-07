@@ -338,6 +338,17 @@ def split_blocks(blocks, *, budget=TEXT_BUDGET, block_budget=BLOCK_BUDGET):
 
 
 def render_rich(text, *, generating=False, details=None, native_prose=False):
+    from .visual_pages import scan_pages,telegram_source
+    parts=scan_pages(text,generating=generating)
+    if any(part['kind']!='text' for part in parts):
+        blocks=[]
+        for part in parts:
+            if part['kind']=='page':blocks.append(html_block(telegram_source(part)[0]))
+            elif part['kind']=='pending':blocks.append(Block('p',text=part['title']+' · 页面生成中…'))
+            else:
+                blocks.extend([piece for block in markdown_blocks(part['text']) for piece in _tables(block)] if native_prose else rich_blocks(part['text'],generating=generating))
+        if details:blocks.append(html_block(details))
+        return split_blocks(blocks)
     blocks = [piece for block in markdown_blocks(str(text)) for piece in _tables(block)] if native_prose else rich_blocks(text, generating=generating)
     if details:
         blocks.append(html_block(details))
@@ -348,6 +359,15 @@ def legacy_chunks(text, *, generating=False):
     """The existing conservative fallback remains a transport capability choice."""
     from .web_history import _section_ns
     ns = _section_ns()
+    from .visual_pages import scan_pages,telegram_source
+    parts=scan_pages(text,generating=generating)
+    if any(part['kind']!='text' for part in parts):
+        chunks=[]
+        for part in parts:
+            if part['kind']=='page':chunks.append(telegram_source(part)[0])
+            elif part['kind']=='pending':chunks.append(escape(part['title'])+' · 页面生成中…')
+            else:chunks.extend(legacy_chunks(part['text'],generating=generating))
+        return chunks or [' ']
     if ns:
         value = ns['_folded_display_html'](str(text), hide_unclosed=generating)
         return ns['split_html_for_telegram'](value or ' ', 3900)

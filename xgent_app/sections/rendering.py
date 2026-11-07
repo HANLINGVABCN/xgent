@@ -89,6 +89,11 @@ class TelegramRichAPI:
 async def rich_finalize_text_response(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                                        msg: Any, response: str, limit: int = RICH_MESSAGE_CHAR_LIMIT):
     """使用 Rich Message 发送最终回复。失败时 fallback 到旧 HTML 编辑模式。"""
+    from xgent_app.visual_pages import scan_pages
+    if any(part['kind']=='page' for part in scan_pages(response)):
+        from xgent_app.telegram_rich import legacy_chunks
+        await finalize_html_response(context,chat_id,msg,'\n'.join(legacy_chunks(response)),3900)
+        return
     # 隐藏协议代码块：只改「显示」，另起 display 变量，绝不重绑 response——
     # 落库 / 执行 / 镜像用的是调用方各自的返回值局部变量，与这里无关。
     if _should_hide_protocol_blocks():
@@ -546,6 +551,10 @@ def _try_parse_text_table_in_codeblock(code: str) -> Optional[str]:
 
 
 def markdown_to_telegram_html(text: str) -> str:
+    from xgent_app.visual_pages import scan_pages,telegram_source
+    parts=scan_pages(text)
+    if any(part['kind']=='page' for part in parts):
+        return '\n'.join(telegram_source(part)[0] if part['kind']=='page' else markdown_to_telegram_html(part['text']) for part in parts)
     """将 Markdown 转换为 Telegram 兼容的 HTML。
 
     支持：代码块、行内代码、粗体、斜体、删除线、链接、标题、引用、列表。
@@ -801,6 +810,11 @@ def _folded_display_html(response: str, hide_unclosed: bool = False, monospace: 
     只改显示：绝不触碰落库 / 执行 / 镜像的原始文本。
     """
     session = native_tools.current_session()
+    from xgent_app.visual_pages import scan_pages,telegram_source
+    parts=scan_pages(response,generating=hide_unclosed)
+    if any(part['kind']!='text' for part in parts):
+        return '\n'.join(telegram_source(part)[0] if part['kind']=='page' else html.escape(part['title'])+' · 页面生成中…' if part['kind']=='pending'
+                         else _folded_display_html(part['text'],hide_unclosed=hide_unclosed,monospace=monospace,raw_copy=raw_copy) for part in parts)
     if session is not None and session.mode == 'toolcall':
         return markdown_to_telegram_html(response)
     folded = ai_html(response, _presentation_mode(), markdown_to_telegram_html,

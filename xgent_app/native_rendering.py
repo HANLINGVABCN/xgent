@@ -37,7 +37,8 @@ def rich_calls(text, calls, *, details=''):
 
 
 def segments(text, calls, operations=()):
-    values = [{'kind': 'markdown', 'text': str(text)}] if text else []
+    from .visual_pages import display_parts
+    values = display_parts(text) if text else []
     for call in calls:
         block = tool_calls.display_operation(call)
         if block['type']=='render':

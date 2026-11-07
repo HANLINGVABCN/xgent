@@ -147,7 +147,7 @@ class Workbench:
             from .visual_pages import read_visual,VisualPageError
             if method!='GET':raise WorkbenchError('页面读取仅支持 GET。',405)
             try:return await read_visual(await self.db(),str(data.get('conversation_id') or ''),data.get('record_id'),
-                                         self.ns['ArtifactManager'].ROOT_DIR,download=resource.endswith('/source'))
+                                         self.ns['ArtifactManager'].ROOT_DIR,download=resource.endswith('/source'),index=data.get('index',0))
             except (VisualPageError,OSError) as exc:raise WorkbenchError(str(exc),404) from exc
         if resource == 'conversations/export':
             from .conversation_export import export_conversation

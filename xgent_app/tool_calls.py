@@ -43,7 +43,6 @@ TOOL_NAMES = {
     'read': 'read_file', 'grep': 'search_files', 'intel': 'inspect_code', 'search': 'search_web', 'fetch': 'fetch_urls',
     'sendfile': 'send_file', 'media': 'generate_media', 'over': 'finish_task',
     'file': 'write_file', 'file_base64': 'write_binary', 'edit': 'edit_file', 'ask': 'ask_user',
-    'render': 'render_visual',
 }
 SCALAR_FIELDS = {'run': 'command', 'shell': 'command', 'read': 'path', 'grep': 'query', 'intel': 'request',
                  'search': 'query', 'sendfile': 'path', 'over': 'message', 'stdin': 'input'}
@@ -78,10 +77,6 @@ _tool('file', '新建或明确授权的整体重写；局部修改使用 edit_fi
       {'path': _text('目标文件路径'), 'content': _text('文件完整原文，保留所有空格与换行。')}, ['path', 'content'])
 _tool('file_base64', '将 Base64 数据写入文件；用于二进制，不能代替媒体生成接口。只写盘不发送，交付使用 send_file。',
       {'path': _text('目标文件路径'), 'base64_data': _text('完整 Base64 编码')}, ['path', 'base64_data'])
-_tool('render', '创建并直接展示 SVG 或 HTML 渲染页面，用于图标、示意图、卡片、可交互演示。网页支持自包含 CSS、JavaScript、动画和页面内交互；隔离运行，无法访问宿主、网络或本地文件，勿用 CDN。Telegram 自动显示折叠源码及可用时的 Web App 入口，无需额外调用发送工具。',
-      {'format':{'type':'string','enum':['svg','html']},'source':_text('完整自包含 SVG 或 HTML/CSS 源码，最多 256 KiB'),
-       'width':{'type':'integer','minimum':64,'maximum':1600},'height':{'type':'integer','minimum':64,'maximum':1600},
-       'title':_text('单行效果图名称')},['format','source','width','height'])
 _tool('edit', '唯一字符串原地替换，自动备份；匹配失败需重读，不用整体覆盖。',
       {'path': _text('已有文件路径'), 'old': _text('唯一旧串，保留原缩进与换行。'),
        'new': _text('替换后的原文，保留所有空格与换行。')}, ['path', 'old', 'new'])
@@ -137,10 +132,6 @@ def validate_arguments(name, arguments):
                 validate_media_path(path)
             except MediaInputError as exc:
                 raise AttachmentContextError('媒体参考文件必须是合法的服务器绝对路径；未执行。') from exc
-    if name=='render_visual':
-        from .visual_pages import validate_visual,VisualPageError
-        try:validate_visual(arguments)
-        except VisualPageError as exc:raise AttachmentContextError(str(exc)) from exc
 
 
 def operation(call):
@@ -157,8 +148,6 @@ def operation(call):
         block['body'] = '\n'.join(args['urls'])
     elif kind == 'media':
         block['body'] = ''.join('file: ' + path + '\n' for path in args.get('files', [])) + 'prompt: ' + args['prompt']
-    elif kind == 'render':
-        block['body']=json.dumps(args,ensure_ascii=False)
     elif kind == 'edit':
         nonce = uuid.uuid4().hex[:12]
         while f'<<OLD_{nonce}' in args['old'] or f'<<NEW_{nonce}' in args['old']:
@@ -210,6 +199,8 @@ def normalize_history_call(call):
 
 
 def display_operation(call):
+    if call.get('name')=='render_visual':
+        return {'type':'render','path':'','body':'','native_call_id':call.get('id')}
     kind = _LEGACY_NAMES.get(call.get('name'))
     if kind is not None:
         args = call.get('arguments') or {}

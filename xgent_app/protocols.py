@@ -94,7 +94,7 @@ class ProtocolParser:
         r"run-x|shell-x|stdin-x:[^\n]+|shellkill-x:[^\n]+|"
         r"sendfile-x|read-x|edit-x(?::[^\n]+)?|grep-x|"
         r"search-x|fetch-x|"
-        r"media-x|render-x|file-x(?::[^\n]+)?|ask-x|intel-x|over-x"
+        r"media-x|file-x(?::[^\n]+)?|ask-x|intel-x|over-x"
         r")\s*$"
     )
 
@@ -122,7 +122,6 @@ class ProtocolParser:
         "search": ("🔍", "search"),
         "fetch": ("🌐", "fetch"),
         "media": ("🖼️", "media"),
-        "render": ("🎨", "render"),
         "stdin": ("⌨️", "stdin"),
         "shellkill": ("⏹️", "shellkill"),
         "sendfile": ("📎", "sendfile"),
@@ -300,7 +299,8 @@ class ProtocolParser:
         strip_protocol_blocks 不会剥离它，原始协议标记会直接显示给用户。
         """
         blocks: List[Dict[str, Any]] = []
-        lines = ai_response.split("\n")
+        from .visual_pages import mask_page_source
+        lines = mask_page_source(ai_response).split("\n")
         i = 0
         seen_nonces = set()
 
@@ -349,7 +349,8 @@ class ProtocolParser:
         这种情况下解析器会停止扫描，后面所有协议都不会执行。以前这是完全
         静默的：用户看不出发生了什么，模型也不知道自己的操作没被执行。
         """
-        lines = ai_response.split("\n")
+        from .visual_pages import mask_page_source
+        lines = mask_page_source(ai_response).split("\n")
         i = 0
         while i < len(lines):
             opened = cls._match_open(lines, i)

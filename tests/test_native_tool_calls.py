@@ -23,7 +23,7 @@ def test_next_user_turn_keeps_native_history_instead_of_assistant_command_prose(
 def test_diagnostics_count_real_protocol_calls_without_inspecting_prose(tmp_path, fmt):
     result = run_in_app('import asyncio\nfrom tests.native_tool_probe import diagnostic_round_trip\n' +
         f'print(json.dumps(asyncio.run(diagnostic_round_trip(bot,{str(tmp_path)!r},{fmt!r},"nonstream"))))')
-    assert result == {'defined_tools': 17, 'actual_calls': [1, 0, 0], 'no_prose_dispatch': True}
+    assert result == {'defined_tools': 16, 'actual_calls': [1, 0, 0], 'no_prose_dispatch': True}
 
 
 @pytest.mark.parametrize('fmt', ['openai', 'gemini', 'claude'])

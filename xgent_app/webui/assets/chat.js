@@ -4,7 +4,7 @@ import {installCommandSeries} from './command-series.js';
 import {decorateBrandAuthor} from './branding.js';
 import {initializeTheme} from './theme.js';
 import {preventAutofill} from './input-policy.js';
-import {syncVisualPage} from './visual-pages.js';
+import {syncVisualPage,syncReplyPages} from './visual-pages.js';
 (function () {
   "use strict";
 
@@ -249,7 +249,15 @@ import {syncVisualPage} from './visual-pages.js';
     });
     enhanceBubbleContent(next);
     entry.footerMeta?.querySelectorAll('.token-hud').forEach(node=>node.remove());
-    entry.body.replaceChildren(...next.childNodes);
+    const slots=Array.from(entry.body.querySelectorAll('.visual-output-slot'));
+    if(slots.length&&entry.body.moveBefore){
+      next.hidden=true;entry.bubble.append(next);
+      for(const slot of slots){const target=next.querySelector('[data-visual-index="'+slot.dataset.visualIndex+'"]');
+        if(target){target.parentNode.moveBefore(slot,target);target.remove();}}
+      entry.body.replaceChildren();
+      while(next.firstChild)entry.body.moveBefore(next.firstChild,null);
+      next.remove();
+    }else entry.body.replaceChildren(...next.childNodes);
     syncMessageChrome(entry);
   }
 
@@ -1272,6 +1280,7 @@ import {syncVisualPage} from './visual-pages.js';
 
   function removeEntry(entry) {
     if(entry?.visualPage){entry.visualPage.destroy();entry.visualPage=null;}
+    if(entry?.visualPages){entry.visualPages.forEach(child=>child.visualPage?.destroy());entry.visualPages.clear();}
     if (!entry) return;
     Object.keys(byMessageId).forEach(function (id) {
       if (byMessageId[id] === entry) delete byMessageId[id];
@@ -1392,6 +1401,7 @@ import {syncVisualPage} from './visual-pages.js';
     }
     if (frame.media) appendHistoryMedia(entry, frame, role);
     if(frame.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,frame.visual_page,frame.record_id??frame.id);}
+    if(frame.visual_pages)syncReplyPages(entry,frame.visual_pages,frame.record_id??frame.id);
     if(frame.conversation_actions)setConversationActions(entry,{...frame,id:frame.record_id??frame.id});
     if (frame.message_id != null && !frame.ui_message_id) byMessageId[frame.message_id] = entry;
     return entry;
@@ -2294,7 +2304,7 @@ import {syncVisualPage} from './visual-pages.js';
         if(m.ui_message_id&&uiDeleted[m.ui_message_id])return;
         const entry=putHistoryFrame(m,data.live?.epoch);
         if(m.ui_message_id)uiRevisions[m.ui_message_id]=m.revision;
-        retained.add(entry);if(entry.row.parentNode!==log||!entry.visualPage)log.appendChild(entry.row);(entry.mediaEntries||[]).forEach(child=>log.appendChild(child.row));
+        retained.add(entry);if(entry.row.parentNode!==log||(!entry.visualPage&&!entry.visualPages?.size))log.appendChild(entry.row);(entry.mediaEntries||[]).forEach(child=>log.appendChild(child.row));
       });
       const live=data.live;
       if(live&&Number.isSafeInteger(live.cursor)&&live.epoch){
@@ -3837,6 +3847,7 @@ import {syncVisualPage} from './visual-pages.js';
       if(message.conversation_id)entry.row.dataset.presentationConversationId=message.conversation_id;
       if(message.media?.length)setInlineMedia(entry,message.media);
       if(message.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,message.visual_page,message.id);}
+      if(message.visual_pages)syncReplyPages(entry,message.visual_pages,message.id);
       if(message.ask_form)syncAskForm(entry,message.ask_form);
       entry.row.dataset.sourceMessage=message.history_key||'history:'+message.id;
       syncTurnAuthors(target);

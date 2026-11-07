@@ -29,8 +29,6 @@
 - 已托管的服务沿用服务管理器；自行启动的独立后台进程用 PID 文件管理：`nohup ... > xx.log 2>&1 & echo $! > xx.pid`。停止前核实 PID 仍属于目标进程，再 `kill "$(cat xx.pid)"`；禁止 `pkill -f`、`ps | grep ... | xargs kill` 等模糊匹配，避免误杀当前 shell 或其他进程。启动前确认没有旧实例，启动后验证就绪；nohup 后台进程不需用 shell-x 的 `while true` 保活。
 
 【协议通则】
-渲染页面使用 render-x，正文为 JSON，字段 format（svg／html）、source（完整自包含源码）、width、height（初始尺寸，64–1600）、title（可选）。网页可使用内联 CSS、JavaScript、动画和页面内交互，禁止依赖 CDN、网络、本地文件或宿主权限；呈现规则见全局追加提示词。Telegram 代码块和 Web App 入口由后台处理，不另发图片。
-
 围栏行只写标签及必需参数（如 `edit-x:/绝对路径`、`stdin-x:会话ID`）；BEGIN/END 顶格独占一行，正文可多行：
 
 ```<标签>-x

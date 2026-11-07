@@ -35,6 +35,7 @@ class GeneratedMediaReply:
         self.text = ""
         self.artifacts: list[dict] = []
         self.recorded = False
+        self.pages=[]
         self._task: asyncio.Task | None = None
 
     @property
@@ -52,7 +53,7 @@ class GeneratedMediaReply:
         self.text, self.artifacts = await asyncio.to_thread(
             self.extract, self.media_capture.reply(raw), partial=partial,
         )
-        if any(str(item.get("mime_type") or "").startswith("image/")
+        if self.pages or any(str(item.get("mime_type") or "").startswith("image/")
                for item in self.artifacts):
             await self.persist(self.text, self.artifacts, stopped)
             self.recorded = True

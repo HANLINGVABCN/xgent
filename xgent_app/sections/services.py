@@ -2376,6 +2376,7 @@ def make_generated_reply_persistence(db, conversation_id, chat_id: int,
                 model_name=model_name,
             )
         metadata = await generated_image_metadata(artifacts, generation)
+        if reply.pages:metadata={**(metadata or {}),'rendered_pages':reply.pages}
         content = record_prefix + text
         if stopped:
             content = (content.rstrip() + "\n\n⏹️ 当前回复已被用户手动停止").strip()
@@ -2395,7 +2396,12 @@ def make_generated_reply_persistence(db, conversation_id, chat_id: int,
             except Exception as exc:
                 raise AttachmentContextError(f"生成图片回复同步失败：{exc}") from exc
 
-    reply = GeneratedMediaReply(extract_inline_generated_media, persist)
+    def extract_reply(raw,**options):
+        text,artifacts=extract_inline_generated_media(raw,**options)
+        from xgent_app.visual_pages import save_reply_pages
+        reply.pages=save_reply_pages(text,ArtifactManager.save_generated_media)
+        return text,artifacts
+    reply = GeneratedMediaReply(extract_reply, persist)
     reply.presentation_model = model_name
     return reply
 

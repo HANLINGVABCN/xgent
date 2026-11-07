@@ -354,6 +354,8 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
         message.update(content=title,parse_mode=None,file_message=True,
             web_display={'version':1,'segments':[{'kind':'html','text':'<span class="file-delivery-note">'+_html.escape(title)+'</span>'}],'presentation_mode':'folded'})
         if visual.get('version')==2 and record.get('session_id'):
+            message['role']='assistant'
+            message['message_policy']={**message['message_policy'],'speaker':'assistant'}
             params=urlencode({'conversation_id':record['session_id'],'record_id':record['id']})
             message['visual_page']={'version':2,'title':title,'width':visual.get('width',800),'height':visual.get('height',600),
                 'url':'/api/workbench/visual?'+params,'source_url':'/api/workbench/visual/source?'+params}
@@ -545,6 +547,17 @@ def build_history_message(
         }]]
     apply_history_presentation(message, record, metadata,
         namespace=presentation_namespace, mode_override=presentation_mode)
+    pages=metadata.get('rendered_pages')
+    if kind in {'ai_reply','media_reply'} and isinstance(pages,list) and record.get('session_id'):
+        from .web_display import build_web_display
+        facts=metadata.get('presentation') or {}
+        message['web_display']=build_web_display(content,fold=True,presentation=facts)
+        message['visual_pages']=[]
+        for page in pages:
+            if not isinstance(page,dict) or type(page.get('index')) is not int:continue
+            params=urlencode({'conversation_id':record['session_id'],'record_id':record['id'],'index':page['index']})
+            message['visual_pages'].append({'version':2,'index':page['index'],'title':page.get('title','渲染页面'),'width':page.get('width',800),
+                'height':page.get('height',600),'url':'/api/workbench/visual?'+params,'source_url':'/api/workbench/visual/source?'+params})
     from .presentation import metadata_dict
     summary = metadata_dict(metadata.get('presentation')).get('summary')
     if isinstance(summary, dict):

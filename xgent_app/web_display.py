@@ -56,6 +56,18 @@ def web_block_html(body, *, protocol=None, state='unknown', raw=None, path=None,
 
 
 def web_ai_segments(text, *, hide_unclosed=False, presentation=None):
+    if (presentation or {}).get('native_calls'):return _web_ai_segments(text,hide_unclosed=hide_unclosed,presentation=presentation)
+    from .visual_pages import display_parts
+    pieces=display_parts(text,generating=hide_unclosed)
+    if all(piece['kind']=='markdown' for piece in pieces):return _web_ai_segments(text,hide_unclosed=hide_unclosed,presentation=presentation)
+    output=[]
+    for piece in pieces:
+        if piece['kind']=='markdown':output.extend(_web_ai_segments(piece['text'],hide_unclosed=hide_unclosed,presentation=presentation))
+        else:output.append(piece)
+    return output
+
+
+def _web_ai_segments(text, *, hide_unclosed=False, presentation=None):
     operations = list((presentation or {}).get('operations') or [])
     if (presentation or {}).get('native_calls'):
         from .native_rendering import segments
@@ -104,7 +116,8 @@ def build_web_display(text: str, *, fold: bool = True, hide_unclosed: bool = Fal
     if fold:
         segments = web_ai_segments(text, hide_unclosed=hide_unclosed, presentation=presentation)
     else:
-        segments = [{'kind': 'markdown', 'text': text}]
+        from .visual_pages import display_parts
+        segments = display_parts(text,generating=hide_unclosed)
     terminal = (presentation or {}).get('terminal_status') or ((presentation or {}).get('summary') or {}).get('status')
     only = (presentation or {}).get('kind') == 'agent_status' or (presentation or {}).get('terminal_only') is True
     if terminal == 'stopped' and not only:

@@ -1,16 +1,20 @@
 /* One isolated page component, reused inline and in the Telegram Web App view. */
+import {renderBrandLogo} from './branding.js';
 const instances=new Set();
 const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-function requested(recordId){const params=new URLSearchParams(location.hash.split('?')[1]||'');return params.get('visual')===String(recordId);}
-export function syncVisualPage(entry,descriptor,recordId){
+function requested(recordId,index=0){const params=new URLSearchParams(location.hash.split('?')[1]||'');return params.get('visual')===String(recordId)&&params.get('visual_full')==='1'&&Number(params.get('visual_index')||0)===index;}
+export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   if(!descriptor||descriptor.version!==2)return;
   const signature=JSON.stringify(descriptor);
-  if(entry.visualPage?.signature===signature){if(requested(recordId))entry.visualPage.expand();return;}
+  if(entry.visualPage?.signature===signature){if(requested(recordId,descriptor.index||0))entry.visualPage.expand();return;}
   entry.visualPage?.destroy();
   const card=document.createElement('section');card.className='visual-page';card.setAttribute('aria-label',descriptor.title||'渲染页面');
   const bar=document.createElement('header'),title=document.createElement('strong'),controls=document.createElement('div');
-  title.textContent=descriptor.title||'渲染页面';bar.append(title,controls);
+  const identity=document.createElement('span');identity.className='visual-page-identity';
+  const mark=document.createElement('span');mark.className='visual-page-brand-mark';mark.dataset.brandLogo='';renderBrandLogo(mark);
+  const name=document.createElement('span');name.dataset.brandName='';name.textContent=window.XGentBranding?.name||'XGent';
+  title.textContent=descriptor.title||'渲染页面';identity.append(mark,name,title);bar.append(identity,controls);
   const expand=document.createElement('button');expand.type='button';expand.textContent='展开页面';expand.setAttribute('aria-expanded','false');
   const download=document.createElement('a');download.textContent='源码';download.href=descriptor.source_url;download.download='';
   const retry=document.createElement('button');retry.type='button';retry.textContent='重新加载';retry.hidden=true;controls.append(download,retry,expand);
@@ -18,13 +22,13 @@ export function syncVisualPage(entry,descriptor,recordId){
   const frame=document.createElement('iframe');frame.className='visual-page-frame';frame.title=descriptor.title||'渲染页面';
   frame.setAttribute('sandbox','allow-scripts');frame.referrerPolicy='no-referrer';frame.loading='lazy';
   frame.style.height=Math.max(120,Math.min(1200,descriptor.height||600))+'px';
-  card.append(bar,status,frame);entry.body.replaceChildren(card);
+  card.append(bar,status,frame);mount.replaceChildren(card);
   let controller,token='',version=0,expanded=false,previousFocus;
   function setExpanded(value){
     expanded=value;card.classList.toggle('visual-page-expanded',value);card.setAttribute('role',value?'dialog':'region');
     card.setAttribute('aria-modal',String(value));expand.textContent=value?'关闭页面':'展开页面';expand.setAttribute('aria-expanded',String(value));
     if(value){previousFocus=document.activeElement;expand.focus({preventScroll:true});}
-    else{previousFocus?.focus({preventScroll:true});if(requested(recordId)){const url=new URL(location.href),params=new URLSearchParams(url.hash.split('?')[1]||'');params.delete('visual');url.hash='/chat?'+params;history.replaceState(null,'',url);}}
+    else{previousFocus?.focus({preventScroll:true});if(requested(recordId,descriptor.index||0)){const url=new URL(location.href),params=new URLSearchParams(url.hash.split('?')[1]||'');params.delete('visual_full');url.hash='/chat?'+params;history.replaceState(null,'',url);}}
   }
   async function load(){
     controller?.abort();controller=new AbortController();const current=++version;
@@ -45,7 +49,20 @@ export function syncVisualPage(entry,descriptor,recordId){
     frame,receive:data=>{if(data.token!==token||!Number.isFinite(data.height))return;frame.style.height=Math.max(120,Math.min(1600,data.height))+'px';},close:()=>{if(expanded)setExpanded(false);}};
   entry.visualPage=instance;instances.add(instance);
   expand.onclick=()=>setExpanded(!expanded);retry.onclick=load;
-  if(requested(recordId))setExpanded(true);load();
+  if(requested(recordId,descriptor.index||0))setExpanded(true);load();
+}
+export function syncReplyPages(entry,pages,recordId){
+  if(!Array.isArray(pages))return;
+  const mounted=entry.visualPages||=new Map(),keep=new Set();
+  for(const descriptor of pages){
+    const index=descriptor.index;
+    if(!Number.isSafeInteger(index)||index<0||index>=4)continue;
+    const slot=entry.body.querySelector('[data-visual-index="'+index+'"]');if(!slot)continue;
+    keep.add(index);let child=mounted.get(index);
+    if(child?.body!==slot){child?.visualPage?.destroy();child={body:slot};mounted.set(index,child);}
+    syncVisualPage(child,descriptor,recordId,slot);
+  }
+  for(const [index,child] of mounted)if(!keep.has(index)){child.visualPage?.destroy();mounted.delete(index);}
 }
 window.addEventListener('message',event=>{if(event.data?.type!=='xgent-visual-size')return;for(const instance of instances)if(event.source===instance.frame.contentWindow)instance.receive(event.data);});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')for(const instance of instances)instance.close();});
