@@ -1403,7 +1403,8 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
     }
     if (frame.media) appendHistoryMedia(entry, frame, role);
     if(frame.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,frame.visual_page,frame.record_id??frame.id);}
-    if(frame.visual_pages)syncReplyPages(entry,frame.visual_pages,frame.record_id??frame.id);
+    if(frame.visual_pages||frame.web_display?.segments?.some(s=>Number.isSafeInteger(s.visual_index)))
+      syncReplyPages(entry,frame.visual_pages||[],frame.record_id??frame.id,frame.web_display);
     if(frame.conversation_actions)setConversationActions(entry,{...frame,id:frame.record_id??frame.id});
     if (frame.message_id != null && !frame.ui_message_id) byMessageId[frame.message_id] = entry;
     return entry;
@@ -3849,7 +3850,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
       if(message.conversation_id)entry.row.dataset.presentationConversationId=message.conversation_id;
       if(message.media?.length)setInlineMedia(entry,message.media);
       if(message.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,message.visual_page,message.id);}
-      if(message.visual_pages)syncReplyPages(entry,message.visual_pages,message.id);
+      if(message.visual_pages)syncReplyPages(entry,message.visual_pages,message.id,message.web_display);
       if(message.ask_form)syncAskForm(entry,message.ask_form);
       entry.row.dataset.sourceMessage=message.history_key||'history:'+message.id;
       syncTurnAuthors(target);

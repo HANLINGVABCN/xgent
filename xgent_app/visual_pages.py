@@ -26,7 +26,11 @@ def scan_pages(text,*,generating=False):
         if prose:parts.append({'kind':'text','text':''.join(prose)});prose=[]
         title=info.strip()[len(name):].strip()[:100] or '渲染页面'
         if end==len(lines):
-            if generating:parts.append({'kind':'pending','title':title,'index':page_index,'raw':''.join(lines[index:])})
+            if generating:
+                source=''.join(lines[index+1:])
+                parts.append({'kind':'pending','title':title,'index':page_index,'raw':''.join(lines[index:]),
+                              'source':source if page_index<4 and len(source.encode('utf-8'))<=MAX_SOURCE_BYTES else '',
+                              'format':name.removeprefix('xgent-')})
             else:parts.append({'kind':'text','text':''.join(lines[index:])})
             break
         source=''.join(lines[index+1:end])
@@ -65,7 +69,8 @@ def save_reply_pages(text,save_source):
 
 def display_parts(text,*,generating=False):
     return [{'kind':'html','text':'<span class="file-write-result">'+html.escape(part['title'])+(' · 生成中…' if part['kind']=='pending' else '')+'</span>',
-             'visual_index':part['index'],'visual_title':part['title'],'visual_pending':part['kind']=='pending'} if part['kind']!='text'
+             'visual_index':part['index'],'visual_title':part['title'],'visual_pending':part['kind']=='pending',
+             'visual_source':part['source'],'visual_format':part['format']} if part['kind']!='text'
             else {'kind':'markdown','text':part['text']} for part in scan_pages(text,generating=generating)]
 
 

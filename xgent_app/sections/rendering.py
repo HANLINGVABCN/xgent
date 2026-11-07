@@ -1025,6 +1025,7 @@ class TelegramStreamRenderer:
         self.message_ids = [getattr(msg, 'message_id', None)]
         self._web_messages = [msg]
         self._web_chunks = []
+        self._web_page_key = None
         self.reply_markup = reply_markup
         self.limit = limit
         self.stop_event = stop_event
@@ -1103,6 +1104,11 @@ class TelegramStreamRenderer:
             display += ('\n\n⏹️ 已停止，保留以上已生成内容。' if raw.strip() else
                         '⏹️ 已停止，还没有生成可保留的内容。')
         chunks = split_html_for_telegram(display or ' ', 3900)
+        from xgent_app.web_display import current_web_display
+        web=current_web_display() or {}
+        page_key=tuple((s.get('visual_index'),s.get('visual_source'),s.get('visual_pending'))
+                       for s in web.get('segments',[]) if 'visual_index' in s)
+        pages_changed=page_key!=self._web_page_key
         for index, chunk in enumerate(chunks):
             active = not final and index == len(chunks) - 1
             markup = self.reply_markup if active else None
@@ -1114,13 +1120,14 @@ class TelegramStreamRenderer:
                     )
                 self._web_messages.append(message)
                 self.message_ids.append(message.message_id)
-            elif index >= len(self._web_chunks) or self._web_chunks[index] != (chunk, active):
+            elif index >= len(self._web_chunks) or self._web_chunks[index] != (chunk, active) or pages_changed and index==0:
                 await safe_edit_text(self._web_messages[index], chunk, reply_markup=markup,
                                      parse_mode=constants.ParseMode.HTML)
         for message in self._web_messages[len(chunks):]:
             await message.delete()
         del self._web_messages[len(chunks):]
         self._web_chunks = [(chunk, not final and i == len(chunks) - 1) for i, chunk in enumerate(chunks)]
+        self._web_page_key = page_key
         self.current_msg = self._web_messages[-1]
 
     async def append(self, text: str):

@@ -44,9 +44,10 @@ def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_se
         assert iframe.content_frame.locator('body').evaluate('()=>window.hostBlocked')
         assert iframe.content_frame.locator('body').evaluate('()=>window.networkBlocked')
         assert page.locator('body').get_attribute('data-leaked') is None
+        assert iframe.content_frame.locator('html').evaluate('node=>getComputedStyle(node).zoom')=='0.9'
         page.get_by_role('button',name='源码',exact=True).click()
         assert page.locator('.visual-page-source').is_visible()
-        assert page.locator('.visual-page-source code').text_content()==SOURCE
+        assert page.locator('.visual-page-source code').text_content()==SOURCE+'\n'
         assert not iframe.is_visible()
         assert page.get_by_role('link',name='下载',exact=True).is_visible()
         page.get_by_role('button',name='预览',exact=True).click()
@@ -86,7 +87,7 @@ def test_actual_live_reply_preview_placeholder_and_refresh_match(full_output_ser
         placeholder=page.locator('.visual-page-loading');placeholder.wait_for()
         assert placeholder.locator('strong').inner_text()=='演示标题'
         assert '生成中' in placeholder.inner_text() and placeholder.locator('.visual-page-skeleton').is_visible()
-        assert not page.locator('.visual-page-frame').count()
+        assert page.locator('.visual-page-frame').count()==1
         page.evaluate('document.querySelector(".visual-page").dataset.sameCard="yes"')
         for frame in case['frames'][boundary:]:server.outbox.put(frame)
         selector='[data-record-id="'+str(case['history']['id'])+'"]'
@@ -100,4 +101,51 @@ def test_actual_live_reply_preview_placeholder_and_refresh_match(full_output_ser
         records.append(case['history']);page.reload();page.locator(selector+' .visual-page-ready').wait_for()
         assert page.locator(selector+' .body').inner_text()==before
         assert page.locator(selector+' [data-brand-logo]').count()==1
+        browser.close()
+
+
+@pytest.mark.parametrize('width',[390,1440])
+def test_svg_and_html_render_during_writing_and_finish_independently(full_output_server,width):
+    from xgent_app.web_display import build_web_display
+    server=full_output_server[0]
+    async def history(limit):return []
+    server.config.read_history=history
+    playwright=pytest.importorskip('playwright.sync_api')
+    with playwright.sync_playwright() as p:
+        browser,context,base=browser_session(server,p)
+        page=context.new_page();page.set_viewport_size({'width':width,'height':950});page.goto(base+'/#/chat?conversation=global_memory')
+        page.wait_for_function('!document.getElementById("btn-send").disabled')
+        def emit(raw):server.outbox.put({'type':'edit','message_id':999,'text':raw,'msg_type':'ai_reply',
+            'web_display':build_web_display(raw,hide_unclosed=True,reply_message_id=999)})
+        first='```xgent-svg 实时图形\n<svg viewBox="0 0 200 120"><rect id="bg" width="200" height="120" fill="#7165cf"/>'
+        emit(first)
+        card=page.locator('[data-visual-index="0"] .visual-page');frame=card.locator('.visual-page-frame').content_frame
+        frame.locator('#bg').wait_for();assert frame.locator('#bg').get_attribute('fill')=='#7165cf'
+        assert frame.locator('html').evaluate('node=>getComputedStyle(node).zoom')=='0.9'
+        frame.locator('#bg').evaluate('node=>window.keptNode=node')
+        second=first+'<circle id="dot" cx="60" cy="60" r="20" fill="#ffffff"/>'
+        emit(second);frame.locator('#dot').wait_for()
+        assert frame.locator('#bg').evaluate('node=>node===window.keptNode')
+        assert '生成中' in card.inner_text()
+        closed=second+'<script>window.closedRuns=(window.closedRuns||0)+1;</script></svg>\n```\n'
+        html='```xgent-html 实时网页\n<style>h1{color:rgb(110,80,210)}</style><h1 id="heading">第一行</h1>'
+        emit(closed+html)
+        page.wait_for_function("document.querySelector('[data-visual-index=\"0\"] .visual-page')?.getAttribute('aria-busy')==='false'")
+        assert '生成中' not in card.inner_text()
+        other=page.locator('[data-visual-index="1"] .visual-page');htmlframe=other.locator('.visual-page-frame').content_frame
+        htmlframe.locator('#heading').wait_for()
+        assert htmlframe.locator('#heading').evaluate('node=>getComputedStyle(node).color')=='rgb(110, 80, 210)'
+        htmlframe.locator('body').evaluate('()=>window.unchanged=123')
+        html+='\n<p id="tail">第二行</p><script>window.scriptRuns=(window.scriptRuns||0)+1;</script><button id="click" onclick="this.textContent=\'已点击\'">试一下</button>'
+        emit(closed+html);htmlframe.locator('#tail').wait_for()
+        assert htmlframe.locator('body').evaluate('()=>window.scriptRuns===undefined&&window.unchanged===123')
+        assert frame.locator('body').evaluate('()=>window.closedRuns===1')
+        emit(closed+html+'\n```\n后续解释还在生成')
+        page.wait_for_function("document.querySelector('[data-visual-index=\"1\"] .visual-page')?.getAttribute('aria-busy')==='false'")
+        htmlframe.locator('#click').click();assert htmlframe.locator('#click').inner_text()=='已点击'
+        assert htmlframe.locator('body').evaluate('()=>window.scriptRuns===1')
+        emit(closed+html+'\n```\n后续解释还在生成更多文字')
+        page.wait_for_function("document.querySelector('#log').innerText.includes('更多文字')")
+        assert htmlframe.locator('#click').inner_text()=='已点击'
+        assert frame.locator('body').evaluate('()=>window.closedRuns===1')
         browser.close()

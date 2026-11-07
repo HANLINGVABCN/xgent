@@ -36,6 +36,17 @@ def test_examples_incomplete_and_multiple_pages_keep_structural_order():
     assert [part['index'] for part in scan_pages(RAW+RAW) if part['kind']=='page']==[0,1]
 
 
+def test_streaming_pages_carry_independent_sources_without_waiting_for_reply_end():
+    from xgent_app.web_display import build_web_display
+    svg='<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="20"/></svg>\n'
+    raw='```xgent-svg 第一幅\n'+svg+'```\n```xgent-html 第二幅\n<style>h1{color:red}</style><h1>正在写'
+    pieces=[s for s in build_web_display(raw,hide_unclosed=True)['segments'] if 'visual_index' in s]
+    assert [s['visual_pending'] for s in pieces]==[False,True]
+    assert pieces[0]['visual_source']==svg and pieces[0]['visual_format']=='svg'
+    assert '<h1>正在写' in pieces[1]['visual_source']
+    assert not ProtocolParser.extract_protocol_blocks(raw)
+
+
 def test_telegram_complete_fold_and_explicit_long_excerpt():
     part=scan_pages(RAW)[1];short,truncated=telegram_source(part)
     assert not truncated and html.escape(SOURCE) in short and '<blockquote expandable>' in short
@@ -87,3 +98,9 @@ def test_global_prompt_teaches_special_fence_as_output_format():
     from xgent_app.prompt_defaults import DEFAULT_GLOBAL_PROMPT
     text=(Path(__file__).resolve().parents[1]/'prompts/global_addon.txt').read_text(encoding='utf-8')
     assert text==DEFAULT_GLOBAL_PROMPT and '不是工具调用' in text and 'xgent-html' in text and 'xgent-svg' in text
+
+
+def test_real_stream_renderer_does_not_deduplicate_growing_page_sources(tmp_path):
+    result=run_in_app('import asyncio\nfrom tests.visual_pages_probe import progressive\n'+
+        f'print(json.dumps(asyncio.run(progressive(bot,{str(tmp_path)!r}))))')
+    assert all(result.values()),result

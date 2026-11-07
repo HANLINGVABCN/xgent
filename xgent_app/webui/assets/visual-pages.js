@@ -1,35 +1,65 @@
-/* One isolated page component, reused inline and in the Telegram Web App view. */
+/* Progressive reply pages. Each fence completes independently of its reply. */
 const instances=new Set();
 const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const base='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+esc(csp)+'"><style>html,body{margin:0;min-height:0}html{zoom:.9!important}body{width:90%!important;margin-left:auto!important;margin-right:auto!important;font-family:system-ui,sans-serif}svg{max-width:100%}body>svg{display:block;width:100%;height:auto}</style>';
 function requested(recordId,index=0){const params=new URLSearchParams(location.hash.split('?')[1]||'');return params.get('visual')===String(recordId)&&params.get('visual_full')==='1'&&Number(params.get('visual_index')||0)===index;}
+
+// Runs in the opaque-origin frame. Draft updates keep existing SVG nodes and
+// CSS animations alive; unfinished scripts and event handlers remain inert.
+function draftRuntime(token){
+  const report=()=>parent.postMessage({type:'xgent-visual-size',token,height:Math.ceil(document.body.getBoundingClientRect().height)},'*');
+  function attrs(target,source){
+    for(const attr of Array.from(target.attributes))if(!source.hasAttribute(attr.name))target.removeAttribute(attr.name);
+    for(const attr of source.attributes)if(target.getAttribute(attr.name)!==attr.value)target.setAttribute(attr.name,attr.value);
+  }
+  function patch(target,source){
+    for(let i=0;i<source.childNodes.length;i++){
+      const next=source.childNodes[i];let old=target.childNodes[i];
+      if(!old){target.append(next.cloneNode(true));continue;}
+      if(old.nodeType!==next.nodeType||old.nodeName!==next.nodeName){target.replaceChild(next.cloneNode(true),old);continue;}
+      if(next.nodeType===1){attrs(old,next);patch(old,next);}
+      else if(old.nodeValue!==next.nodeValue)old.nodeValue=next.nodeValue;
+    }
+    while(target.childNodes.length>source.childNodes.length)target.lastChild.remove();
+  }
+  const styles=document.createElement('div');styles.hidden=true;document.head.append(styles);
+  addEventListener('message',event=>{
+    const data=event.data;if(event.source!==parent||data?.type!=='xgent-visual-draft'||data.token!==token||typeof data.source!=='string'||data.source.length>262144)return;
+    const parsed=new DOMParser().parseFromString(data.source,'text/html');
+    parsed.querySelectorAll('script,iframe,object,embed,base,link,meta').forEach(node=>node.remove());
+    parsed.querySelectorAll('*').forEach(node=>{for(const attr of Array.from(node.attributes))if(/^on/i.test(attr.name)||/^\s*javascript:/i.test(attr.value))node.removeAttribute(attr.name);});
+    const head=document.createElement('div');for(const style of parsed.head.querySelectorAll('style'))head.append(style.cloneNode(true));patch(styles,head);
+    attrs(document.body,parsed.body);patch(document.body,parsed.body);report();
+    parent.postMessage({type:'xgent-visual-painted',token,visible:!!document.body.querySelector('svg,canvas,img,article,main,section,div,button,h1,p')||!!document.body.textContent.trim()},'*');
+  });
+  new ResizeObserver(report).observe(document.body);report();parent.postMessage({type:'xgent-visual-draft-ready',token},'*');
+}
+
 export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   if(!descriptor||descriptor.version!==2)return;
-  const signature=JSON.stringify(descriptor);
-  if(entry.visualPage?.signature===signature){if(requested(recordId,descriptor.index||0))entry.visualPage.expand();return;}
-  entry.visualPage?.destroy();
+  if(entry.visualPage){entry.visualPage.update(descriptor,recordId);return;}
   const pending=mount.querySelector('.visual-page-loading');
-  const card=pending||document.createElement('section');card.className='visual-page visual-page-loading';card.setAttribute('aria-label',descriptor.title||'渲染页面');card.setAttribute('aria-busy','true');
+  const card=pending||document.createElement('section');card.className='visual-page visual-page-loading';card.setAttribute('aria-busy','true');
   const bar=document.createElement('header'),title=document.createElement('strong'),controls=document.createElement('div');
-  const identity=document.createElement('span');identity.className='visual-page-identity';
-  title.textContent=descriptor.title||'渲染页面';identity.append(title);bar.append(identity,controls);
+  const identity=document.createElement('span');identity.className='visual-page-identity';identity.append(title);bar.append(identity,controls);
   const expand=document.createElement('button');expand.type='button';expand.textContent='展开页面';expand.setAttribute('aria-expanded','false');
   const sourceToggle=document.createElement('button');sourceToggle.type='button';sourceToggle.textContent='源码';sourceToggle.setAttribute('aria-pressed','false');
   const copy=document.createElement('button');copy.type='button';copy.textContent='复制';copy.hidden=true;
-  const download=document.createElement('a');download.textContent='下载';download.href=descriptor.source_url;download.download='';download.hidden=true;
+  const download=document.createElement('a');download.textContent='下载';download.download='';download.hidden=true;
   const retry=document.createElement('button');retry.type='button';retry.textContent='重新加载';retry.hidden=true;controls.append(sourceToggle,copy,download,retry,expand);
-  const status=document.createElement('span');status.className='visual-page-phase';status.textContent='准备预览…';identity.append(status);
+  const status=document.createElement('span');status.className='visual-page-phase';identity.append(status);
   const viewport=pending?.querySelector('.visual-page-viewport')||document.createElement('div');viewport.className='visual-page-viewport';
   viewport.style.height=(pending?viewport.getBoundingClientRect().height:360)+'px';
   const skeleton=viewport.querySelector('.visual-page-skeleton')||document.createElement('div');skeleton.className='visual-page-skeleton';skeleton.setAttribute('aria-hidden','true');
   if(!skeleton.children.length)skeleton.innerHTML='<span></span><span></span><span></span>';
   const sourceView=document.createElement('pre');sourceView.className='visual-page-source';sourceView.hidden=true;const code=document.createElement('code');sourceView.append(code);
-  const frame=document.createElement('iframe');frame.className='visual-page-frame';frame.title=descriptor.title||'渲染页面';
-  frame.setAttribute('sandbox','allow-scripts');frame.referrerPolicy='no-referrer';frame.loading='lazy';
+  let frame=document.createElement('iframe');frame.className='visual-page-frame';frame.setAttribute('sandbox','allow-scripts');frame.referrerPolicy='no-referrer';
   viewport.replaceChildren(frame,skeleton,sourceView);card.replaceChildren(bar,viewport);if(!pending)mount.replaceChildren(card);
-  let controller,token='',version=0,expanded=false,previousFocus,sourceMode=false,pageHeight=360;
+  let controller,token='',revision=0,expanded=false,previousFocus,sourceMode=false,pageHeight=360;
+  let current,owner=recordId,source=null,complete=false,draftReady=false,draftStarted=false,timer,blobUrl,destroyed=false,renderedSource=null,downloadKey;
   function setSourceMode(value){
-    sourceMode=value;sourceView.hidden=!value;frame.hidden=value;card.classList.toggle('visual-source-mode',value);
+    sourceMode=value;sourceView.hidden=!value;viewport.querySelectorAll('iframe').forEach(node=>node.hidden=value);card.classList.toggle('visual-source-mode',value);
     copy.hidden=download.hidden=!value;sourceToggle.textContent=value?'预览':'源码';sourceToggle.setAttribute('aria-pressed',String(value));
     viewport.style.height=(value?Math.max(240,Math.min(600,pageHeight)):pageHeight)+'px';
   }
@@ -37,37 +67,91 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     expanded=value;card.classList.toggle('visual-page-expanded',value);card.setAttribute('role',value?'dialog':'region');
     card.setAttribute('aria-modal',String(value));expand.textContent=value?'关闭页面':'展开页面';expand.setAttribute('aria-expanded',String(value));
     if(value){previousFocus=document.activeElement;expand.focus({preventScroll:true});}
-    else{previousFocus?.focus({preventScroll:true});if(requested(recordId,descriptor.index||0)){const url=new URL(location.href),params=new URLSearchParams(url.hash.split('?')[1]||'');params.delete('visual_full');url.hash='/chat?'+params;history.replaceState(null,'',url);}}
+    else{previousFocus?.focus({preventScroll:true});if(requested(owner,current.index||0)){const url=new URL(location.href),params=new URLSearchParams(url.hash.split('?')[1]||'');params.delete('visual_full');url.hash='/chat?'+params;history.replaceState(null,'',url);}}
+  }
+  function showPreview(){card.classList.remove('visual-page-loading','visual-page-error');card.classList.add('visual-page-ready');card.setAttribute('aria-busy',String(!complete));}
+  function updateDownload(){
+    const key=current.source_url||(complete?source:null);if(key===downloadKey)return;downloadKey=key;
+    if(blobUrl){URL.revokeObjectURL(blobUrl);blobUrl=null;}
+    if(current.source_url)download.href=current.source_url;
+    else if(complete&&source){blobUrl=URL.createObjectURL(new Blob([source],{type:current.format==='svg'?'image/svg+xml':'text/html'}));download.href=blobUrl;}
+    else download.removeAttribute('href');
+    download.download='page.'+(current.format||'html');
+  }
+  function flushDraft(){
+    timer=null;if(destroyed||complete||!draftReady)return;
+    frame.contentWindow.postMessage({type:'xgent-visual-draft',token,source:source||''},'*');
+  }
+  function renderDraft(){
+    if(!draftStarted){
+      draftStarted=true;draftReady=false;token=crypto.randomUUID();
+      frame.srcdoc='<!doctype html><html><head>'+base+'</head><body><script>('+draftRuntime.toString()+')('+JSON.stringify(token)+');</script></body></html>';
+    }
+    if(!timer)timer=setTimeout(flushDraft,120);
+  }
+  function renderComplete(){
+    if(renderedSource===source)return;renderedSource=source;clearTimeout(timer);timer=null;draftReady=false;
+    token=crypto.randomUUID();const activeToken=token;
+    const bridge=`<script>(()=>{const send=()=>{if(document.body)parent.postMessage({type:'xgent-visual-size',token:${JSON.stringify(token)},height:Math.ceil(document.body.getBoundingClientRect().height)},'*');};addEventListener('load',send);addEventListener('resize',send);addEventListener('DOMContentLoaded',()=>{new ResizeObserver(send).observe(document.body);send();});})();</script>`;
+    // Keep the last draft visible until the complete page is ready.
+    const next=document.createElement('iframe');next.className='visual-page-frame visual-page-staging';next.title=current.title||'渲染页面';next.setAttribute('sandbox','allow-scripts');next.referrerPolicy='no-referrer';next.hidden=sourceMode;
+    const old=frame;frame=next;viewport.insertBefore(next,old);old.className='visual-page-previous';
+    next.onload=()=>{if(destroyed||token!==activeToken)return;requestAnimationFrame(()=>{if(destroyed||token!==activeToken)return;next.classList.remove('visual-page-staging');old.remove();showPreview();status.hidden=true;});};
+    next.srcdoc='<!doctype html>'+base+bridge+source;
+  }
+  function accept(page){
+    if(typeof page.source!=='string'||page.source.length>262144)throw new Error('页面内容无效');
+    const isComplete=page.streaming!==true;
+    if(complete&&!isComplete)return;
+    const unchanged=source===page.source&&complete===isComplete;
+    source=page.source;complete=isComplete;if(code.textContent!==source)code.textContent=source;
+    status.textContent=complete?'准备预览…':'生成中…';status.hidden=complete&&renderedSource===source;
+    if(!unchanged)card.setAttribute('aria-busy','true');frame.title=current.title||'渲染页面';updateDownload();
+    if(!unchanged){if(complete)renderComplete();else renderDraft();}
   }
   async function load(){
-    controller?.abort();controller=new AbortController();const current=++version;
-    retry.hidden=true;status.hidden=false;status.textContent='准备预览…';card.classList.remove('visual-page-ready','visual-page-error');card.classList.add('visual-page-loading');card.setAttribute('aria-busy','true');
+    controller?.abort();controller=new AbortController();const activeRevision=++revision;retry.hidden=true;
     try{
-      const response=await fetch(descriptor.url,{credentials:'same-origin',signal:controller.signal});const page=await response.json();
+      const response=await fetch(current.url,{credentials:'same-origin',signal:controller.signal});const page=await response.json();
       if(!response.ok)throw new Error(page.error||'页面读取失败');
-      if(current!==version||!card.isConnected)return;
-      if(page.version!==2||typeof page.source!=='string'||page.source.length>262144)throw new Error('页面内容无效');
-      code.textContent=page.source;
-      token=crypto.randomUUID();
-      const bridge=`<script>(()=>{let last=0;const send=()=>{const body=document.body;if(!body)return;const height=Math.ceil(body.getBoundingClientRect().height);if(height===last)return;last=height;parent.postMessage({type:'xgent-visual-size',token:${JSON.stringify(token)},height},'*');};addEventListener('load',send);addEventListener('resize',send);addEventListener('DOMContentLoaded',()=>{new ResizeObserver(send).observe(document.body);send();});})();</script>`;
-      const base='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+esc(csp)+'"><style>html,body{margin:0;min-height:0}body{font-family:system-ui,sans-serif}svg{max-width:100%}body>svg{display:block;width:100%;height:auto}</style>';
-      frame.onload=()=>{if(current!==version)return;requestAnimationFrame(()=>requestAnimationFrame(()=>{if(current!==version||!card.isConnected)return;status.hidden=true;card.classList.remove('visual-page-loading');card.classList.add('visual-page-ready');card.setAttribute('aria-busy','false');}));};
-      frame.srcdoc='<!doctype html>'+base+bridge+page.source;
-    }catch(error){if(error.name==='AbortError')return;status.textContent=error.message;retry.hidden=false;card.classList.add('visual-page-error');card.classList.remove('visual-page-loading');card.setAttribute('aria-busy','false');}
+      if(activeRevision!==revision||destroyed||!card.isConnected)return;
+      if(page.version!==2)throw new Error('页面内容无效');accept({...page,streaming:false});
+    }catch(error){if(error.name==='AbortError')return;status.hidden=false;status.textContent=error.message;retry.hidden=false;card.classList.add('visual-page-error');card.classList.remove('visual-page-loading');card.setAttribute('aria-busy','false');}
   }
-  const instance={signature,expand:()=>setExpanded(true),destroy:()=>{controller?.abort();instances.delete(instance);card.remove();},
-    frame,receive:data=>{if(data.token!==token||!Number.isFinite(data.height)||sourceMode)return;pageHeight=Math.max(120,Math.min(1600,data.height));viewport.style.height=pageHeight+'px';},close:()=>{if(expanded)setExpanded(false);}};
+  const instance={
+    get frame(){return frame;},
+    update(page,id){
+      current=page;if(id!=null)owner=id;title.textContent=page.title||'渲染页面';card.setAttribute('aria-label',title.textContent);
+      if(typeof page.source==='string'){controller?.abort();revision++;accept(page);}
+      else if(source===null)load();else updateDownload();
+      if(requested(owner,page.index||0))setExpanded(true);
+    },
+    expand:()=>setExpanded(true),
+    destroy:()=>{destroyed=true;clearTimeout(timer);controller?.abort();if(blobUrl)URL.revokeObjectURL(blobUrl);instances.delete(instance);card.remove();},
+    receive(data){
+      if(data.token!==token)return;
+      if(data.type==='xgent-visual-draft-ready'){draftReady=true;flushDraft();}
+      else if(data.type==='xgent-visual-painted'&&data.visible)showPreview();
+      else if(data.type==='xgent-visual-size'&&Number.isFinite(data.height)&&!sourceMode){pageHeight=Math.max(120,Math.min(1600,data.height));viewport.style.height=pageHeight+'px';}
+    },
+    close:()=>{if(expanded)setExpanded(false);}
+  };
   entry.visualPage=instance;instances.add(instance);
-  expand.onclick=()=>setExpanded(!expanded);retry.onclick=load;
+  expand.onclick=()=>setExpanded(!expanded);retry.onclick=()=>{renderedSource=null;if(current.url)load();else if(complete)renderComplete();else{draftStarted=false;renderDraft();}};
   sourceToggle.onclick=()=>setSourceMode(!sourceMode);
   copy.onclick=async()=>{try{await navigator.clipboard.writeText(code.textContent);copy.textContent='已复制';setTimeout(()=>copy.textContent='复制',1600);}catch{copy.textContent='复制失败';}};
-  if(requested(recordId,descriptor.index||0))setExpanded(true);load();
+  instance.update(descriptor,recordId);
 }
-export function syncReplyPages(entry,pages,recordId){
-  if(!Array.isArray(pages))return;
+
+export function syncReplyPages(entry,pages,recordId,display=entry.webDisplay){
+  const descriptors=new Map((Array.isArray(pages)?pages:[]).map(page=>[page.index,page]));
+  for(const segment of display?.segments||[]){
+    if(!Number.isSafeInteger(segment.visual_index)||typeof segment.visual_source!=='string')continue;
+    const index=segment.visual_index;
+    descriptors.set(index,{...descriptors.get(index),version:2,index,title:segment.visual_title,format:segment.visual_format,source:segment.visual_source,streaming:segment.visual_pending===true});
+  }
   const mounted=entry.visualPages||=new Map(),keep=new Set();
-  for(const descriptor of pages){
-    const index=descriptor.index;
+  for(const [index,descriptor] of descriptors){
     if(!Number.isSafeInteger(index)||index<0||index>=4)continue;
     const slot=entry.body.querySelector('[data-visual-index="'+index+'"]');if(!slot)continue;
     keep.add(index);let child=mounted.get(index);
@@ -76,6 +160,6 @@ export function syncReplyPages(entry,pages,recordId){
   }
   for(const [index,child] of mounted)if(!keep.has(index)){child.visualPage?.destroy();mounted.delete(index);}
 }
-window.addEventListener('message',event=>{if(event.data?.type!=='xgent-visual-size')return;for(const instance of instances)if(event.source===instance.frame.contentWindow)instance.receive(event.data);});
+window.addEventListener('message',event=>{if(!event.data?.type?.startsWith('xgent-visual-'))return;for(const instance of instances)if(event.source===instance.frame.contentWindow)instance.receive(event.data);});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')for(const instance of instances)instance.close();});
 window.addEventListener('xgent-auth-expired',()=>{for(const instance of instances)instance.destroy();});

@@ -57,3 +57,31 @@ async def exercise(bot,root,provider,style,long_source=False,agent_mode=True,mod
         await bridge._tg_channel().aclose()
         if capture:return {'frames':frames,'history':history,'source':source,'raw':raw}
         return {'one_request':True,'no_operations':True,'original_reply':True,'folded_source':True,'webapp':True,'full_source':True}
+
+
+async def progressive(bot,root):
+    import asyncio
+    async with NativeHarness(bot,root,'openai','foreground') as h:
+        native=RichCapture();bridge=MirrorBot(h.outbox,1,native);h.context.bot=bridge
+        bot.UserDataManager.set('agent_mode',False)
+        bot.UserDataManager.set('agent_call_mode','fence')
+        svg='```xgent-svg 第一幅\n<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="20"'
+        pieces=[svg,' fill="red"/></svg>\n```\n```xgent-html 第二幅\n<h1>第一行</h1>', '\n<p>第二行</p>', '\n```']
+        calls=[]
+        async def stream(*args,**kwargs):
+            calls.append(1)
+            for text in pieces:
+                yield text
+                await asyncio.sleep(.5)
+        with interaction('web'),patch.object(bot,'_web_real_bot',native),patch.object(bot,'get_web_outbox',return_value=h.outbox),patch.object(bot.ModelClient,'think_and_reply_stream',stream):
+            with bind_conversation(await bot.get_conversations().resolve()):await h.turn('逐步画出来')
+        frames=h.drain_frames()
+        pages=[[s for s in (f.get('web_display') or {}).get('segments',[]) if 'visual_index' in s] for f in frames]
+        assert any(len(p)==1 and p[0]['visual_pending'] and 'r="20"' in p[0]['visual_source'] for p in pages)
+        assert any(len(p)==2 and not p[0]['visual_pending'] and p[1]['visual_pending'] for p in pages)
+        assert any(len(p)==2 and p[1]['visual_pending'] and '<p>第二行</p>' in p[1]['visual_source'] for p in pages)
+        rows=await h.db.get_display_history(100);reply=next(r for r in rows if r['msg_type']=='ai_reply')
+        assert reply['content']==''.join(pieces) and len(metadata_dict(reply['metadata'])['rendered_pages'])==2
+        assert len(calls)==1 and not h.executed
+        await bridge._tg_channel().aclose()
+        return {'progressive_svg':True,'independent_complete':True,'progressive_html':True,'one_request':True}
