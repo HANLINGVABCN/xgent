@@ -96,7 +96,7 @@ def test_drag_scales_the_whole_page_remembers_each_card_and_can_restore_auto(ful
         handle=first.get_by_role('button',name='拖拽等比例调整页面大小',exact=True)
         cardbox=first.bounding_box();handlebox=handle.bounding_box()
         assert abs(handlebox['x']-cardbox['x']-cardbox['width'])<1
-        assert handlebox['height']>handlebox['width']*2 and handle.locator('svg').count()==0
+        assert handlebox['width']==8 and handlebox['height']>handlebox['width']*2 and handle.locator('svg').count()==0
         assert handle.locator('.visual-page-resize-grip').is_visible()
         assert abs(handlebox['y']+handlebox['height']/2-cardbox['y']-cardbox['height']/2)<2
         def drag(dx,dy):

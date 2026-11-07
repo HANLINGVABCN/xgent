@@ -16,7 +16,8 @@ def test_input_height_survives_typing_clearing_reload_and_small_viewport(full_ou
         composer=page.locator('.composer-card').bounding_box()
         assert box['x']<composer['x']<box['x']+box['width']
         assert abs(box['y']-composer['y']-13)<1
-        assert handle.locator('svg').bounding_box()['width']<=12
+        assert box['width']==8 and handle.locator('svg').count()==0
+        assert handle.locator('.composer-resize-grip').is_visible()
         if width==390:
             client=context.new_cdp_session(page);client.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[{'x':x,'y':y}]})
             client.send('Input.dispatchTouchEvent',{'type':'touchMove','touchPoints':[{'x':x,'y':y-100}]})
