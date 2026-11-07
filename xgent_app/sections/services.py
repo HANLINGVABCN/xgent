@@ -796,15 +796,17 @@ def should_send_github_update_token(update_url: str) -> bool:
     host = (urllib.parse.urlparse(update_url).hostname or "").lower()
     return host == "github.com" or host == "api.github.com" or host.endswith(".github.com")
 
-def build_update_download_request() -> urllib.request.Request:
+def build_update_download_request(update_url=None, token=None) -> urllib.request.Request:
+    update_url = update_url or BotConfig.UPDATE_ZIP_URL
+    token = BotConfig.UPDATE_GITHUB_TOKEN if token is None else token
     headers = {
         "User-Agent": "xgent-telegram-updater",
         "Accept": "application/vnd.github+json",
     }
-    if BotConfig.UPDATE_GITHUB_TOKEN and should_send_github_update_token(BotConfig.UPDATE_ZIP_URL):
-        headers["Authorization"] = f"Bearer {BotConfig.UPDATE_GITHUB_TOKEN}"
+    if token and should_send_github_update_token(update_url):
+        headers["Authorization"] = f"Bearer {token}"
         headers["X-GitHub-Api-Version"] = "2022-11-28"
-    return urllib.request.Request(BotConfig.UPDATE_ZIP_URL, headers=headers)
+    return urllib.request.Request(update_url, headers=headers)
 
 def format_update_download_error(e: urllib.error.HTTPError) -> str:
     if e.code in {401, 403, 404}:
@@ -819,7 +821,18 @@ def format_update_download_error(e: urllib.error.HTTPError) -> str:
         return f"更新源访问失败（HTTP {e.code}）。{auth_hint}"
     return f"下载更新包失败（HTTP {e.code}）。"
 
-def download_and_apply_project_update(overwrite_local_custom_files: bool = True) -> Dict[str, Any]:
+def download_and_apply_project_update(overwrite_local_custom_files: bool = True, *, update_url=None, token=None) -> Dict[str, Any]:
+    from xgent_app.conversations import ExecutionFileLock
+    lock = ExecutionFileLock(os.path.join(PROJECT_ROOT, '.project-update'))
+    if not lock.acquire():
+        raise RuntimeError('另一个更新正在进行，请等待完成。')
+    try:
+        return _apply_project_update(overwrite_local_custom_files, update_url=update_url, token=token)
+    finally:
+        lock.release()
+
+
+def _apply_project_update(overwrite_local_custom_files: bool = True, *, update_url=None, token=None) -> Dict[str, Any]:
     """Download the configured zipball and overwrite tracked project files in-place."""
     copied_files: List[str] = []
     skipped_local_custom_files = 0
@@ -827,7 +840,7 @@ def download_and_apply_project_update(overwrite_local_custom_files: bool = True)
 
     with tempfile.TemporaryDirectory(prefix="xgent-telegram-update-") as tmp_dir:
         zip_path = os.path.join(tmp_dir, "source.zip")
-        request = build_update_download_request()
+        request = build_update_download_request(update_url, token)
 
         # 下载时限制最大体积，防止 zip 炸弹
         MAX_UPDATE_DOWNLOAD_SIZE = 200 * 1024 * 1024  # 200 MB
@@ -912,7 +925,7 @@ def download_and_apply_project_update(overwrite_local_custom_files: bool = True)
                 handle.write(code_revision)
 
     return {
-        "source": BotConfig.UPDATE_ZIP_URL,
+        "source": update_url or BotConfig.UPDATE_ZIP_URL,
         "count": len(copied_files),
         "files": copied_files[:30],
         "truncated": len(copied_files) > 30,

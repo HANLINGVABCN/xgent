@@ -12,6 +12,7 @@ const menu = $('conversation-item-menu');
 const renameDialog = $('conversation-rename-dialog');
 const mobile = matchMedia('(max-width: 767px)');
 const rows = new Map();
+const knownRuns=new Map(),completedRuns=new Set(),completionTimers=new Set();
 let itemIndex = new Map();
 const paths = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
@@ -115,8 +116,8 @@ function button(text, fn, attributes = {}) {
 function title(item) { return item?.display_title || item?.name || '新对话'; }
 function timestamp(item) { return Number(item.activity_at ?? item.last_active ?? item.created_at) || 0; }
 function itemById(id) { return itemIndex.get(id); }
-function activeRuns() { return state.runs ? Object.values(state.runs) : state.running ? [state.running] : []; }
-function runningFor(id) { return state.runs ? state.runs[id] || null : state.running?.conversation_id === id ? state.running : null; }
+function activeRuns() { return (state.runs ? Object.values(state.runs) : state.running ? [state.running] : []).filter(run=>!completedRuns.has(run.run_id)); }
+function runningFor(id) { const run=state.runs ? state.runs[id] || null : state.running?.conversation_id === id ? state.running : null;return run&&!completedRuns.has(run.run_id)?run:null; }
 function groups() {
   const values=(Array.isArray(state.groups)?state.groups:[]).filter(group=>group.id!=='__archived__');
   return [{...(values.find(group=>group.id==='ungrouped')||{}),id:'ungrouped',name:'默认分组'},...values.filter(group=>group.id!=='ungrouped')];
@@ -191,6 +192,7 @@ function accept(next) {
   const combined = {...state, ...next, server_current_chat_id:next.current_chat_id, current_chat_id: localCurrent};
   if (JSON.stringify(combined) === JSON.stringify(state)) return;
   state = {...combined, running: combined.runs ? combined.runs[combined.current_chat_id] || null : combined.running};
+  activeRuns().forEach(run=>knownRuns.set(run.run_id,run));
   keepConversationUrl();
   for (const id of expandedChildren) if (!itemIndex.has(id)) expandedChildren.delete(id);
   saveExpandedChildren();
@@ -456,29 +458,26 @@ function renderList() {
   if (menuTarget) { if (!itemById(menuTarget)) closeMenu(false); else positionMenu(); }
 }
 function renderRunning() {
-  const others = activeRuns().filter(run=>run.conversation_id!==state.current_chat_id), banner = $('conversation-running');
   $('conversation-current-status').hidden = !runningFor(state.current_chat_id);
-  banner.hidden = !others.length;
-  if (banner.hidden) { banner.replaceChildren(); return; }
-  const entries=[];
-  for(const running of others){
-  const item = itemById(running.conversation_id);
-  const text = node('span', {}, '「' + (item ? title(item) : running.name || '另一段对话') + '」' + (running.stop_requested ? '正在停止…' : '正在生成'));
-  const visit = button('查看', () => {
-    if (item && isArchived(item)) { window.XGentWorkbench?.revealArchive(item.id); }
-    else selectConversation(running.conversation_id);
-  });
-  visit.disabled = !item;
-  const stop = button('停止', async event => {
-    const trigger = event.currentTarget;
-    trigger.disabled = true;
-    try { await api('/api/stop', {run_id: running.run_id, conversation_id: running.conversation_id}); await refresh(); }
-    catch (error) { if (error.name !== 'AbortError') notify(error.message, {error: true}); }
-    finally { if (trigger.isConnected) trigger.disabled = false; }
-  });
-  entries.push(node('div',{class:'conv-running-entry'},node('span', {class: 'conv-running-dot', 'aria-hidden': 'true'}), text, visit, stop));
-  }
-  banner.replaceChildren(...entries);
+}
+function completion(frame){
+  const {run_id:id,conversation_id:cid}=frame;
+  if(!id||!cid||completedRuns.has(id))return;
+  const run=knownRuns.get(id),item=itemById(cid);
+  if(!run||!item||frame.generation!=null&&frame.generation!==item.generation)return;
+  completedRuns.add(id);knownRuns.delete(id);if(completedRuns.size>500)completedRuns.delete(completedRuns.values().next().value);
+  render();
+  if(cid===localCurrent||run.stop_requested)return;
+  const area=$('conversation-completions'),notice=node('div',{class:'conv-completion','data-run-id':id,role:'status'});
+  let timer;
+  const remove=()=>{clearTimeout(timer);completionTimers.delete(timer);notice.remove();};
+  const close=button(icon('close'),remove,{class:'conv-icon-button conv-completion-close','aria-label':'关闭对话完成通知'});
+  const link=node('a',{href:conversationHref(cid),draggable:'true'},title(item));
+  link.onclick=event=>{if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();remove();isArchived(item)?window.XGentWorkbench?.revealArchive(cid):selectConversation(cid);};
+  notice.append(node('strong',{},frame.type==='turn_error'?'对话处理已结束':'回复已完成'),link,close);
+  area.append(notice);while(area.children.length>3)area.firstElementChild.remove();
+  timer=setTimeout(remove,8000);completionTimers.add(timer);
+  refresh();
 }
 function render() {
   searchAutofill.remember();
@@ -486,7 +485,7 @@ function render() {
   $('wb-conversation-title').textContent = title(selected);
   $('wb-conversation-title').title = title(selected);
   document.querySelector('.wb-brand')?.setAttribute('href',conversationHref(localCurrent));
-  $('conversation-new').disabled = !authenticated || !!mutation;
+  $('conversation-new').setAttribute('aria-disabled',String(!authenticated || !!mutation));
   $('conversation-new').setAttribute('aria-busy', String(mutation?.name === 'create'));
   $('conversation-search-clear').hidden = !search.value;
   $('conversation-list-title').textContent = search.value.trim() ? '全局搜索' : groupView === 'all' ? '全部对话' : groupName(groupView);
@@ -688,7 +687,8 @@ function setDrawer(open, restoreFocus = true) {
     if (restoreFocus && drawerReturn?.isConnected) drawerReturn.focus({preventScroll: true});
   }
 }
-$('conversation-new').addEventListener('click', createConversation);
+$('conversation-new').addEventListener('click',event=>{if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();if(authenticated&&!mutation)createConversation();});
+$('conversation-new').addEventListener('keydown',event=>{if(event.key===' '){event.preventDefault();if(authenticated&&!mutation)createConversation();}});
 $('conversation-drawer-toggle').addEventListener('click', () => {
   if(mobile.matches)setDrawer(!drawerOpen);
   else {const collapsed=document.body.classList.toggle('conv-sidebar-collapsed');try{localStorage.setItem('xgent-conversation-sidebar-collapsed',collapsed?'1':'0');}catch{}syncConversationToggle();}
@@ -755,6 +755,8 @@ document.addEventListener('keydown', event => {
 }, true);
 
 window.XGentConversations = {
+  observeRun:frame=>{if(frame.run_id&&frame.conversation_id&&!completedRuns.has(frame.run_id)&&['message','edit','chat_action'].includes(frame.type)){knownRuns.set(frame.run_id,{...knownRuns.get(frame.run_id),...frame});if(knownRuns.size>500)knownRuns.delete(knownRuns.keys().next().value);}},
+  completion,
   new:async()=>{if(await prepareChat())selectLocal(null,'replace');},
   materialize:(result,token,groupId='ungrouped')=>{
     const id=result.conversation_id;if(!id)return false;
@@ -811,6 +813,7 @@ $('conversation-group-edit')?.addEventListener('click',()=>{
 function start() { authenticated = true; render(); refresh(); }
 window.addEventListener('xgent-authenticated', start);
 window.addEventListener('xgent-auth-expired', () => {
+  knownRuns.clear();completedRuns.clear();completionTimers.forEach(clearTimeout);completionTimers.clear();$('conversation-completions').replaceChildren();
   enteredArchives.clear();try{sessionStorage.removeItem('xgent-entered-archives');}catch{}
   globalResults.reset();
   authenticated = false; authEpoch++; controllers.forEach(controller => controller.abort()); request = null;

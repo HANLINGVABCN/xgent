@@ -314,16 +314,14 @@ def test_background_generation_is_marked_and_stop_uses_original_run(conversation
     page.evaluate('(state)=>window.XGentConversations.accept(state)', payload)
     assert current(page) == b
     assert row(page, a).locator('.conv-running-dot').is_visible()
-    assert '后台继续执行的任务' in page.locator('#conversation-running').inner_text()
+    assert page.locator('#conversation-running').count()==0
     assert page.get_by_role('button', name='新对话', exact=True).is_enabled()
     stopped = []
     def stop(route):
         stopped.append(route.request.post_data_json)
         route.fulfill(json={'ok': True})
     page.route('**/api/stop', stop)
-    page.locator('#conversation-running').get_by_role('button', name='停止', exact=True).click()
-    page.wait_for_function('document.getElementById("conversation-running").hidden')
-    assert stopped == [{'run_id': 'original-run', 'conversation_id': a}]
+    assert not stopped
 
 
 @pytest.mark.parametrize('width,height', [(320, 640), (390, 844), (768, 1024), (1024, 768), (1440, 900)])

@@ -80,6 +80,7 @@ export async function settingsView({logout,boot,health,state,render,dialog,close
     lazyCards('两步验证（2FA）',async()=>{const {twoFactorCard}=await managementModule('two-factor');return twoFactorCard({card,dialog,closeDialog,submit});});
   }
   if(active==='health'){
+    lazyCards('版本与更新',async()=>{const {updateCard}=await managementModule('settings-updates');return updateCard({card,confirmAction});});
     lazyCards('通道状态',async()=>{const health=await api('/api/health');return [card('通道状态',...Object.entries(health.components||{}).map(([name,v])=>el('div',{class:'wb-detail-row'},el('dt',{},name),el('dd',{},tag(v.state),v.error?message(v.error):null))),button('刷新状态',render)),
       el('details',{class:'wb-card wb-diagnostics'},el('summary',{},'查看详细健康数据'),el('pre',{class:'wb-pre'},JSON.stringify(health,null,2)))];});
     grid.append(card('维护操作',el('p',{},'这些操作将在当前对话中显示结果，重启可能中断连接。'),button('检查服务状态',()=>{location.hash='/chat';window.XGentChat?.command('/status');}),button('重启服务',()=>confirmAction('重启服务','当前连接和终端可能被关闭。确认重启？',async()=>{location.hash='/chat';window.XGentChat?.command('/restart');}))));

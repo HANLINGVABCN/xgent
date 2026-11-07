@@ -1472,13 +1472,20 @@ import {preventAutofill} from './input-policy.js';
   }
 
   function reconcileUnboundUserMessages(){
-    if(loggedOut||!selectedConversationId||!log.querySelector('.msg-row.user:not([data-record-id])'))return;
-    var cid=selectedConversationId;
-    api('/api/workbench/history?conversation_id='+encodeURIComponent(cid)+'&limit=8').then(function(data){
-      if(cid!==selectedConversationId||!Array.isArray(data?.messages))return;
-      data.messages.forEach(function(m){
-        if(m.role==='user'||byMessageId['history:'+(m.record_id??m.id)])putHistoryFrame(m,streamEpoch);
-      });
+    if(loggedOut||!selectedConversationId)return;
+    const rows=Array.from(log.querySelectorAll('.msg-row.user')).filter(row=>!row.dataset.recordId||!row._chatEntry?.conversationActions);
+    if(!rows.length)return;
+    const cid=selectedConversationId,generation=historyGen,ids=rows.map(row=>row.dataset.recordId).filter(Boolean);
+    const paths=[];
+    if(rows.some(row=>!row.dataset.recordId))paths.push('/api/workbench/history?limit=50');
+    for(let index=0;index<ids.length;index+=100)paths.push('/api/workbench/history?presentation_ids='+ids.slice(index,index+100).join(','));
+    Promise.all(paths.map(path=>api(path+'&conversation_id='+encodeURIComponent(cid)))).then(results=>{
+      if(cid!==selectedConversationId||generation!==historyGen)return;
+      for(const data of results)for(const message of data.messages||[]){
+        const existing=byMessageId['history:'+(message.record_id??message.id)];
+        if(existing)setConversationActions(existing,message);
+        else if(message.role==='user')putHistoryFrame(message,streamEpoch);
+      }
     }).catch(function(){});
   }
 
@@ -1645,6 +1652,8 @@ import {preventAutofill} from './input-policy.js';
   }
 
   function handleFrameContent(frame) {
+    window.XGentConversations?.observeRun(frame);
+    if(['generation_end','turn_end','turn_error'].includes(frame.type))window.XGentConversations?.completion(frame);
     if(frame.type==='attachment_changed'){
       window.dispatchEvent(new CustomEvent('xgent-attachment-changed',{detail:frame}));
       if(frame.conversation_id===selectedConversationId&&frame.generation===uiGeneration){
@@ -1695,6 +1704,7 @@ import {preventAutofill} from './input-policy.js';
       return;
     }
     if(frame.conversation_id && frame.conversation_id !== selectedConversationId) {
+      if(['generation_end','turn_end','turn_error'].includes(frame.type))finishRun(frame);
       if(uploadQueue?.conversation_id===frame.conversation_id && ['turn_end','turn_error'].includes(frame.type) && uploadQueue.finish){
         uploadQueue.awaitingTurn=false;uploadQueue.finish(frame.type==='turn_error'?frame.text:null);
       }
@@ -1779,6 +1789,7 @@ import {preventAutofill} from './input-policy.js';
       Promise.resolve(refreshed).then(()=>finishCardScroll(frame)).catch(()=>finishCardRequest(frame.interaction_id));
     } else if (frame.type === "generation_end") {
       setBusy(false);hideTyping();
+      reconcileUnboundUserMessages();
     } else if (frame.type === "turn_end" || frame.type === "turn_error") {
       setBusy(false);
       reconcileUnboundUserMessages();

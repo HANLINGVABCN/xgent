@@ -80,6 +80,7 @@ class Workbench:
         self._background = set()
         self._settings_lock = asyncio.Lock()
         self._data_operations = None
+        self._project_updates = None
         # data/estimate 的短 TTL 结果缓存：备份估算要全量递归扫描数据目录，
         # 而停留页面时前端每 60s 就会后台刷新一次；重复打开不该反复扫盘。
         self._estimate_cache = None
@@ -107,6 +108,15 @@ class Workbench:
         return task
 
     async def handle(self, method, resource, data):
+        if resource.startswith('system/update'):
+            from .project_updates import ProjectUpdates
+            if self._project_updates is None:self._project_updates=ProjectUpdates(self.ns,self.background)
+            try:
+                if resource=='system/update' and method=='GET':return self._project_updates.status(data.get('id'))
+                if resource=='system/update/check' and method=='POST':return await self._project_updates.check(data)
+                if resource=='system/update/start' and method=='POST':return await self._project_updates.start(data)
+                raise WorkbenchError('更新接口不存在',404)
+            except ValueError as exc:raise WorkbenchError(str(exc),409) from exc
         version_operation = resource in {'artifacts/versions', 'artifacts/version_preview', 'artifacts/version_download', 'artifacts/restore_version'}
         navigation = resource in {'conversations', 'global-search'} or resource.startswith(('conversations/', 'conversation-groups','data/')) or resource in {'tasks','tasks/cancel','skills','memories'} or resource.startswith(('skills/','memories/'))
         cid = None if navigation else data.get('conversation_id')

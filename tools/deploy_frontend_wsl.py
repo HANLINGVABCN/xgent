@@ -15,6 +15,7 @@ target = pathlib.Path(requested).resolve(strict=True)
 if str(target) != '/home/hanling/xgent-telegram-test':
     raise SystemExit('Unexpected deployment destination: ' + str(target))
 paths = ['xgent_app/webui', 'xgent_app/web_server.py', 'xgent_app/workbench.py',
+         'xgent_app/project_updates.py', 'xgent_app/sections/services.py',
          'xgent_app/sections/idle.py', 'xgent_app/queue_store.py', 'xgent_app/message_queue.py',
          'xgent_app/file_transfers.py', 'xgent_app/file_ingress.py',
          'xgent_app/conversations.py', 'xgent_app/conversation_store.py',
@@ -45,6 +46,12 @@ for name in paths:
         if hashlib.sha256(item.read_bytes()).digest() != hashlib.sha256(deployed.read_bytes()).digest():
             raise SystemExit('Deployment checksum mismatch: ' + str(item.relative_to(source)))
         copied += 1
+revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+if not subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain']):
+    version_path = target / '.xgent-version'
+    if version_path.is_file():
+        shutil.copy2(version_path, backup / '.xgent-version')
+    version_path.write_text(revision, encoding='utf-8')
 subprocess.run(['/usr/local/bin/pm2', 'restart', process], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 url = 'http://127.0.0.1:' + port
 local_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -65,7 +72,7 @@ while True:
 items = json.loads(subprocess.check_output(['/usr/local/bin/pm2', 'jlist']))
 app = next(item for item in items if item['name'] == process)
 print(json.dumps({'files_verified': copied, 'pm2': process, 'status': app['pm2_env']['status'],
-                 'pid': app['pid'], 'web': url, 'backup': str(backup)}, ensure_ascii=False))
+                 'pid': app['pid'], 'web': url, 'backup': str(backup), 'source_revision': revision}, ensure_ascii=False))
 '''
 
 
