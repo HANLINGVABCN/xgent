@@ -95,10 +95,12 @@ def test_drag_scales_the_whole_page_remembers_each_card_and_can_restore_auto(ful
         logical=frame.locator('html').evaluate('()=>[innerWidth,innerHeight]')
         handle=first.get_by_role('button',name='拖拽等比例调整页面大小',exact=True)
         cardbox=first.bounding_box();handlebox=handle.bounding_box()
-        assert handlebox['x']>=cardbox['x']+cardbox['width']
+        assert abs(handlebox['x']-cardbox['x']-cardbox['width'])<1
+        assert handlebox['height']>handlebox['width']*2 and handle.locator('svg').count()==0
+        assert handle.locator('.visual-page-resize-grip').is_visible()
         assert abs(handlebox['y']+handlebox['height']/2-cardbox['y']-cardbox['height']/2)<2
         def drag(dx,dy):
-            box=handle.bounding_box();x=box['x']+12;y=box['y']+12
+            box=handle.bounding_box();x=box['x']+box['width']/2;y=box['y']+box['height']/2
             if width==390:
                 client=context.new_cdp_session(page)
                 client.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[{'x':x,'y':y}]})

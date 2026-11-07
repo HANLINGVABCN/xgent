@@ -133,7 +133,8 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   if(!skeleton.children.length)skeleton.innerHTML='<span></span><span></span><span></span>';
   const sourceView=document.createElement('pre');sourceView.className='visual-page-source';sourceView.dataset.enhanced='1';sourceView.hidden=true;const code=document.createElement('code'),sourceText=document.createTextNode('');code.append(sourceText);sourceView.append(code);
   let frame=document.createElement('iframe');frame.className='visual-page-frame';frame.setAttribute('sandbox','allow-scripts');frame.referrerPolicy='no-referrer';
-  const resize=document.createElement('button');resize.type='button';resize.className='visual-page-resize';resize.title='拖拽等比例调整大小，双击恢复自动大小';resize.setAttribute('aria-label','拖拽等比例调整页面大小');resize.innerHTML=icon('M5 19 19 5M5 13v6h6M13 5h6v6');
+  const resize=document.createElement('button');resize.type='button';resize.className='visual-page-resize';resize.title='拖拽等比例调整大小，双击恢复自动大小';resize.setAttribute('aria-label','拖拽等比例调整页面大小');
+  const grip=document.createElement('span');grip.className='visual-page-resize-grip';grip.setAttribute('aria-hidden','true');resize.append(grip);
   const resizeBar=document.createElement('div');resizeBar.className='visual-page-resize-bar';resizeBar.append(resize);
   viewport.replaceChildren(frame,skeleton,sourceView);card.replaceChildren(bar,viewport,resizeBar);if(!pending)mount.replaceChildren(card);
   let controller,token='',revision=0,expanded=false,previousFocus,sourceMode=false;
@@ -164,7 +165,7 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   function applyLayout(){
     layoutQueued=false;if(destroyed||!card.isConnected)return;
     const availableWidth=Math.max(1,host.clientWidth||mount.clientWidth||320);
-    const sideSpace=sourceMode||expanded?0:38;
+    const sideSpace=sourceMode||expanded?0:22;
     const readingHeight=area?.clientHeight||innerHeight;
     const maxHeight=Math.max(96,Math.min(440,readingHeight*.65));
     syncSizeKey();
