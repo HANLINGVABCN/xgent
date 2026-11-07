@@ -1,5 +1,5 @@
 /* Conversation navigation owns its layout; the runtime retains all existing state. */
-#wb-nav { display:flex; flex-direction:column; min-width:0; width:var(--sidebar); height:100dvh; padding:19px 13px 12px; overflow:hidden; border-right:1px solid var(--line); background:var(--sidebar-bg); }
+#wb-nav { display:flex; flex-direction:column; min-width:0; width:var(--sidebar); height:var(--app-viewport-height,100dvh); padding:19px 13px 12px; overflow:hidden; border-right:1px solid var(--line); background:var(--sidebar-bg); }
 .conv-brand-row { display:flex; align-items:center; justify-content:space-between; flex-shrink:0; min-height:36px; margin:0 6px 14px; }
 .wb-brand { display:flex; align-items:center; gap:10px; min-width:0; max-width:100%; border-radius:8px; color:var(--text); text-decoration:none; }
 .wb-mark { display:flex; width:32px; height:32px; flex-shrink:0; border-radius:9px; overflow:hidden; }

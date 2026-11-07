@@ -20,10 +20,9 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
   const code=node('pre','execution-pre');code.dataset.enhanced='1';input.append(inputHead,code);
   bindBodyFold(code,'命令',()=>{inputOpen=false;drawPanels();});
   const error=node('div','command-error');error.hidden=true;
-  const controls=node('div','command-live-controls');
   const output=node('section','command-output-section');output.hidden=true;
   const outputHead=node('div','command-output-head');const fold=button('',()=>setOutput(!open),'command-output-toggle');fold.innerHTML=icon('chev')+'<span>输出</span>';fold.setAttribute('aria-expanded','true');
-  outputHead.append(fold);const outputBody=node('div','command-output-body');output.append(outputHead,outputBody);bq.replaceChildren(head,controls,input,error,output);
+  outputHead.append(fold);const outputBody=node('div','command-output-body');output.append(outputHead,outputBody);bq.replaceChildren(head,input,error,output);
   function drawPanels(){
     const expanded=bq.classList.contains('expanded');input.hidden=!expanded;output.hidden=!expanded;code.hidden=!inputOpen;outputBody.hidden=!open;
     toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-label',(expanded?'收起':'展开')+'命令与输出');
@@ -115,10 +114,10 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
       const url=URL.createObjectURL(new Blob(parts,{type:'text/plain;charset=utf-8'}));const a=node('a');a.href=url;a.download='命令输出.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     }catch(e){toast('下载失败：'+e.message,true);}
   }
-  bq._commandUI={update,updateSource,controls,restore:drawPanels,destroy:()=>{clearTimeout(foldTimer);cancelRead();}};update(null);
+  bq._commandUI={update,updateSource,restore:drawPanels,destroy:()=>{clearTimeout(foldTimer);cancelRead();}};update(null);
 }
 
-export function installCommandResults(log){
+export function installCommandResults(log,{placeButtons}={}){
   const results=new Map();
   function reconcile(){
     for(const [entry,result] of results){
@@ -128,16 +127,16 @@ export function installCommandResults(log){
       const target=owner?.querySelector('[data-command-key="'+CSS.escape(result.key)+'"]');
       const attached=!!target?._commandUI;entry.row.classList.toggle('command-result-attached',attached);
       (attached?target:entry.body.querySelector('[data-command-key]'))?._commandUI?.update(result);
-      // Move the original bound controls, retaining their run/phase identity.
-      // A hidden result row must never hide its stop button or other actions.
-      if(entry.btns){const host=attached?target._commandUI.controls:entry.bubble;if(entry.btns.parentNode!==host)host.append(entry.btns);}
+      // Keep the bound controls below their reply's footer in every phase.
+      // Never mount them inside the command body or hide them with its result.
+      if(entry.btns){const host=attached?owner._chatEntry:entry;placeButtons?.(entry,host||entry);}
     }
   }
   return {sync(entry,frame){updateCommandCards(entry,frame);const value=frame.command_result||frame.web_display?.command_result;if(value){entry.commandResult=value;results.set(entry,value);}reconcile();},
     remove(entry){
       if(results.has(entry)&&entry.btns?.parentNode!==entry.bubble)entry.btns?.remove();
       results.delete(entry);
-      for(const source of results.keys())if(source.btns&&entry?.body?.contains(source.btns))source.bubble.append(source.btns);
+      for(const source of results.keys())if(source.btns&&source.buttonOwner===entry){placeButtons?.(source,source);source.row.classList.remove('command-result-attached');}
       entry?.body?.querySelectorAll('[data-command-key]').forEach(bq=>bq._commandUI?.destroy());
     },reconcile};
 }

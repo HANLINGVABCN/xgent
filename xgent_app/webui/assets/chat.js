@@ -6,6 +6,7 @@ import {initializeTheme} from './theme.js';
 import {preventAutofill} from './input-policy.js';
 import {syncVisualPage,syncReplyPages} from './visual-pages.js';
 import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './command-output.js';
+import {installViewportFit} from './viewport.js';
 (function () {
   "use strict";
 
@@ -17,7 +18,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
   var IS_TOUCH = !!(window.matchMedia && window.matchMedia("(hover: none) and (pointer: coarse)").matches);
 
   var log = document.getElementById("log");
-  const commandResults=installCommandResults(log);
+  const commandResults=installCommandResults(log,{placeButtons:placeReplyButtons});
   var input = document.getElementById("input");
   const composerResize=document.getElementById('composer-resize'),composerCard=input.closest('.composer-card');
   let editorHeight=null,editorDrag=null,lastEditorText=null;
@@ -47,6 +48,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     else if(event.key==='Home'){event.preventDefault();resetEditorHeight();}
   });
   window.addEventListener('resize',()=>updateInputHeight(true));window.visualViewport?.addEventListener('resize',()=>updateInputHeight(true));
+  installViewportFit({resizeEditor:()=>updateInputHeight(true)});
   var initialConversationParams = new URLSearchParams(location.hash.split('?')[1] || '');
   var selectedConversationId = initialConversationParams.has('message') ? null : initialConversationParams.get('conversation');
   const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun,
@@ -690,7 +692,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
       entry.footerMeta=document.createElement('div');entry.footerMeta.className='footer-meta';entry.footer.append(entry.footerMeta);
       entry.actions=entry.bubble.querySelector('.msg-actions');
       if(entry.actions)entry.footer.append(entry.actions);
-      entry.bubble.insertBefore(entry.footer,entry.btns||null);
+      entry.bubble.insertBefore(entry.footer,entry.btns?.parentNode===entry.bubble?entry.btns:null);
     }
     const huds=entry.body.querySelectorAll('.token-hud');
     if(huds.length){entry.footerMeta.querySelectorAll('.token-hud').forEach(node=>node.remove());huds.forEach(node=>entry.footerMeta.append(node));}
@@ -901,6 +903,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     if(role==='ai'){entry.replyTime=document.createElement('span');entry.replyTime.className='reply-timestamp';}
     applyAiGeneration(entry, timestamp, aiGeneration);
     syncMessageChrome(entry);
+    placeReplyButtons(entry);
     if (messageId != null) byMessageId[messageId] = entry;
     else if (!renderTarget && role === "user") row._optimisticEntry = entry;
     if (!renderTarget && (role === "ai" || role === "cmd" || role === "sys")) lastStreamEntry = entry;
@@ -1260,6 +1263,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
         const stopAction=/^act_stop_generation(?::([^:]+)(?::([^:]+))?)?$/.exec(String(btn.callback_action||btn.callback_data||''));
         const stopLabel='❌ 停止回答';
         b.textContent = stopAction ? stopLabel : btn.text;
+        if(stopAction){b.dataset.stopGeneration='1';b.dataset.stopRun=stopAction[1]||'';b.dataset.stopPhase=stopAction[2]||'';}
         b.disabled = !!btn.unavailable;
         if (btn.unavailable) b.title = "菜单已失效，请重新打开";
         b.addEventListener("click", function () {
@@ -1292,6 +1296,19 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     return rows?.map(row=>row.filter(button=>!String(button.callback_action||button.callback_data||'').startsWith('present_')&&!['用量详情','收起用量详情','完整输出'].includes(button.text))).filter(row=>row.length);
   }
 
+  function placeReplyButtons(entry,owner=entry){
+    if(!entry?.btns||!owner?.bubble)return;
+    entry.buttonOwner=owner;
+    const isRunControl=!!entry.btns.querySelector('[data-stop-generation]');
+    let host=owner.bubble;
+    if(isRunControl){
+      if(!owner.runControls){owner.runControls=document.createElement('div');owner.runControls.className='reply-run-controls';}
+      host=owner.runControls;
+      if(host.parentNode!==owner.bubble||host!==owner.bubble.lastElementChild)owner.bubble.append(host);
+    }
+    if(entry.btns.parentNode!==host)host.append(entry.btns);
+  }
+
   function setButtons(entry, markup, messageId) {
     if(entry.askState)return;
     markup=platformPresentationButtons(markup);
@@ -1299,7 +1316,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     entry.btns = null;
     if (markup && markup.length) {
       entry.btns = renderButtons(markup, messageId, entry.ui);
-      if (entry.btns && entry.bubble) entry.bubble.appendChild(entry.btns);
+      placeReplyButtons(entry);
     }
     commandResults.reconcile();
   }

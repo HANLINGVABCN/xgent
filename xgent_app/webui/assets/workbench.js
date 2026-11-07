@@ -363,7 +363,6 @@ const resize=$('wb-resizer');let resizing=false;resize.onpointerdown=e=>{resizin
 new MutationObserver(()=>document.body.classList.toggle('wb-terminal-open',$('terminal-modal').classList.contains('open'))).observe($('terminal-modal'),{attributes:true,attributeFilter:['class']});
 // Composer measurement also handles software keyboards and multiline drafts.
 new ResizeObserver(()=>document.documentElement.style.setProperty('--footer-height',($('composer').parentElement.offsetHeight||118)+'px')).observe($('composer').parentElement);
-window.visualViewport?.addEventListener('resize',()=>{const keyboard=window.innerHeight-window.visualViewport.height>140;document.body.classList.toggle('wb-keyboard',keyboard);$('wb-shell').style.height=keyboard?window.visualViewport.height+'px':'';});
 let started=false;async function start(){if(started)return;const epoch=state.authEpoch;started=true;try{await refreshBootstrap();if(epoch!==state.authEpoch)return;state.authenticated=true;await route();}catch(e){if(epoch!==state.authEpoch)return;started=false;if(e.status!==401&&e.name!=='AbortError')$('wb-history-state').textContent='设置读取失败：'+e.message;}}
 window.addEventListener('xgent-authenticated',start);
 window.addEventListener('xgent-auth-expired',()=>{

@@ -644,6 +644,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         allowed.update({"design-system.css", "themes.css", "theme-presets.js", "theme-settings.js", "ui.js", "input-policy.js", "visual-pages.js", "visual-pages.css", "navigation.js", "settings-archive.js", "settings-updates.js", "workspace-shell.js", "theme.js", "chat-view.js", "workbench-tasks.js", "workbench-files.js", "workbench-models.js"})
         name = path.removeprefix("/assets/")
         allowed.add('command-output.js')
+        allowed.add('viewport.js')
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
             return

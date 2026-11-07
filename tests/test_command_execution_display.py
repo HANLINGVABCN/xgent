@@ -90,6 +90,7 @@ async def main():
                                 ai_stop=page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True)
                                 await ai_stop.wait_for()
                                 assert await ai_stop.is_visible()
+                                assert await ai_stop.evaluate('button=>button.closest(".reply-run-controls")===button.closest(".bubble").lastElementChild')
                                 assert await page.locator('.bubble.ai').get_by_role('button',name='打断',exact=True).count()==0
                                 release_generation.set()
                                 async def process_started():
@@ -99,6 +100,7 @@ async def main():
                                 await page.locator('.bubble.ai .command-with-output[data-state="running"]').wait_for()
                                 interrupt=page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True)
                                 assert await interrupt.is_visible()
+                                assert await interrupt.evaluate('button=>{const bubble=button.closest(".bubble"),footer=bubble.querySelector(".message-footer");return button.closest(".reply-run-controls")===bubble.lastElementChild&&button.getBoundingClientRect().top>=footer.getBoundingClientRect().bottom;}')
                                 assert 'cache 0' in await page.locator('.bubble.ai').inner_text()
                                 assert not task.done() and not done.exists()
                                 assert len(spawned)==1 and spawned[0].returncode is None
@@ -109,6 +111,7 @@ async def main():
                                 await page.locator('.bubble.ai .command-with-output[data-state="running"]').wait_for()
                                 assert await command_output.count()==1
                                 assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).is_visible()
+                                assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).evaluate('button=>button.closest(".reply-run-controls")===button.closest(".bubble").lastElementChild')
                                 await command_output.evaluate('(node)=>window.commandCard=node')
                                 if not interrupt_command:
                                     await command_output.get_by_role('button',name='展开命令与输出',exact=True).click()
