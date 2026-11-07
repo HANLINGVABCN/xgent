@@ -232,12 +232,14 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     next.querySelectorAll('blockquote[expandable]').forEach(function(block){
       var key=block.getAttribute('data-raw'),path=block.getAttribute('data-output-path');
       var text=block.querySelector('pre')?.textContent||'';
-      var index=oldBlocks.findIndex(old=>old.getAttribute('data-compact')===block.getAttribute('data-compact') &&
+      var index=oldBlocks.findIndex(old=>block.dataset.commandKey?
+        old.dataset.commandKey===block.dataset.commandKey:
+        old.getAttribute('data-compact')===block.getAttribute('data-compact') &&
         (key ? old.getAttribute('data-raw')===key : old.getAttribute('data-output-path')===path && old._pbText===text));
       if(index>=0){
         const old=oldBlocks.splice(index,1)[0];
         const same=['data-state','data-operation-details','data-protocol'].every(key=>old.getAttribute(key)===block.getAttribute(key));
-        if(old.dataset.commandKey&&old.dataset.commandKey===block.dataset.commandKey){old.dataset.state=block.dataset.state;block.replaceWith(old);old._commandUI?.update(null);}
+        if(old.dataset.commandKey&&old.dataset.commandKey===block.dataset.commandKey){old.dataset.state=block.dataset.state;block.replaceWith(old);old._commandUI?.updateSource(text,key);}
         else if(same)block.replaceWith(old);else block.classList.toggle('expanded',old.classList.contains('expanded'));
       }
     });
@@ -1333,6 +1335,15 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     if(finished&&wasRunning){body.hidden=true;head.setAttribute('aria-expanded','false');}
   }
 
+  function ownsTransportAlias(entry,frame){
+    if(!entry)return false;
+    const cid=entry.row.dataset.presentationConversationId;
+    if(cid&&frame.conversation_id&&cid!==frame.conversation_id)return false;
+    if(entry.durable)return frame.record_id!=null&&entry.row.dataset.recordId===String(frame.record_id);
+    if(entry.ui)return entry.ui.id===frame.ui_message_id;
+    return !entry.row.dataset.runId||!frame.run_id||entry.row.dataset.runId===frame.run_id;
+  }
+
   function putTextFrame(role, frame) {
     var id = frame.ui_message_id ? "ui:" + frame.ui_message_id :
       (frame.media_group_id || (frame.record_id != null ? "history:" + frame.record_id :
@@ -1345,13 +1356,14 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
       }
     }
     if(!entry){
-      entry=(frame.replace_message_ids||[]).map(previousId=>byMessageId[previousId]).find(Boolean);
+      entry=(frame.replace_message_ids||[]).map(previousId=>byMessageId[previousId]).find(candidate=>ownsTransportAlias(candidate,frame));
       if(entry&&id!=null)byMessageId[id]=entry;
     }
     // An already saved reply must not regress to a delayed transport fragment.
     if(entry?.durable && frame.record_id==null && !frame.ui_message_id)return entry;
     (frame.replace_message_ids || []).forEach(function (previousId) {
-      if (byMessageId[previousId] !== entry) removeEntry(byMessageId[previousId]);
+      const duplicate=byMessageId[previousId];
+      if (duplicate!==entry&&ownsTransportAlias(duplicate,frame))removeEntry(duplicate);
     });
     if (!entry && frame.type === "edit" && id == null) entry = lastStreamEntry;
     if((frame.msg_type??entry?.messageType)==='runtime_error'&&typeof frame.web_display?.plain_text!=='string'){
@@ -1430,7 +1442,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     // Adopt the existing live bubble rather than throw away expanded blocks and
     // selections merely to replace a transport ID with the durable record ID.
     if(!existing){
-      existing=aliases.map(mid=>byMessageId[mid]).find(Boolean);
+      existing=aliases.map(mid=>byMessageId[mid]).find(candidate=>ownsTransportAlias(candidate,{...message,record_id:message.record_id??message.id}));
       if(existing)byMessageId[id]=existing;
     }
     if(!existing&&role==='user'){
@@ -2316,7 +2328,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
         if(m.ui_message_id&&uiDeleted[m.ui_message_id])return;
         const entry=putHistoryFrame(m,data.live?.epoch);
         if(m.ui_message_id)uiRevisions[m.ui_message_id]=m.revision;
-        retained.add(entry);if(entry.row.parentNode!==log||(!entry.visualPage&&!entry.visualPages?.size))log.appendChild(entry.row);(entry.mediaEntries||[]).forEach(child=>log.appendChild(child.row));
+        retained.add(entry);if(entry.row.parentNode!==log)log.appendChild(entry.row);(entry.mediaEntries||[]).forEach(child=>log.appendChild(child.row));
       });
       const live=data.live;
       if(live&&Number.isSafeInteger(live.cursor)&&live.epoch){
@@ -2344,7 +2356,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
       });
       const retainedRows=new Set();retained.forEach(entry=>{retainedRows.add(entry.row);(entry.mediaEntries||[]).forEach(child=>retainedRows.add(child.row));});
       Array.from(log.children).forEach(row=>{if(!retainedRows.has(row))row.remove();});
-      if(historyAnchor||preserveReading)sortHistoryRows();
+      sortHistoryRows();
       if(preserveReading){
         if(edgeCursor(false)!==oldFirst)historyCursor=data.before?(data.before.has_more?data.before.cursor:null):data.next_cursor||null;
         if(edgeCursor(true)!==oldLast){historyForwardCursor=data.after?.cursor||data.last_cursor||edgeCursor(true);newerAvailable=!!data.after?.has_more;}

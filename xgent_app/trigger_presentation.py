@@ -20,6 +20,9 @@ def build_trigger_result_display(notice: str, run: dict) -> dict:
     }
     escaped_notice = html.escape(notice, quote=False)
     web_display = build_operation_display(operation, 'folded')
+    # Scheduled receipts have no chat command owner or command-result record.
+    # Keep their notice and output together rather than projecting an empty card.
+    web_display.pop('command_result',None)
     web_display['segments'].insert(0, {
         'kind': 'html', 'text': escaped_notice.replace('\n', '<br>'),
     })

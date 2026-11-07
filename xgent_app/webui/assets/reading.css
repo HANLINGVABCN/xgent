@@ -116,6 +116,10 @@
 .command-error,.command-output-warning { font-size:var(--font-caption); color:var(--danger); padding:4px 7px; overflow-wrap:anywhere; }
 .command-result-details { padding:7px 10px; font-size:var(--font-caption); color:var(--code-fg); }
 .command-result-details summary { cursor:pointer; }
+.command-output-loading { display:flex; align-items:center; gap:8px; min-height:52px; padding:12px; color:var(--code-fg); font:var(--font-caption)/1.5 var(--font); }
+.command-output-spinner { flex:0 0 14px; width:14px; height:14px; border:2px solid color-mix(in srgb,var(--code-fg) 25%,transparent); border-top-color:var(--code-fg); border-radius:50%; animation:command-output-spin .8s linear infinite; }
+@keyframes command-output-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .command-output-spinner { animation:none; } }
 .bubble .command-result-details pre.command-result-detail { display:block!important; max-height:180px; margin:5px 0; padding:3px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
 .execution-details { padding:0 12px 9px; color:#9db3a3; font:var(--font-caption)/1.545455 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; }
 

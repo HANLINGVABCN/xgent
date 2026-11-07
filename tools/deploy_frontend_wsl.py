@@ -17,6 +17,7 @@ if str(target) != '/home/hanling/xgent-telegram-test':
 paths = ['AGENTS.md', 'README.md', 'docs', 'xgent_app/webui', 'xgent_app/web_server.py', 'xgent_app/workbench.py',
          'xgent_app/web_auth.py',
          'xgent_app/command_output.py', 'xgent_app/presentation.py',
+         'xgent_app/trigger_presentation.py',
          'xgent_app/web_access.py', 'xgent_app/sections/callbacks.py', 'xgent_app/sections/ui.py', 'xgent_app/data_parts.py',
          'xgent_app/visual_pages.py', 'xgent_app/tool_calls.py',
          'xgent_app/generated_media.py', 'xgent_app/reply_presentation.py', 'xgent_app/telegram_rich.py', 'xgent_app/web_display.py',

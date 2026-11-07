@@ -1794,15 +1794,19 @@ async def _send_agent_iteration_limit_notice(
         await safe_send_message(context, chat_id, message)
 
 
-async def _record_user_stopped_reply(db, cid, chat_id, partial_text: str, *, provider=None, model=None) -> str:
+async def _record_user_stopped_reply(db, cid, chat_id, partial_text: str, *, provider=None, model=None, reply=None, context=None) -> str:
     """用户在接收 AI 回复期间手动停止：把已生成的部分文本 + 停止标记写入
     全局记录与模型可见历史，返回写入内容。与正常回复保存路径一致。"""
     marker = "⏹️ 当前回复已被用户手动停止"
     partial = (partial_text or "").strip()
     content = f"{partial}\n\n{marker}" if partial else marker
-    await GlobalRecorder.record_ai_reply(content, chat_id, provider=provider, model=model,
-        metadata={'stopped_reply': {'partial': partial}})
+    row_id=await GlobalRecorder.record_ai_reply(content, chat_id, provider=provider, model=model,
+        metadata={**live_reply_metadata(reply), 'stopped_reply': {'partial': partial}})
     await db.add_chat_message(cid, 'assistant', content)
+    if reply is not None:
+        reply.record_id=row_id
+        reply.recorded=row_id is not None
+    if context is not None:await publish_saved_reply(context,row_id,reply)
     return content
 
 
@@ -2052,7 +2056,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                 await _record_user_stopped_reply(
                     db, cid, update.effective_chat.id,
                     stop_partial[0] if stop_partial else "",
-                    provider=prov_name, model=model,
+                    provider=prov_name, model=model, reply=generated_reply, context=context,
                 )
             return
         if trigger_status_msg is not None and trigger_status_iteration is not None:
@@ -2864,7 +2868,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         await _record_user_stopped_reply(
                             db, cid, update.effective_chat.id,
                             stop_partial[0] if stop_partial else "",
-                            provider=prov_name, model=model,
+                            provider=prov_name, model=model, reply=generated_reply, context=context,
                         )
                     break
                 if pending_round_status_msg is not None and pending_round_iteration is not None:

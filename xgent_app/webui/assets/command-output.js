@@ -6,7 +6,7 @@ function button(label,fn,cls='command-text-button'){const b=node('button',cls,la
 const copy=value=>navigator.clipboard.writeText(value);
 
 export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
-  const raw=bq.getAttribute('data-raw')||'';let result=null,page=null,request=null,version=0,previous=[],open=false,inputOpen=true,foldTimer=null;
+  let raw=bq.getAttribute('data-raw')||'',result=null,page=null,request=null,version=0,previous=[],open=false,inputOpen=true,foldTimer=null;
   bq.classList.add('pb','execution-block','command-with-output');bq._pbText=text;bq.dataset.webFold='1';
   const head=node('div','command-card-head'),toggle=button('',()=>setExpanded(!bq.classList.contains('expanded')),'pb-head pb-toggle execution-row command-main-toggle');
   const status=node('span','execution-label'),preview=node('span','execution-preview');
@@ -33,6 +33,15 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
     if(expanded&&inputOpen&&code.textContent!==text)code.textContent=text;
   }
   function cancelRead(){request?.abort();request=null;version++;}
+  function canRead(){return result?.result_record_id!=null&&!['generating','pending','running'].includes(bq.dataset.state);}
+  function showLoading(waiting){
+    let loading=outputBody.querySelector('.command-output-loading');
+    if(!loading){loading=node('div','command-output-loading');loading.setAttribute('role','status');
+      const spinner=node('span','command-output-spinner');spinner.setAttribute('aria-hidden','true');loading.append(spinner,node('span'));outputBody.replaceChildren(loading);}
+    loading.lastChild.textContent=waiting?bq.dataset.state==='running'?'命令执行中，等待输出…':'等待命令输出…':'正在读取输出…';
+    outputBody.setAttribute('aria-busy','true');
+  }
+  function updateSource(nextText,nextRaw){text=nextText;raw=nextRaw||'';bq.setAttribute('data-raw',raw);bq._pbText=text;update(null);}
   function bindBodyFold(pre,label,collapse){
     pre.title='点击收起'+label+'，拖动可选择文字';
     pre.addEventListener('click',event=>{
@@ -54,9 +63,9 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
     status.textContent=(bq.dataset.protocol||'命令')+' '+(states[state]||state)+(Number.isFinite(result?.elapsed_seconds)?' · '+result.elapsed_seconds.toFixed(1)+'s':'');
     preview.textContent=(bq.dataset.preview?bq.dataset.preview+' · ':'')+(text.split('\n').find(line=>line.trim())||'命令');
     error.textContent=result?.error||'';error.hidden=!error.textContent;
-    out.disabled=state==='generating';
     out.title=result?.result_record_id?'按需读取命令输出':'输出尚未保存，点击查看执行状态';
-    if(changed){page=null;previous=[];if(open&&bq.classList.contains('expanded'))load(0);}drawPanels();
+    if(changed){cancelRead();page=null;previous=[];}
+    if(open&&bq.classList.contains('expanded')&&!page&&!request)load(0);drawPanels();
   }
   function setOutput(value){
     open=value;
@@ -65,6 +74,7 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
   }
   function drawPage(){
     if(!page)return;
+    outputBody.setAttribute('aria-busy','false');
     const tools=node('div','command-output-tools'),label=node('span','output-page-label',`${page.offset}–${page.next_offset} / ${page.size} 字节`),actions=node('div','command-page-actions');
     const prev=button('上一页',()=>{const next=previous.pop();load(next);});prev.disabled=!previous.length;
     const next=button('下一页',()=>{previous.push(page.offset);load(page.next_offset);});next.disabled=page.eof;
@@ -86,13 +96,16 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
     outputBody.append(details);
   }
   async function load(offset){
-    request?.abort();request=new AbortController();const own=++version;const cid=bq.closest('[data-record-id]')?.dataset.presentationConversationId;
-    if(!result?.result_record_id){outputBody.replaceChildren(node('p','output-page-label','命令正在执行，输出保存后显示。'));return;}
-    outputBody.replaceChildren(node('p','output-page-label','正在读取输出…'));
+    if(!open||!bq.classList.contains('expanded'))return;
+    cancelRead();
+    if(!canRead()){showLoading(true);return;}
+    request=new AbortController();const own=++version;const cid=bq.closest('[data-record-id]')?.dataset.presentationConversationId;
+    showLoading(false);
     try{
       const data=await api('/api/workbench/command-output?record_id='+result.result_record_id+'&conversation_id='+encodeURIComponent(cid||'')+'&offset='+offset,{signal:request.signal});
       if(own!==version||!bq.isConnected||!open||!bq.classList.contains('expanded'))return;page=data;drawPage();
-    }catch(e){if(e.name!=='AbortError'&&own===version)outputBody.replaceChildren(node('p','command-error','读取输出失败：'+e.message),button('重试',()=>load(offset)));}
+    }catch(e){if(e.name!=='AbortError'&&own===version){outputBody.setAttribute('aria-busy','false');outputBody.replaceChildren(node('p','command-error','读取输出失败：'+e.message),button('重试',()=>load(offset)));}}
+    finally{if(own===version)request=null;}
   }
   async function download(){
     if(!result?.result_record_id)return;const cid=bq.closest('[data-record-id]')?.dataset.presentationConversationId;
@@ -102,7 +115,7 @@ export function enhanceCommandBlock(bq,text,{api,toast,saveFold,copyText=copy}){
       const url=URL.createObjectURL(new Blob(parts,{type:'text/plain;charset=utf-8'}));const a=node('a');a.href=url;a.download='命令输出.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     }catch(e){toast('下载失败：'+e.message,true);}
   }
-  bq._commandUI={update,controls,restore:drawPanels,destroy:()=>{clearTimeout(foldTimer);cancelRead();}};update(null);
+  bq._commandUI={update,updateSource,controls,restore:drawPanels,destroy:()=>{clearTimeout(foldTimer);cancelRead();}};update(null);
 }
 
 export function installCommandResults(log){

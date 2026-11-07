@@ -2,7 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock
 import pytest
 from tests.test_thinking_params import run_in_app
-from xgent_app.command_output import load_command_output,text_page
+from xgent_app.command_output import load_command_output,text_page,project_web_frame
 from xgent_app.output_archive import OutputArchiveError
 from xgent_app.message_policy import stamp_record_metadata
 
@@ -24,3 +24,10 @@ def test_output_record_is_checked_for_owner_withdrawal_and_page_size(tmp_path):
         with pytest.raises(OutputArchiveError):await load_command_output(db,'A',7,0,tmp_path)
     asyncio.run(exercise())
     assert text_page('',0)['eof']
+
+
+def test_scheduled_receipts_are_not_rewritten_as_chat_command_results():
+    # Older saved receipts may contain a descriptor inherited from their renderer.
+    receipt={'msg_type':'user_text','text':'后台任务结果',
+        'web_display':{'command_result':{'version':1,'kind':'run'},'segments':[{'kind':'html','text':'完整提醒'}]}}
+    assert project_web_frame(receipt) is receipt

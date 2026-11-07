@@ -78,7 +78,8 @@ async def main():
                         context=await browser.new_context(viewport={'width':width,'height':900},reduced_motion='reduce')
                         await context.route('**/*',lambda route:route.continue_() if route.request.url.startswith(base) else route.abort())
                         assert (await context.request.post(base+'/api/login',data={'password':'temporary-test-only'})).ok
-                        page=await context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
+                        page=await context.new_page();errors=[];loads=[];page.on('pageerror',lambda error:errors.append(str(error)))
+                        page.on('request',lambda request:loads.append(request.url) if '/command-output?' in request.url else None)
                         task=None
                         try:
                             await page.goto(base+'/#/chat?conversation=global_memory')
@@ -109,6 +110,11 @@ async def main():
                                 assert await command_output.count()==1
                                 assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).is_visible()
                                 await command_output.evaluate('(node)=>window.commandCard=node')
+                                if not interrupt_command:
+                                    await command_output.get_by_role('button',name='展开命令与输出',exact=True).click()
+                                    assert await command_output.locator('.command-output-head').is_visible() and not loads
+                                    await command_output.get_by_role('button',name='展开输出正文',exact=True).click()
+                                    assert await command_output.locator('.command-output-spinner').is_visible() and not loads
                                 await page.screenshot(path=str(Path(os.environ['COMMAND_TEST_SCREENSHOTS'])/f'command-running-{width}-{interrupt_command}.png'))
                                 if interrupt_command:
                                     await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).click()
@@ -122,7 +128,12 @@ async def main():
                                 assert await command_output.count()==1
                                 assert await page.evaluate('window.commandCard.isConnected && window.commandCard===document.querySelector(".bubble.ai .command-with-output")')
                                 assert await page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True).count()==0
-                                assert await page.locator('.output-page-text').count()==0
+                                if interrupt_command:
+                                    assert await page.locator('.output-page-text').count()==0 and not loads
+                                else:
+                                    await command_output.locator('.output-page-text').wait_for()
+                                    assert 'COMMAND_STARTED' in await command_output.locator('.output-page-text').inner_text()
+                                    assert len(loads)==1 and await command_output.locator('.command-output-spinner').count()==0
                                 rows=await h.db.get_display_history(0)
                                 output=next(row for row in rows if row['msg_type']=='agent_result')
                                 metadata=json.loads(output['metadata']) if isinstance(output['metadata'],str) else output['metadata']

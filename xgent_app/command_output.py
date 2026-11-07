@@ -35,6 +35,7 @@ def command_descriptor(operation,record_id=None):
 
 def project_web_frame(frame):
     """Never put output bodies in Web event queues or default history responses."""
+    if frame.get('msg_type')!='agent_result':return frame
     descriptor=frame.get('command_result') or (frame.get('web_display') or {}).get('command_result')
     if not descriptor or descriptor.get('version')!=1:return frame
     from .web_display import web_block_html
