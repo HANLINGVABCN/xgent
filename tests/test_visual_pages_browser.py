@@ -44,7 +44,7 @@ def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_se
         assert iframe.content_frame.locator('body').evaluate('()=>window.hostBlocked')
         assert iframe.content_frame.locator('body').evaluate('()=>window.networkBlocked')
         assert page.locator('body').get_attribute('data-leaked') is None
-        assert iframe.content_frame.locator('html').evaluate('node=>getComputedStyle(node).zoom')=='0.9'
+        assert iframe.content_frame.locator('html').evaluate('node=>getComputedStyle(node).zoom')=='0.8'
         page.get_by_role('button',name='源码',exact=True).click()
         assert page.locator('.visual-page-source').is_visible()
         assert page.locator('.visual-page-source code').text_content()==SOURCE+'\n'
@@ -121,7 +121,7 @@ def test_svg_and_html_render_during_writing_and_finish_independently(full_output
         emit(first)
         card=page.locator('[data-visual-index="0"] .visual-page');frame=card.locator('.visual-page-frame').content_frame
         frame.locator('#bg').wait_for();assert frame.locator('#bg').get_attribute('fill')=='#7165cf'
-        assert frame.locator('html').evaluate('node=>getComputedStyle(node).zoom')=='0.9'
+        assert frame.locator('html').evaluate('node=>getComputedStyle(node).zoom')=='0.8'
         frame.locator('#bg').evaluate('node=>window.keptNode=node')
         second=first+'<circle id="dot" cx="60" cy="60" r="20" fill="#ffffff"/>'
         emit(second);frame.locator('#dot').wait_for()

@@ -2,7 +2,11 @@
 const instances=new Set();
 const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const base='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+esc(csp)+'"><style>html,body{margin:0;min-height:0}html{zoom:.9!important}body{width:90%!important;margin-left:auto!important;margin-right:auto!important;font-family:system-ui,sans-serif}svg{max-width:100%}body>svg{display:block;width:100%;height:auto}</style>';
+const base='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+esc(csp)+'"><style>html,body{margin:0;min-height:0}html{zoom:.8!important}body{width:80%!important;margin-left:auto!important;margin-right:auto!important;font-family:system-ui,sans-serif}svg{max-width:100%}body>svg{display:block;width:100%;height:auto}</style>';
+const icon=path=>'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+path+'"/></svg>';
+const codeIcon=icon('M8 6 2 12l6 6m8-12 6 6-6 6');
+const expandIcon=icon('M5 19 19 5M5 13v6h6M13 5h6v6');
+const collapseIcon=icon('m5 19 6-6M5 13h6v6m8-14-6 6M13 5v6h6');
 function requested(recordId,index=0){const params=new URLSearchParams(location.hash.split('?')[1]||'');return params.get('visual')===String(recordId)&&params.get('visual_full')==='1'&&Number(params.get('visual_index')||0)===index;}
 
 // Runs in the opaque-origin frame. Draft updates keep existing SVG nodes and
@@ -43,8 +47,8 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   const card=pending||document.createElement('section');card.className='visual-page visual-page-loading';card.setAttribute('aria-busy','true');
   const bar=document.createElement('header'),title=document.createElement('strong'),controls=document.createElement('div');
   const identity=document.createElement('span');identity.className='visual-page-identity';identity.append(title);bar.append(identity,controls);
-  const expand=document.createElement('button');expand.type='button';expand.textContent='展开页面';expand.setAttribute('aria-expanded','false');
-  const sourceToggle=document.createElement('button');sourceToggle.type='button';sourceToggle.textContent='源码';sourceToggle.setAttribute('aria-pressed','false');
+  const expand=document.createElement('button');expand.type='button';expand.className='visual-page-icon';expand.innerHTML=expandIcon;expand.title='展开页面';expand.setAttribute('aria-label','展开页面');expand.setAttribute('aria-expanded','false');
+  const sourceToggle=document.createElement('button');sourceToggle.type='button';sourceToggle.className='visual-page-icon';sourceToggle.innerHTML=codeIcon;sourceToggle.title='源码';sourceToggle.setAttribute('aria-label','源码');sourceToggle.setAttribute('aria-pressed','false');
   const copy=document.createElement('button');copy.type='button';copy.textContent='复制';copy.hidden=true;
   const download=document.createElement('a');download.textContent='下载';download.download='';download.hidden=true;
   const retry=document.createElement('button');retry.type='button';retry.textContent='重新加载';retry.hidden=true;controls.append(sourceToggle,copy,download,retry,expand);
@@ -60,12 +64,12 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   let current,owner=recordId,source=null,complete=false,draftReady=false,draftStarted=false,timer,blobUrl,destroyed=false,renderedSource=null,downloadKey;
   function setSourceMode(value){
     sourceMode=value;sourceView.hidden=!value;viewport.querySelectorAll('iframe').forEach(node=>node.hidden=value);card.classList.toggle('visual-source-mode',value);
-    copy.hidden=download.hidden=!value;sourceToggle.textContent=value?'预览':'源码';sourceToggle.setAttribute('aria-pressed',String(value));
+    copy.hidden=download.hidden=!value;sourceToggle.title=value?'预览':'源码';sourceToggle.setAttribute('aria-label',sourceToggle.title);sourceToggle.setAttribute('aria-pressed',String(value));
     viewport.style.height=(value?Math.max(240,Math.min(600,pageHeight)):pageHeight)+'px';
   }
   function setExpanded(value){
     expanded=value;card.classList.toggle('visual-page-expanded',value);card.setAttribute('role',value?'dialog':'region');
-    card.setAttribute('aria-modal',String(value));expand.textContent=value?'关闭页面':'展开页面';expand.setAttribute('aria-expanded',String(value));
+    card.setAttribute('aria-modal',String(value));expand.innerHTML=value?collapseIcon:expandIcon;expand.title=value?'关闭页面':'展开页面';expand.setAttribute('aria-label',expand.title);expand.setAttribute('aria-expanded',String(value));
     if(value){previousFocus=document.activeElement;expand.focus({preventScroll:true});}
     else{previousFocus?.focus({preventScroll:true});if(requested(owner,current.index||0)){const url=new URL(location.href),params=new URLSearchParams(url.hash.split('?')[1]||'');params.delete('visual_full');url.hash='/chat?'+params;history.replaceState(null,'',url);}}
   }
