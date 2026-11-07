@@ -278,6 +278,15 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         # the reason without sending a new chat message or editing the old card.
         await query.answer(str(exc), show_alert=True, cache_time=0)
         return
+    if data.startswith('webban:'):
+        from xgent_app.web_access import WebAccess
+        access=globals().get('_web_access_control') or WebAccess(lambda:BotMemoryDB.get_instance())
+        await access.initialize()
+        await access.handle('unblock',{'incident':data.split(':',1)[1],'confirm':True})
+        await query.answer('已解除 IP 和设备封禁；再次访问仍需登录。')
+        await query.message.edit_reply_markup(reply_markup=None)
+        await GlobalRecorder.record_system_op('已解除网页陌生访问的 IP 和设备封禁')
+        return
     if data == 'act_stop_generation' or data.startswith('act_stop_generation:'):
         from xgent_app.stop_targets import active_target
         target = data.split(':', 2)

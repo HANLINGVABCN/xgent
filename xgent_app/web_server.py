@@ -177,9 +177,11 @@ class WebChatConfig:
         read_branding: Optional[Callable[[], Any]] = None,
         read_settings_revision: Optional[Callable[[], Any]] = None,
         session_secret: Optional[bytes] = None,
+        access_api: Optional[Callable[..., Any]] = None,
     ):
         self.accept_text = accept_text
         self.session_secret = session_secret
+        self.access_api = access_api
         self.security_api = security_api
         self.read_branding = read_branding
         # 轻量回调：只读外观 revision（一次 DB 读）。/api/config?since= 用它做
@@ -278,6 +280,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Connection', 'close')
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
+        self._access_cookie_headers()
         self.end_headers()
         with contextlib.suppress(ConnectionError):
             self.wfile.write(payload)
@@ -291,6 +294,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(payload)))
+        self._access_cookie_headers()
         self.send_header("X-Content-Type-Options", "nosniff")
         # WebApp 需要能被 Telegram 内嵌，所以不发 X-Frame-Options: DENY。
         self.end_headers()
@@ -343,7 +347,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return False
         try:
             key = self._session_signing_key() if getattr(getattr(self, 'config', None), 'security_api', None) is not None else self.server.session_key
-            return web_auth.verify_session_cookie(key, value)
+            if not web_auth.verify_session_cookie(key, value):return False
+            if getattr(getattr(self,'config',None),'access_api',None) is not None:
+                if not getattr(self,'_access_context',None):return False
+                parts=value.split('.')
+                if len(parts)==2:
+                    # Upgrade an existing valid cookie to a individually revocable session.
+                    result=self._access('migrate_session',{'token_hash':hashlib.sha256(value.encode()).hexdigest(),'key_version':hashlib.sha256(key).hexdigest()})
+                    if not result['id']:return False
+                    self._access_context['session_id']=result['id']
+                    self._pending_access_session=web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=result['id']),secure=web_auth.is_https_request(self._headers_dict()))
+                    return True
+                return self._access('session',{'id':parts[1],'key_version':hashlib.sha256(key).hexdigest()})['valid']
+            return True
         except TwoFactorError:
             return False
 
@@ -398,7 +414,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return hmac.new(key, ('web-2fa:' + version).encode(), hashlib.sha256).digest() if version else key
 
     def _login_cookie(self, expected=None):
-        return web_auth.build_set_cookie(web_auth.make_session_cookie_value(self._session_signing_key(expected)),
+        key=self._session_signing_key(expected);sid=''
+        if self.config.access_api is not None:
+            sid=self._access('create_session',{'key_version':hashlib.sha256(key).hexdigest()})['id']
+            self._access_context['session_id']=sid
+        return web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=sid),
                                          secure=web_auth.is_https_request(self._headers_dict()))
 
     def _handle_security(self, method, action='status'):
@@ -439,6 +459,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         extra_headers={'Retry-After': '1', 'Cache-Control': 'private, no-store'})
         return False
 
+    def _access(self,action,data=None):
+        return self._run_coro(self.config.access_api(action,{**(getattr(self,'_access_context',None) or {}),**(data or {})}))
+
+    def _access_cookie_headers(self):
+        value=getattr(self,'_pending_device_cookie',None)
+        if value:
+            self.send_header('Set-Cookie','xgent_web_device='+value+'; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax'+('; Secure' if web_auth.is_https_request(self._headers_dict()) else ''))
+            self._pending_device_cookie=None
+        value=getattr(self,'_pending_access_session',None)
+        if value:self.send_header('Set-Cookie',value);self._pending_access_session=None
+
+    def _prepare_access(self,path):
+        self._access_context=None;self._pending_device_cookie=None;self._pending_access_session=None
+        if self.config.access_api is None or not (path.startswith('/api/') or path in {'/','/terminal'}):return True
+        from .web_access import device_cookie
+        cookie=web_auth.parse_cookie_header(self.headers.get('Cookie',''))
+        device,new=device_cookie(self.config.session_secret,cookie.get('xgent_web_device',''))
+        self._pending_device_cookie=new
+        result=self._access('gate',{'peer':self.client_address[0],'device':device,
+            'headers':{name:self.headers.get(name,'') for name in ('CF-Connecting-IP','X-Real-IP')},'agent':self.headers.get('User-Agent','')})
+        self._access_context={'ip':result['ip'],'device':device,'agent':self.headers.get('User-Agent','')[:512],
+                              'session_id':cookie.get(web_auth.SESSION_COOKIE_NAME,'').split('.')[1] if cookie.get(web_auth.SESSION_COOKIE_NAME,'').count('.')==2 else ''}
+        self._access_gate=result
+        if result['blocked']:
+            self._send_json({'error':'此 IP 或设备已封禁，请联系管理员解除'},status=403);return False
+        return True
+
     def _require_same_origin(self) -> bool:
         """所有变更型请求都要过。理由见 web_auth.is_same_origin 的注释。"""
         if web_auth.is_same_origin(
@@ -468,6 +515,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path.startswith('/api/') and not self._require_service_ready():
                 return
+            if not self._prepare_access(path):return
             if path.startswith("/assets/"):
                 self._serve_workbench_asset(path)
             elif path.startswith("/api/workbench/"):
@@ -488,6 +536,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._handle_read_branding()
             elif path == '/api/security/2fa':
                 self._handle_security('GET')
+            elif path == '/api/security/access':
+                self._handle_access('GET','overview')
             elif path == '/api/queue':
                 self._handle_queue('list')
             elif path == '/api/queue/status':
@@ -526,6 +576,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path.startswith('/api/') and not self._require_service_ready():
                 return
+            if not self._prepare_access(path):return
             if not self._require_same_origin():
                 return
             if path.startswith("/api/workbench/"):
@@ -537,6 +588,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._handle_login()
             elif path.startswith('/api/security/2fa/'):
                 self._handle_security('POST', path[len('/api/security/2fa/'):])
+            elif path.startswith('/api/security/access/'):
+                self._handle_access('POST',path[len('/api/security/access/'):])
             elif path == "/api/logout":
                 self._handle_logout()
             elif path == "/api/chat":
@@ -585,7 +638,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     # --- 处理器 ---
 
     def _serve_workbench_asset(self, path: str) -> None:
-        allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "branding.js", "branding-settings.js", "branding.css", "logo.svg", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
+        allowed = {"access-security.js", "telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "branding.js", "branding-settings.js", "branding.css", "logo.svg", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
         allowed.update({"design-system.css", "themes.css", "theme-presets.js", "theme-settings.js", "ui.js", "input-policy.js", "visual-pages.js", "visual-pages.css", "navigation.js", "settings-archive.js", "settings-updates.js", "workspace-shell.js", "theme.js", "chat-view.js", "workbench-tasks.js", "workbench-files.js", "workbench-models.js"})
         name = path.removeprefix("/assets/")
         if name not in allowed:
@@ -781,7 +834,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _handle_login(self) -> None:
         ip = self._client_ip()
         limiter = self.server.limiter  # type: ignore[attr-defined]
-        if limiter.is_locked(ip):
+        if self.config.access_api is not None:
+            ip=self._access_context['ip'];wait=self._access_gate['wait']
+            if wait:
+                self._send_json({'error':f'连续认证失败，请 {wait} 秒后再试','retry_after':wait},status=429,extra_headers={'Retry-After':str(wait)});return
+        elif limiter.is_locked(ip):
             self._send_json(
                 {"error": f"尝试次数过多，请 {limiter.retry_after(ip)} 秒后再试"},
                 status=429,
@@ -800,6 +857,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 result = self._security('POST', 'login_finish', data, ip)
                 cookie = self._login_cookie(result.pop('_auth_version', None))
             except TwoFactorError as exc:
+                if self.config.access_api is not None and exc.status in {400,401}:
+                    self._access_login_failure();return
                 limiter.record_failure(ip)
                 self._send_json({'error': str(exc)}, status=exc.status, extra_headers={'Cache-Control': 'private, no-store'})
                 return
@@ -826,6 +885,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 authenticated = True
 
         if not authenticated:
+            if self.config.access_api is not None:
+                self._access_login_failure();return
             limiter.record_failure(ip)
             self._send_json({"error": "认证失败"}, status=401)
             return
@@ -849,7 +910,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send_json({"ok": True}, extra_headers={"Set-Cookie": cookie})
 
     def _handle_logout(self) -> None:
+        if self.config.access_api is not None:self._access('logout',{'id':self._access_context.get('session_id','')})
         self._send_json({"ok": True}, extra_headers={"Set-Cookie": web_auth.build_clear_cookie()})
+
+    def _access_login_failure(self):
+        result=self._access('failure')
+        if result['blocked']:self._send_json({'error':'连续认证失败，IP 和设备已封禁'},status=403)
+        elif result['wait']:self._send_json({'error':f'连续认证失败，请 {result["wait"]} 秒后再试','retry_after':result['wait']},status=429,extra_headers={'Retry-After':str(result['wait'])})
+        else:self._send_json({'error':'认证失败'},status=401)
+
+    def _handle_access(self,method,action):
+        if not self._require_auth():return
+        if self.config.access_api is None:
+            self._send_json({'error':'访问安全管理未启用'},status=503);return
+        data={} if method=='GET' else self._read_json()
+        if data is None:return
+        try:
+            result=self._access(action,{**data,'key_version':hashlib.sha256(self._session_signing_key()).hexdigest(),'session_id':self._access_context['session_id']})
+            self._send_json(result,extra_headers={'Cache-Control':'private, no-store'})
+        except ValueError as exc:self._send_json({'error':str(exc)},status=400)
 
     def _handle_liveness(self) -> None:
         """GET /healthz —— 不鉴权，只回 {"ok": true}。
@@ -1728,6 +1807,8 @@ class WebChatServer:
         # shell 命令的控制台，绝不能无密码监听。
         if not self.config.password_hash:
             raise RuntimeError("未设置访问密码，拒绝启动 Web 服务")
+        if self.config.access_api is not None and self.config.session_secret is None:
+            raise RuntimeError('访问安全管理需要实例登录签名密钥')
 
         transfer_directory = self.config.file_transfer_directory
         if transfer_directory is None:

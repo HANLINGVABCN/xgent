@@ -78,6 +78,7 @@ export async function settingsView({logout,boot,health,state,render,dialog,close
       f.onsubmit=e=>{e.preventDefault();submit(f,async d=>{if(d.password!==d.repeat)throw new Error('两次密码不一致');if(d.password.length<6)throw new Error('密码至少 6 位');await wb('password',{data:{password:d.password,confirm:d.confirm}});f.reset();state.dirty=false;sessionStorage.clear();f.append(message('已修改，正在撤销会话并重新登录…','success'));setTimeout(()=>location.reload(),1000);});};dialog('修改 Web 密码',f);
     }),button('退出当前登录',logout)));
     lazyCards('两步验证（2FA）',async()=>{const {twoFactorCard}=await managementModule('two-factor');return twoFactorCard({card,dialog,closeDialog,submit});});
+    lazyCards('访问安全与登录设备',async()=>{const {accessSecurityCards}=await managementModule('access-security');return accessSecurityCards({card,dialog,closeDialog,submit});});
   }
   if(active==='health'){
     lazyCards('版本与更新',async()=>{const {updateCard}=await managementModule('settings-updates');return updateCard({card,confirmAction});});

@@ -1077,6 +1077,43 @@ def build_model_selection_keyboard(provider_name: str, target: str, page: int = 
     )
 
 # --- ☆ 核心：授权用户校验与未授权用户通报系统 ☆ ---
+@without_ui_history
+async def notify_web_access_incident(incident):
+    """Follow the existing context-visible Telegram stranger notification route."""
+    from types import SimpleNamespace
+    from xgent_app.interaction import interaction
+    from xgent_app.presentation import presentation_turn,message_presentation
+    from xgent_app.web_bridge import MirrorBot
+    from xgent_app.telegram_records import bind_record
+    stamp=datetime.fromtimestamp(incident['created_at']).strftime('%Y-%m-%d %H:%M:%S')
+    raw=(f"🚨 访问控制通知：来自网页端的未授权请求 🚨\n时间: {stamp}\nIP: {incident['ip']}\n"
+         f"设备: {incident['device']}\n浏览器: {incident['agent']}\n连续认证失败: {incident['failures']} 次\nIP 和设备已封禁。")
+    report=(f"🚨 <b>访问控制通知：来自网页端的未授权请求</b> 🚨\n━━━━━━━━━━━━━━\n"
+            f"⏰ 时间：{stamp}\n🌐 IP：<code>{safe_text(incident['ip'])}</code>\n"
+            f"💻 设备：<code>{safe_text(incident['device'])}</code>\n浏览器：{safe_text(incident['agent'])}\n"
+            f"连续认证失败：{incident['failures']} 次\n━━━━━━━━━━━━━━\nIP 和设备已同时封禁。")
+    with interaction('telegram','notification'),presentation_turn(None),message_presentation(None):
+        outbox=get_web_outbox() or globals().get('_web_external_outbox');real=globals().get('_web_real_bot')
+        markup=InlineKeyboardMarkup([[InlineKeyboardButton('解除 IP 和设备封禁',callback_data='webban:'+incident['id'])]])
+        try:
+            async with conversation_operation(selector='telegram',fresh=True):
+                record_id=await GlobalRecorder.record_system_message(raw,BotConfig.AUTHORIZED_USER_ID,
+                    metadata={'security_notice':{'origin':'web','incident_id':incident['id'],'ip':incident['ip'],'device':incident['device']},
+                              'display':{'content':report,'parse_mode':'HTML'}})
+                bot=MirrorBot(outbox,BotConfig.AUTHORIZED_USER_ID,real_bot=real);bot._is_xgent_telegram_bot=True
+                notify_context=SimpleNamespace(bot=bot)
+                with message_presentation({'kind':MessageType.SYSTEM_OP,'record_id':record_id}):
+                    sent=await safe_send_message(notify_context,BotConfig.AUTHORIZED_USER_ID,report,parse_mode='HTML',reply_markup=markup)
+                db=await BotMemoryDB.get_instance();row=await db.get_display_message(record_id)
+                if row:
+                    ids=[item.message_id for item in sent];await bind_record(db,row,ids)
+                    if outbox:await db.patch_display_metadata(record_id,{'web_live':{'epoch':outbox.snapshot()['epoch'],'message_ids':ids}})
+                    await publish_saved_reply(notify_context,record_id)
+        except ConversationError:
+            if real:await real.send_message(chat_id=BotConfig.AUTHORIZED_USER_ID,text=report,parse_mode='HTML',reply_markup=markup)
+        if outbox:outbox.put({'type':'access_notice','notice_id':'web:'+incident['id'],'text':'🚨 来自网页端的陌生访问：IP 和设备已封禁'})
+
+
 async def handle_unauthorized_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理未授权用户的互动"""
     user = update.effective_user

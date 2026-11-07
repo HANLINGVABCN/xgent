@@ -751,7 +751,7 @@ def bind_callback_markup(markup):
         bound = []
         for button in row:
             data = getattr(button, 'callback_data', None)
-            if data and not str(data).startswith(('cv:', 'act_stop_generation', 'q:', 'backup_status:')):
+            if data and not str(data).startswith(('cv:', 'act_stop_generation', 'q:', 'backup_status:', 'webban:')):
                 fields = button.to_dict()
                 action = _callback_resolver(str(data))
                 fields['callback_data'] = _callback_encoder(f'cv:{scope.generation}:{action}')

@@ -22,8 +22,9 @@ TABLES = {
         "conversation_branch_drafts", "conversation_mutation_requests", "telegram_topics"),
     "tasks": ("trigger_tasks", "trigger_runs", "conversation_jobs"),
     "usage_statistics": ("token_usage_stats",),
-    "security_logs": ("unauthorized_access_logs", "channel_deadletter"),
-    "runtime_state": ("cli_relay_ops", "channel_outbox"),
+    "security_logs": ("unauthorized_access_logs", "channel_deadletter", "web_access_clients", "web_access_incidents"),
+    "runtime_state": ("cli_relay_ops", "channel_outbox", "web_login_sessions", "web_session_migrations"),
+    "app_settings": ("web_ip_rules",),
 }
 AI_KEYS = {"active_provider", "default_model", "default_media_provider", "default_media_model",
            "model_request_limits", "discovered_model_limits", "model_fetch_status", "thinking_level",

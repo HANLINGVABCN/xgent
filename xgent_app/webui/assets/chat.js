@@ -189,7 +189,7 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
     notifyWorkbench();
     return fetch(requestPath, options).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (body) {
-        if (!r.ok) { var error=new Error(body.error || ("HTTP " + r.status));error.status=r.status;throw error; }
+        if (!r.ok) { if(r.status===401&&path!=='/api/login')window.dispatchEvent(new Event('xgent-auth-expired'));var error=new Error(body.error || ("HTTP " + r.status));error.status=r.status;throw error; }
         return body;
       });
     }).finally(notifyWorkbench);

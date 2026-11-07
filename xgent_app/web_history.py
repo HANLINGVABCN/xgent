@@ -332,6 +332,9 @@ def history_web_display(content: str, display=None):
 def apply_history_presentation(message, record, metadata, *, namespace=None, mode_override=None):
     """Use the live semantic renderers for dynamic history; snapshots are legacy fallback."""
     trigger_result = metadata.get('trigger_result')
+    security=metadata.get('security_notice') or {}
+    if security.get('origin')=='web' and security.get('incident_id') and not security.get('resolved'):
+        message['reply_markup']=[[{'text':'解除 IP 和设备封禁','callback_data':'webban:'+security['incident_id']}]]
     if isinstance(trigger_result, dict) and trigger_result.get('version') == 1:
         # A system receipt has its own frozen display, not an AI/tool reply.
         message['presentation_mode'] = 'folded'

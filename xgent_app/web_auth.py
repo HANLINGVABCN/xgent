@@ -83,10 +83,10 @@ def _sign(secret_key: bytes, payload: str) -> str:
     return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
 
 
-def make_session_cookie_value(secret_key: bytes, issued_at: Optional[float] = None) -> str:
+def make_session_cookie_value(secret_key: bytes, issued_at: Optional[float] = None, *, session_id: str = '') -> str:
     """签发 '签发时间.签名' 形式的会话值。"""
     issued = int(issued_at if issued_at is not None else time.time())
-    payload = str(issued)
+    payload = str(issued)+('.'+session_id if session_id else '')
     return f"{payload}.{_sign(secret_key, payload)}"
 
 
@@ -100,13 +100,13 @@ def verify_session_cookie(secret_key: bytes, value: str,
     """
     if not value:
         return False
-    payload, _, signature = str(value).partition(".")
+    payload, _, signature = str(value).rpartition(".")
     if not payload or not signature:
         return False
     if not hmac.compare_digest(signature, _sign(secret_key, payload)):
         return False
     try:
-        issued = int(payload)
+        issued = int(payload.split('.')[0])
     except ValueError:
         return False
     current = now if now is not None else time.time()

@@ -176,6 +176,13 @@ form.wb-file-dates .wb-field { margin:0; min-width:130px; max-width:185px; }
 .wb-current-models { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; width:100%; margin-top:3px; }
 .wb-current-model { display:flex; flex-direction:column; align-items:flex-start; gap:5px; min-width:0; max-width:100%; }
 .wb-current-model-name { color:var(--text-2); font-size:var(--font-caption); line-height:1.6; overflow-wrap:anywhere; }
+.wb-access-panel { grid-column:1/-1; }
+.wb-access-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--line); min-width:0; }
+.wb-access-row>div:first-child { min-width:0; flex:1; }
+.wb-access-row .wb-note { margin:4px 0; overflow-wrap:anywhere; }
+.wb-access-row>.wb-actions { flex-shrink:0; }
+.wb-access-details dd { overflow-wrap:anywhere; }
+@media(max-width:600px){.wb-access-row{align-items:flex-start;flex-direction:column}.wb-access-row>.wb-actions{width:100%}}
 .wb-model-candidates { margin-top:14px; }
 .wb-candidate-list { max-height:230px; overflow:auto; padding:9px; margin:10px 0; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); }
 .wb-candidate-list .wb-check { margin:0; padding:7px; }
