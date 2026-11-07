@@ -4,6 +4,7 @@ import {installCommandSeries} from './command-series.js';
 import {decorateBrandAuthor} from './branding.js';
 import {initializeTheme} from './theme.js';
 import {preventAutofill} from './input-policy.js';
+import {syncVisualPage} from './visual-pages.js';
 (function () {
   "use strict";
 
@@ -1270,6 +1271,7 @@ import {preventAutofill} from './input-policy.js';
   function hideTyping() { typing.classList.add("hidden"); }
 
   function removeEntry(entry) {
+    if(entry?.visualPage){entry.visualPage.destroy();entry.visualPage=null;}
     if (!entry) return;
     Object.keys(byMessageId).forEach(function (id) {
       if (byMessageId[id] === entry) delete byMessageId[id];
@@ -1389,6 +1391,7 @@ import {preventAutofill} from './input-policy.js';
       if(frame.message_id!=null)byMessageId[frame.message_id]=entry;
     }
     if (frame.media) appendHistoryMedia(entry, frame, role);
+    if(frame.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,frame.visual_page,frame.record_id??frame.id);}
     if(frame.conversation_actions)setConversationActions(entry,{...frame,id:frame.record_id??frame.id});
     if (frame.message_id != null && !frame.ui_message_id) byMessageId[frame.message_id] = entry;
     return entry;
@@ -2028,7 +2031,7 @@ import {preventAutofill} from './input-policy.js';
   var historyPageRequest=null, historyLoadController=null, historyPageVersion=0;
   var historyError=null, historyPrefetchScheduled=false;
   var unseenHistoryFrames=new Set();
-  var historyAnchor = null;
+  var historyAnchor = /^\d+$/.test(initialConversationParams.get('visual')||'')?'history:'+initialConversationParams.get('visual'):null;
   var viewingPast = false;
   var newerAvailable = false;
   var historyForwardCursor = null;
@@ -2154,7 +2157,8 @@ import {preventAutofill} from './input-policy.js';
   function sortHistoryRows(){
     const rows=Array.from(log.children).filter(row=>row._historyOrder);
     rows.sort((a,b)=>a._historyOrder[0]-b._historyOrder[0]||a._historyOrder[1]-b._historyOrder[1]||a._historyOrder[2].localeCompare(b._historyOrder[2]));
-    const fragment=document.createDocumentFragment();rows.forEach(row=>fragment.append(row));log.prepend(fragment);
+    let next=log.firstElementChild;
+    for(const row of rows){if(row!==next){if(log.moveBefore)log.moveBefore(row,next);else log.insertBefore(row,next);}next=row.nextElementSibling;}
     syncTurnAuthors(log);
   }
   function updateHistoryState() {
@@ -2290,7 +2294,7 @@ import {preventAutofill} from './input-policy.js';
         if(m.ui_message_id&&uiDeleted[m.ui_message_id])return;
         const entry=putHistoryFrame(m,data.live?.epoch);
         if(m.ui_message_id)uiRevisions[m.ui_message_id]=m.revision;
-        retained.add(entry);log.appendChild(entry.row);(entry.mediaEntries||[]).forEach(child=>log.appendChild(child.row));
+        retained.add(entry);if(entry.row.parentNode!==log||!entry.visualPage)log.appendChild(entry.row);(entry.mediaEntries||[]).forEach(child=>log.appendChild(child.row));
       });
       const live=data.live;
       if(live&&Number.isSafeInteger(live.cursor)&&live.epoch){
@@ -3832,6 +3836,7 @@ import {preventAutofill} from './input-policy.js';
       if(message.reply_group_id)entry.row.dataset.replyGroupId=String(message.reply_group_id);
       if(message.conversation_id)entry.row.dataset.presentationConversationId=message.conversation_id;
       if(message.media?.length)setInlineMedia(entry,message.media);
+      if(message.visual_page){entry.row.classList.add('visual-message');syncVisualPage(entry,message.visual_page,message.id);}
       if(message.ask_form)syncAskForm(entry,message.ask_form);
       entry.row.dataset.sourceMessage=message.history_key||'history:'+message.id;
       syncTurnAuthors(target);

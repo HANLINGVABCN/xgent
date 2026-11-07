@@ -94,7 +94,7 @@ class ProtocolParser:
         r"run-x|shell-x|stdin-x:[^\n]+|shellkill-x:[^\n]+|"
         r"sendfile-x|read-x|edit-x(?::[^\n]+)?|grep-x|"
         r"search-x|fetch-x|"
-        r"media-x|file-x(?::[^\n]+)?|ask-x|intel-x|over-x"
+        r"media-x|render-x|file-x(?::[^\n]+)?|ask-x|intel-x|over-x"
         r")\s*$"
     )
 
@@ -122,6 +122,7 @@ class ProtocolParser:
         "search": ("🔍", "search"),
         "fetch": ("🌐", "fetch"),
         "media": ("🖼️", "media"),
+        "render": ("🎨", "render"),
         "stdin": ("⌨️", "stdin"),
         "shellkill": ("⏹️", "shellkill"),
         "sendfile": ("📎", "sendfile"),
@@ -590,6 +591,8 @@ class ProtocolParser:
         """标准 HTML 保留完整正文；只有显式 Telegram 模式/预览参数才限长。"""
         icon = seg.get("icon") or "🔧"
         btype = (seg.get("type") or seg.get("label") or "").strip()
+        if btype=='render':
+            return '<span class="file-write-result">渲染页面</span>'
         name = btype if (not btype or btype.endswith("-x")) else f"{btype}-x"
         path = (seg.get("path") or "").strip()
         head = f"{icon} {name}" + (f" {path}" if path else "")

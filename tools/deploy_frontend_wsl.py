@@ -15,6 +15,12 @@ target = pathlib.Path(requested).resolve(strict=True)
 if str(target) != '/home/hanling/xgent-telegram-test':
     raise SystemExit('Unexpected deployment destination: ' + str(target))
 paths = ['xgent_app/webui', 'xgent_app/web_server.py', 'xgent_app/workbench.py',
+         'xgent_app/visual_pages.py', 'xgent_app/tool_calls.py',
+         'xgent_app/web_history.py',
+         'xgent_app/native_rendering.py', 'xgent_app/presentation_delivery.py', 'xgent_app/web_bridge.py',
+         'xgent_app/protocols.py', 'xgent_app/prompt_defaults.py', 'xgent_app/sections/messages.py',
+         'prompts/global_addon.txt', 'prompts/agent_addon.txt', 'prompts/agent_disabled_addon.txt',
+         'requirements.txt', 'install.sh',
          'xgent_app/project_updates.py', 'xgent_app/sections/services.py',
          'xgent_app/sections/idle.py', 'xgent_app/queue_store.py', 'xgent_app/message_queue.py',
          'xgent_app/file_transfers.py', 'xgent_app/file_ingress.py',

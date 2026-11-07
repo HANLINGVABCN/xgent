@@ -46,6 +46,17 @@ def test_prompt_changed_during_default_upgrade_is_not_overwritten(tmp_path, monk
     assert not list(tmp_path.glob('.prompt-upgrade-*'))
 
 
+def test_previous_cross_client_global_default_updates_only_when_unchanged(tmp_path):
+    original=(FIXTURES/'global_cross_client.txt').read_bytes()
+    path=tmp_path/'global_addon.txt';path.write_bytes(original)
+    assert migrate_shipped_prompt(path,'global_prompt_addon')
+    assert path.read_text(encoding='utf-8')==DEFAULT_GLOBAL_PROMPT
+    assert next(tmp_path.glob('*.bak')).read_bytes()==original
+    path.write_bytes(original+b'\nCUSTOM_EXPRESSIVE_RULE\n')
+    assert not migrate_shipped_prompt(path,'global_prompt_addon')
+    assert path.read_bytes().endswith(b'CUSTOM_EXPRESSIVE_RULE\n')
+
+
 def test_detailed_native_default_is_upgraded_but_user_rules_are_kept(tmp_path):
     path = tmp_path / 'toolcall_addon.txt'
     original = (FIXTURES / 'toolcall_detailed.txt').read_bytes()

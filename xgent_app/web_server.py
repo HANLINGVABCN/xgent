@@ -571,7 +571,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _serve_workbench_asset(self, path: str) -> None:
         allowed = {"telegram-host.js", "mini.js", "mini.css", "ask-form.js", "command-series.js", "knowledge.js", "knowledge.css", "appearance.js", "branding.js", "branding-settings.js", "branding.css", "logo.svg", "composer-controls.js", "reading.css", "chat.js", "chat.css", "conversations.js", "conversations.css", "global-search.js", "global-search.css", "workbench.js", "workbench.css", "components.js", "page-cache.js", "settings.js", "two-factor.js", "data-backups.js", "usage.js", "terminal.js", "terminal.css"}
-        allowed.update({"design-system.css", "themes.css", "theme-presets.js", "theme-settings.js", "ui.js", "input-policy.js", "navigation.js", "settings-archive.js", "settings-updates.js", "workspace-shell.js", "theme.js", "chat-view.js", "workbench-tasks.js", "workbench-files.js", "workbench-models.js"})
+        allowed.update({"design-system.css", "themes.css", "theme-presets.js", "theme-settings.js", "ui.js", "input-policy.js", "visual-pages.js", "visual-pages.css", "navigation.js", "settings-archive.js", "settings-updates.js", "workspace-shell.js", "theme.js", "chat-view.js", "workbench-tasks.js", "workbench-files.js", "workbench-models.js"})
         name = path.removeprefix("/assets/")
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
@@ -647,6 +647,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             live = self.server.outbox.snapshot() if method == 'GET' and resource == 'history' else None
             if self.config.workbench is not None:
                 result = self._run_coro(self.config.workbench(method, resource, data), timeout=120 if resource=='conversations/export' else 45)
+                from .visual_pages import VisualSourceDownload
+                if isinstance(result,VisualSourceDownload):
+                    self._serve_media_file(str(result.path),result.filename,result.mime_type)
+                    return
                 from .conversation_export import ConversationDownload
                 if isinstance(result, ConversationDownload):
                     self._serve_media_file(str(result.path), result.filename, 'application/zip')

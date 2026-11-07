@@ -348,6 +348,16 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
         raw = metadata['stopped_reply']['partial']
         presentation = {**presentation, 'terminal_status': 'stopped'}
     write = metadata.get('file_write')
+    visual=metadata.get('visual_render')
+    if kind=='agent_result' and isinstance(visual,dict) and visual.get('version') in {1,2}:
+        title=str(visual.get('title') or '效果图')
+        message.update(content=title,parse_mode=None,file_message=True,
+            web_display={'version':1,'segments':[{'kind':'html','text':'<span class="file-delivery-note">'+_html.escape(title)+'</span>'}],'presentation_mode':'folded'})
+        if visual.get('version')==2 and record.get('session_id'):
+            params=urlencode({'conversation_id':record['session_id'],'record_id':record['id']})
+            message['visual_page']={'version':2,'title':title,'width':visual.get('width',800),'height':visual.get('height',600),
+                'url':'/api/workbench/visual?'+params,'source_url':'/api/workbench/visual/source?'+params}
+        return
     if kind == 'agent_result' and isinstance(write, dict) and isinstance(write.get('text'), str):
         text = write['text']
         segments = [{'kind': 'html', 'text': '<span class="file-write-result">' + _html.escape(text) + '</span>'}]

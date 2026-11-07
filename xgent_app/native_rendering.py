@@ -19,7 +19,9 @@ def rich_calls(text, calls, *, details=''):
     legacy = namespace['markdown_to_telegram_html'](str(text)) if namespace and text else html.escape(str(text or ''))
     for call in calls:
         block = tool_calls.display_operation(call)
-        if block['type'] == 'over':
+        if block['type']=='render':
+            blocks.append(Block(text='渲染页面',inline=True));legacy+='\n渲染页面';continue
+        if block['type']=='over':
             continue
         name = 'file-x' if block['type'] == 'file_base64' else block['type'] + '-x'
         body = block['body']
@@ -38,7 +40,9 @@ def segments(text, calls, operations=()):
     values = [{'kind': 'markdown', 'text': str(text)}] if text else []
     for call in calls:
         block = tool_calls.display_operation(call)
-        if block['type'] == 'over':
+        if block['type']=='render':
+            values.append({'kind':'html','text':'<span class="file-write-result">渲染页面</span>'});continue
+        if block['type']=='over':
             continue
         matched = next((op for op in operations if op.get('native_call_id') == call['id']), None)
         values.append({'kind': 'html', 'text': web_block_html(block['body'],

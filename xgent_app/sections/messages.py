@@ -2598,6 +2598,27 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                         # blocks in this response, in their original order.
                         continue
 
+                    if block_type == 'render':
+                        from xgent_app.visual_pages import create_visual,VisualPageError
+                        from xgent_app.conversation_branching import record_operation
+                        await record_operation(db,'render','external')
+                        try:
+                            notice=await create_visual(globals(),context,db,cid,update.effective_chat.id,json.loads(block['body']))
+                        except asyncio.CancelledError:
+                            round_state.should_continue=False
+                            break
+                        except AttachmentContextError:
+                            raise
+                        except (VisualPageError,json.JSONDecodeError) as exc:
+                            current_turn().observe_operation({'success':False})
+                            notice='[render结果] 页面创建失败：'+redact_sensitive_text(str(exc))
+                            await safe_send_message(context,update.effective_chat.id,html.escape(notice),parse_mode=constants.ParseMode.HTML)
+                            await persist_agent_result(recorder=GlobalRecorder,message_type=MessageType.AGENT_RESULT,
+                                database=db,conversation_id=cid,chat_id=update.effective_chat.id,notice=notice)
+                        await add_tool_context(_ctx_with_notice({'role':'user','content':notice},smart_notice))
+                        round_state.should_continue=True
+                        continue
+
                     if block_type == 'media':
                         from xgent_app.conversation_branching import record_operation
                         await record_operation(db, 'media', 'external')

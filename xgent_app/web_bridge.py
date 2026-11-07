@@ -575,7 +575,7 @@ async def emit_ui_frame(outbox: WebOutbox, chat_id: int, frame_type: str,
                         *, source: Optional[str] = None, **fields: Any) -> None:
     from xgent_app.message_policy import current_policy
     policy = current_policy()
-    if policy is not None and not policy.allows('web') and frame_type in {'message', 'edit', 'edit_markup', 'delete'}:
+    if policy is not None and not policy.allows('web') and frame_type in {'message', 'edit', 'edit_markup', 'delete','photo','document'}:
         return
     from xgent_app.interaction import identity
     from xgent_app.conversations import current_scope

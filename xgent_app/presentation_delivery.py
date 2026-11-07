@@ -106,6 +106,10 @@ class PresentationBot:
         content = hint.get('telegram_content')
         display = hint.get('telegram_display') or {}
         operation = hint.get('telegram_operation') or self.turn.active_operation
+        if hint.get('telegram_page_html'):
+            from .telegram_rich import html_block,split_blocks
+            body=hint['telegram_page_html']
+            return {'phase':'reply','record_id':hint.get('record_id'),'html':split_blocks([html_block(body)]),'fallback':[body]}
         if kind == 'agent_result' and operation and operation.get('kind') != 'ask':
             from .conversations import current_scope
             from .telegram_chat import output_chunks

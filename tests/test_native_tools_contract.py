@@ -145,7 +145,7 @@ def test_invalid_or_truncated_calls_never_become_operations(arguments, reason):
 
 def test_all_existing_tools_have_provider_definitions():
     expected = {'exec_command', 'start_terminal', 'terminal_input', 'close_terminal', 'read_file', 'search_files', 'inspect_code', 'search_web', 'fetch_urls',
-                'send_file', 'generate_media', 'finish_task', 'write_file', 'write_binary', 'edit_file', 'ask_user'}
+                'send_file', 'generate_media', 'render_visual', 'finish_task', 'write_file', 'write_binary', 'edit_file', 'ask_user'}
     assert {item['function']['name'] for item in definitions('openai')} == expected
     assert {item['name'] for item in definitions('claude')} == expected
     assert {item['name'] for item in definitions('gemini')[0]['functionDeclarations']} == expected
