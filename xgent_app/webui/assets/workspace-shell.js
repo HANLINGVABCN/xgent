@@ -22,15 +22,8 @@ function updateRoute() {
 new MutationObserver(updateRoute).observe(document.body, {attributes: true, attributeFilter: ['data-page']});
 updateRoute();
 
-const touch = matchMedia('(hover: none) and (pointer: coarse)');
-function keyboardHint() {
-  const hint = $('composer-keyboard-hint');
-  if (hint) hint.textContent = touch.matches ? 'Enter 换行' : 'Enter 发送 · Shift Enter 换行';
-}
-touch.addEventListener('change', keyboardHint);
-keyboardHint();
-
 // Tooltips are one shared surface. They never observe or rebuild message content.
+const touch=matchMedia('(hover: none) and (pointer: coarse)');
 const tooltip = el('div', {id: 'workspace-tooltip', role: 'tooltip', hidden: true});
 document.body.append(tooltip);
 let tooltipTarget = null, tooltipTimer = null;

@@ -201,17 +201,18 @@
 .branch-draft-file { padding:3px 7px; border-radius:5px; background:var(--surface-2); color:var(--text-2); font-size:var(--font-caption); }
 
 /* Model and generation controls use custom, keyboard accessible popovers. */
-#wb-chat-controls { display:flex; align-items:center; gap:4px; flex:1; min-width:0; font-size:var(--web-ui-font-size,14px); }
-.composer-choice { display:inline-flex; align-items:center; justify-content:center; gap:5px; min-width:0; min-height:32px; padding:5px 9px; border:1px solid var(--line); border-radius:7px; background:transparent; color:var(--text-2); font-size:var(--font-caption); line-height:1.5; white-space:nowrap; transition:background var(--t),border-color var(--t); }
+#wb-chat-controls { display:flex; align-items:flex-end; gap:4px; flex:1; min-width:0; height:28px; font-size:var(--web-ui-font-size,14px); }
+.composer-choice { display:inline-flex; align-items:center; justify-content:center; gap:5px; min-width:0; height:28px; min-height:28px; padding:5px 6px 3px; border:1px solid var(--line); border-radius:6px; background:transparent; color:var(--text-2); font-size:var(--font-caption); line-height:1.5; white-space:nowrap; transition:background var(--t),border-color var(--t); }
 .composer-choice:hover,.composer-choice[aria-expanded=true] { border-color:var(--line-2); background:var(--surface-hover); color:var(--text); }
 .composer-choice .icon { width:13px; height:13px; }
 .composer-choice-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #composer-agent { flex:0 0 auto; border-color:transparent; background:var(--surface-2); }
 #composer-agent[aria-pressed=true] { color:var(--accent); background:var(--accent-soft); }
 #composer-thinking { max-width:115px; flex:0 1 auto; border-color:transparent; }
-#composer-model { margin-left:auto; max-width:260px; flex:0 1 auto; justify-content:space-between; background:var(--surface-2); }
-#composer-generation-options { flex:0 0 30px; width:30px; padding:6px; border-color:transparent; }
-#composer-generation-options .icon { width:16px; height:16px; }
+#composer-model { margin-left:auto; max-width:260px; flex:0 1 auto; justify-content:space-between; border:0; background:transparent; }
+#composer-model:hover,#composer-model[aria-expanded=true] { border:0; background:transparent; color:var(--accent); }
+#composer-generation-options { flex:0 0 28px; width:28px; padding:5px 6px 3px; border-color:transparent; }
+#composer-generation-options .icon { width:15px; height:15px; }
 #composer-options-popover { position:absolute; bottom:calc(100% + 9px); z-index:32; display:flex; flex-direction:column; min-height:0; padding:6px; overflow:hidden; border:1px solid var(--line-2); border-radius:13px; background:var(--surface); color:var(--text); box-shadow:var(--shadow-float); font-size:var(--web-ui-font-size,14px); animation:overlay-in 150ms var(--spring); }
 .composer-options-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-shrink:0; padding:4px 4px 7px 8px; border-bottom:1px solid var(--line); margin-bottom:4px; }
 .composer-options-head strong { white-space:nowrap; font-size:var(--font-sm); font-weight:600; }
@@ -280,10 +281,10 @@
   .queue-item,.queue-actions { gap:5px; }
   #wb-chat-controls { gap:1px; }
   #composer-agent { display:none; }
-  #composer-thinking { display:inline-flex; flex:0 1 auto; max-width:78px; padding:6px 4px; min-height:32px; font-size:var(--font-xs); }
-  #composer-model { flex:1 1 0; max-width:none; margin:0; padding:6px 7px; min-height:32px; font-size:var(--font-xs); }
-  #composer-generation-options { position:relative; flex:0 0 26px; width:26px; padding:5px; min-height:32px; }
-  #composer-generation-options .icon { width:16px; height:16px; }
+  #composer-thinking { display:inline-flex; flex:0 1 auto; max-width:78px; padding:5px 4px 3px; min-height:28px; font-size:var(--font-caption); }
+  #composer-model { flex:1 1 0; max-width:none; margin:0; padding:5px 4px 3px; min-height:28px; font-size:var(--font-xs); }
+  #composer-generation-options { position:relative; flex:0 0 26px; width:26px; padding:5px 6px 3px; min-height:28px; }
+  #composer-generation-options .icon { width:14px; height:14px; }
   #composer-generation-options.agent-on::after { content:''; position:absolute; right:4px; top:4px; width:4px; height:4px; background:var(--accent); border-radius:50%; }
   .composer-choice .icon { width:11px; height:11px; }
   .composer-option,.composer-agent-option { min-height:42px; }

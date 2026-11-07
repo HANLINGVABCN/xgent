@@ -19,6 +19,34 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
   var log = document.getElementById("log");
   const commandResults=installCommandResults(log);
   var input = document.getElementById("input");
+  const composerResize=document.getElementById('composer-resize'),composerCard=input.closest('.composer-card');
+  let editorHeight=null,editorDrag=null,lastEditorText=null;
+  try{const stored=Number(localStorage.getItem('xgent-composer-height'));if(Number.isFinite(stored)&&stored>=28&&stored<=1000)editorHeight=stored;}catch{}
+  function editorLimits(){return {min:Math.ceil(parseFloat(getComputedStyle(input).fontSize)*1.5+4),max:Math.max(80,Math.min(440,(window.visualViewport?.height||innerHeight)*.45))};}
+  function updateInputHeight(force=false){
+    const limits=editorLimits();composerCard.classList.toggle('manual-height',editorHeight!==null);
+    if(editorHeight!==null){input.style.height=Math.max(limits.min,Math.min(limits.max,editorHeight))+'px';return;}
+    if(!force&&lastEditorText===input.value)return;lastEditorText=input.value;
+    input.style.height='auto';input.style.height=Math.min(input.scrollHeight,180)+'px';
+  }
+  function saveEditorHeight(){try{if(editorHeight===null)localStorage.removeItem('xgent-composer-height');else localStorage.setItem('xgent-composer-height',String(editorHeight));}catch{}}
+  function resetEditorHeight(){editorHeight=null;saveEditorHeight();updateInputHeight(true);}
+  composerResize.addEventListener('pointerdown',event=>{
+    if(event.button!==0)return;event.preventDefault();editorDrag={id:event.pointerId,y:event.clientY,height:input.getBoundingClientRect().height};
+    composerCard.classList.add('resizing');composerResize.setPointerCapture(event.pointerId);
+  });
+  composerResize.addEventListener('pointermove',event=>{
+    if(!editorDrag||event.pointerId!==editorDrag.id)return;event.preventDefault();const limits=editorLimits();
+    editorHeight=Math.max(limits.min,Math.min(limits.max,editorDrag.height+editorDrag.y-event.clientY));updateInputHeight();
+  });
+  function finishEditorResize(event){if(!editorDrag||event.pointerId!==editorDrag.id)return;editorDrag=null;composerCard.classList.remove('resizing');saveEditorHeight();if(composerResize.hasPointerCapture(event.pointerId))composerResize.releasePointerCapture(event.pointerId);}
+  composerResize.addEventListener('pointerup',finishEditorResize);composerResize.addEventListener('pointercancel',finishEditorResize);composerResize.addEventListener('lostpointercapture',finishEditorResize);
+  composerResize.addEventListener('dblclick',resetEditorHeight);
+  composerResize.addEventListener('keydown',event=>{
+    if(['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();const limits=editorLimits();editorHeight=Math.max(limits.min,Math.min(limits.max,input.getBoundingClientRect().height+(event.key==='ArrowUp'?20:-20)));saveEditorHeight();updateInputHeight();}
+    else if(event.key==='Home'){event.preventDefault();resetEditorHeight();}
+  });
+  window.addEventListener('resize',()=>updateInputHeight(true));window.visualViewport?.addEventListener('resize',()=>updateInputHeight(true));
   var initialConversationParams = new URLSearchParams(location.hash.split('?')[1] || '');
   var selectedConversationId = initialConversationParams.has('message') ? null : initialConversationParams.get('conversation');
   const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun,
@@ -2410,6 +2438,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
   }
 
   function syncSendState() {
+    updateInputHeight();
     btnSend.classList.toggle("ready", input.value.trim().length > 0 || pendingFiles.length > 0 || !!serverDrafts[selectedConversationId]?.media?.length);
     updateSendAvailability();
   }
@@ -2535,7 +2564,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
         ...(token?{new_conversation:token,group_id:submission.group_id}:{conversation_id:cid,generation:submission.generation})})});
       if(token){window.XGentConversations?.materialize(result,token,submission.group_id);cid=result.conversation_id;try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}
       if(result.ok||result.queued||result.management)setServerDraft(cid,null);
-      if(cid===selectedConversationId&&input.value===draft){input.value='';input.style.height='auto';conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
+      if(cid===selectedConversationId&&input.value===draft){input.value='';updateInputHeight();conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
       else if(cid!==selectedConversationId&&conversationDrafts[cid]===draft){conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
       if(!result.queued&&!result.management&&cid===selectedConversationId)makeBubble('user',text);
       textSubmission=null;await refreshQueue(true);triggerHaptic();
@@ -2557,7 +2586,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
     if (!hasFiles) makeBubble("user", text);
     input.value = "";
     try { sessionStorage.removeItem(draftKey()); } catch(e) {}
-    input.style.height = "auto";
+    updateInputHeight(true);
     syncSendState();
     hideSuggest();
     if(!hasFiles||!queueEnabled)setBusy(true);
@@ -2809,8 +2838,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
         input.value = c.cmd + " ";
         input.focus();
         hideSuggest();
-        input.style.height = "auto";
-        input.style.height = Math.min(input.scrollHeight, 180) + "px";
+        updateInputHeight(true);
         syncSendState();
       });
       item.addEventListener("mouseenter", function () {
@@ -3447,8 +3475,7 @@ import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './co
   });
 
   input.addEventListener("input", function () {
-    input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, 180) + "px";
+    updateInputHeight();
     syncSendState();
     var val = input.value;
     var slash = val.lastIndexOf("/");
