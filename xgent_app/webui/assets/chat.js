@@ -253,7 +253,9 @@ import {syncVisualPage,syncReplyPages} from './visual-pages.js';
     if(slots.length&&entry.body.moveBefore){
       next.hidden=true;entry.bubble.append(next);
       for(const slot of slots){const target=next.querySelector('[data-visual-index="'+slot.dataset.visualIndex+'"]');
-        if(target){target.parentNode.moveBefore(slot,target);target.remove();}}
+        if(target){const title=slot.querySelector('.visual-page-loading strong'),updated=target.querySelector('strong');
+          if(title&&updated)title.textContent=updated.textContent;
+          target.parentNode.moveBefore(slot,target);target.remove();}}
       entry.body.replaceChildren();
       while(next.firstChild)entry.body.moveBefore(next.firstChild,null);
       next.remove();

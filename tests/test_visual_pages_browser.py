@@ -36,6 +36,7 @@ def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_se
             assert page.locator('.wb-brand').is_visible() or width==390
         frame=page.frame_locator('.visual-page-frame');frame.get_by_role('button',name='点击切换').wait_for()
         assert page.locator('#log img').count()==0
+        assert page.locator('[data-record-id="55"] [data-brand-logo]').count()==1
         assert '正常回复前文' in page.locator('#log').inner_text() and '正常回复后文' in page.locator('#log').inner_text()
         assert iframe.get_attribute('sandbox')=='allow-scripts'
         frame.get_by_role('button',name='点击切换').click(timeout=5000)
@@ -43,6 +44,13 @@ def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_se
         assert iframe.content_frame.locator('body').evaluate('()=>window.hostBlocked')
         assert iframe.content_frame.locator('body').evaluate('()=>window.networkBlocked')
         assert page.locator('body').get_attribute('data-leaked') is None
+        page.get_by_role('button',name='源码',exact=True).click()
+        assert page.locator('.visual-page-source').is_visible()
+        assert page.locator('.visual-page-source code').text_content()==SOURCE
+        assert not iframe.is_visible()
+        assert page.get_by_role('link',name='下载',exact=True).is_visible()
+        page.get_by_role('button',name='预览',exact=True).click()
+        assert frame.locator('#result').inner_text()=='已点击'
         if not deep_link:page.get_by_role('button',name='展开页面',exact=True).click()
         assert page.locator('.visual-page-expanded').count()==1
         assert frame.locator('#result').inner_text()=='已点击'
@@ -53,4 +61,43 @@ def test_direct_html_interaction_isolated_frame_expand_and_reload(full_output_se
         assert frame.locator('#result').inner_text()=='已点击'
         page.reload();frame.get_by_role('button',name='点击切换').wait_for()
         assert page.locator('.visual-page-frame').count()==1
+        browser.close()
+
+
+def test_actual_live_reply_preview_placeholder_and_refresh_match(full_output_server,tmp_path):
+    from tests.test_thinking_params import run_in_app
+    from xgent_app.web_display import build_web_display
+    case=run_in_app('import asyncio\nfrom tests.visual_pages_probe import exercise\n'+
+        f'print(json.dumps(asyncio.run(exercise(bot,{str(tmp_path)!r},"openai","foreground",long_source=True,capture=True))))')
+    server=full_output_server[0];records=[]
+    async def history(limit):return records
+    server.config.read_history=history
+    playwright=pytest.importorskip('playwright.sync_api')
+    with playwright.sync_playwright() as p:
+        browser,context,base=browser_session(server,p)
+        context.route('**/api/workbench/visual?*',lambda route:route.fulfill(json={'version':2,'source':case['source'],'format':'html'}))
+        page=context.new_page();page.set_viewport_size({'width':390,'height':950});page.goto(base+'/#/chat?conversation=global_memory')
+        page.wait_for_function('!document.getElementById("btn-send").disabled')
+        boundary=next(i for i,frame in enumerate(case['frames']) if any('visual_index' in segment for segment in (frame.get('web_display') or {}).get('segments',[])))
+        for frame in case['frames'][:boundary]:server.outbox.put(frame)
+        incoming=case['frames'][boundary]
+        pending='这里是页面。\n```xgent-html 演示标题\n<html><button'
+        server.outbox.put({**incoming,'text':pending,'web_display':build_web_display(pending,hide_unclosed=True)})
+        placeholder=page.locator('.visual-page-loading');placeholder.wait_for()
+        assert placeholder.locator('strong').inner_text()=='演示标题'
+        assert '生成中' in placeholder.inner_text() and placeholder.locator('.visual-page-skeleton').is_visible()
+        assert not page.locator('.visual-page-frame').count()
+        page.evaluate('document.querySelector(".visual-page").dataset.sameCard="yes"')
+        for frame in case['frames'][boundary:]:server.outbox.put(frame)
+        selector='[data-record-id="'+str(case['history']['id'])+'"]'
+        card=page.locator(selector+' .visual-page');card.wait_for()
+        page.locator(selector+' .visual-page-ready').wait_for()
+        assert card.get_attribute('data-same-card')=='yes'
+        assert page.locator('#log .file-card').count()==0
+        assert page.locator('#log').get_by_text('打开渲染页面',exact=True).count()==0
+        assert page.locator(selector+' [data-brand-logo]').count()==1
+        before=page.locator(selector+' .body').inner_text()
+        records.append(case['history']);page.reload();page.locator(selector+' .visual-page-ready').wait_for()
+        assert page.locator(selector+' .body').inner_text()==before
+        assert page.locator(selector+' [data-brand-logo]').count()==1
         browser.close()

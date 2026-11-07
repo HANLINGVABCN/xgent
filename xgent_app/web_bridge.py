@@ -638,6 +638,9 @@ class WebBot:
         return _allocate_web_message_id()
 
     def _emit(self, frame_type: str, **fields: Any) -> None:
+        from xgent_app.message_policy import current_policy
+        policy=current_policy()
+        if policy is not None and not policy.allows('web'):return
         from xgent_app.interaction import identity
         from xgent_app.conversations import current_scope
         if identity()[0] == 'telegram' and current_scope(required=False) is None:
@@ -1057,6 +1060,9 @@ class MirrorBot:
         return mid
 
     def _emit(self, frame_type: str, **fields: Any) -> None:
+        from xgent_app.message_policy import current_policy
+        policy=current_policy()
+        if policy is not None and not policy.allows('web'):return
         frame: Dict[str, Any] = {"type": frame_type, "ts": time.time()}
         frame.update(fields)
         self.outbox.put(_present_media_frame(frame))

@@ -11,7 +11,7 @@ from xgent_app.presentation import metadata_dict
 from xgent_app.web_history import build_history_message
 
 
-async def exercise(bot,root,provider,style,long_source=False,agent_mode=True,mode='toolcall'):
+async def exercise(bot,root,provider,style,long_source=False,agent_mode=True,mode='toolcall',capture=False):
     async with NativeHarness(bot,root,provider,style) as h:
         native=RichCapture();bridge=MirrorBot(h.outbox,1,native);h.context.bot=bridge
         files=[]
@@ -47,9 +47,13 @@ async def exercise(bot,root,provider,style,long_source=False,agent_mode=True,mod
         texts=[message['text'] for message in native.messages.values()]
         assert any('blockquote' in text and ('试一下' in text or '源码节选' in text) for text in texts),texts
         assert not any('Agent 第' in text or '[render结果]' in text or 'tg://photo' in text for text in texts)
+        frames=h.drain_frames()
+        leaked=[frame['type'] for frame in frames if frame['type'] in {'document','edit_markup'} and ('完整源码' in str(frame.get('caption')) or 'visual=' in str(frame.get('reply_markup')))]
+        assert not leaked,leaked
         assert len(files)==(1 if long_source else 0)
         if files:assert files[0].decode('utf-8')==source
         buttons=[button for message in native.messages.values() for row in (message['reply_markup'].to_dict() if message.get('reply_markup') else {}).get('inline_keyboard',[]) for button in row]
         assert any('visual='+str(reply['id']) in (button.get('web_app') or {}).get('url','') for button in buttons),native.messages
         await bridge._tg_channel().aclose()
+        if capture:return {'frames':frames,'history':history,'source':source,'raw':raw}
         return {'one_request':True,'no_operations':True,'original_reply':True,'folded_source':True,'webapp':True,'full_source':True}

@@ -208,7 +208,7 @@ function renderBubbleBody(role, text, parseMode, webDisplay) {
      webDisplay.segments.every(s=>s && ['markdown','html'].includes(s.kind) && typeof s.text==='string')){
     // Every segment uses the same allowlist. Never trust even stored/tool HTML.
     let rendered=webDisplay.segments.map(s=>Number.isSafeInteger(s.visual_index)&&s.visual_index>=0&&s.visual_index<4?
-      '<div class="visual-output-slot" data-visual-index="'+s.visual_index+'">'+escapeHtml(s.text.replace(/<[^>]+>/g,''))+'</div>':
+      '<div class="visual-output-slot" data-visual-index="'+s.visual_index+'"><section class="visual-page visual-page-loading" aria-busy="true"><header><span class="visual-page-identity"><strong>'+escapeHtml(s.visual_title||s.text.replace(/<[^>]+>/g,'').replace(/ · 生成中…$/,''))+'</strong></span><span class="visual-page-phase" role="status">'+(s.visual_pending?'生成中…':'准备预览…')+'</span></header><div class="visual-page-viewport"><div class="visual-page-skeleton" aria-hidden="true"><span></span><span></span><span></span></div></div></section></div>':
       s.footer?'<div class="token-hud">'+renderText(s.text,'HTML')+'</div>':renderText(s.text,s.kind==='html'?'HTML':null)).join('\n');
     return rendered;
   }

@@ -467,8 +467,10 @@ class PresentationBot:
 
     async def edit_message_reply_markup(self, **kwargs):
         message = self.messages.get(kwargs.get('message_id'))
-        hint = {'kind': message.kind if message else 'ai_reply', 'mode': self.turn.mode}
-        if message is not None and message.policy is not None:
+        kind=message.kind if message else 'ai_reply'
+        explicit=current_message_presentation() or {}
+        hint={**(explicit if explicit.get('kind')==kind else {}),'kind':kind,'mode':self.turn.mode}
+        if 'message_policy' not in hint and message is not None and message.policy is not None:
             hint['message_policy'] = message.policy.to_dict()
         if message is not None and message.record_id is not None:
             hint['record_id'] = message.record_id
