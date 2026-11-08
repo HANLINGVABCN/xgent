@@ -186,32 +186,10 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await UserDataManager.init()
 
-    # 相册：同组图先攒，到齐后一次性整组交给 AI，只回一次。
-    media_group_id = getattr(update.message, "media_group_id", None)
-    if media_group_id:
-        await _handle_album_attachment(
-            update, context, media_group_id, received_at_ns=received_at_ns,
-        )
-        return
-
-    try:
-        db = await BotMemoryDB.get_instance()
-        generation = await db.get_attachment_generation()
-        payload = await _prepare_photo_payload(update)
-        memory_text = payload["index_text"]
-        context_prefix = build_incoming_context_prefix(update.message)
-        if context_prefix:
-            memory_text = f"{context_prefix}\n{memory_text}"
-
-        await GlobalRecorder.record_attachment_message(
-            memory_text, MessageType.USER_PHOTO, update.effective_chat.id,
-            [payload["attachment"]], generation,
-            metadata={'attachment_received_at_ns': received_at_ns},
-        )
-        await process_conversation(update, context, memory_text)
-    except Exception as e:
-        logger.error(f"Photo multimodal processing error: {e}")
-        await update.message.reply_text(f"图片未能完整交给模型：{safe_text(await GlobalRecorder.record_error(e, update.effective_chat.id, source='media_input'))}")
+    media = update.message.photo[-1]
+    caption = update.message.caption or _extract_rich_message_text(update.message) or ''
+    await receive_stitched_file(update, context, media, 'telegram_photo.jpg', caption,
+        expected_image=True, received_at_ns=received_at_ns)
 
 @conversation_entry(execution=True, guard=authorize_before_conversation)
 async def handle_sticker_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -487,7 +465,7 @@ def build_incoming_context_prefix(msg) -> str:
     return "\n".join(parts)
 
 
-@conversation_entry(execution=True, guard=authorize_before_conversation)
+@conversation_entry(guard=authorize_before_conversation)
 async def handle_other_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_authorized_user_middleware(update, context):
         return
@@ -501,6 +479,7 @@ async def handle_other_message(update: Update, context: ContextTypes.DEFAULT_TYP
         caption=_extract_rich_message_text(msg)
         for index,(kind,value) in enumerate(parts):
             projected=media_update(update,kind,value,caption if index==0 else '')
+            projected.message.xgent_attachment_part = index
             if kind=='document':await handle_document_message(projected,context)
             elif kind=='photo':await handle_photo_message(projected,context)
             else:await handle_media_message(projected,context)
@@ -665,9 +644,6 @@ async def handle_other_message(update: Update, context: ContextTypes.DEFAULT_TYP
         context_prefix = build_incoming_context_prefix(msg)
         if context_prefix:
             extracted_text = f"{context_prefix}\n{extracted_text}"
-        if _conversation_processing_lock.locked():
-            await msg.reply_text("⏳ 系统仍在处理上一个请求... 请稍后再发送新请求。")
-            return
         await handle_normal_text_conversation(update, context, extracted_text)
         return
 
@@ -676,11 +652,7 @@ async def handle_other_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if context_prefix:
         # 转发/回复消息但无法提取文字：仍然送入对话流程，让 AI 自然回复
         conv_text = f"{context_prefix}（此消息未包含可读取的文字内容）"
-        if _conversation_processing_lock.locked():
-            await msg.reply_text("⏳ 系统仍在处理上一个请求... 请稍后再发送新请求。")
-            return
-        await GlobalRecorder.record_user_message(conv_text, MessageType.USER_TEXT, update.effective_chat.id)
-        await process_conversation(update, context, conv_text)
+        await handle_normal_text_conversation(update, context, conv_text)
     else:
         # 非转发消息，确实没有文字内容
         await GlobalRecorder.record_user_message(

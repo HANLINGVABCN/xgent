@@ -556,6 +556,7 @@ class ConversationStore(ChildConversationStore, QueueStore):
                 await conn.execute(f'DELETE FROM {table} WHERE session_id=?', (cid,))
             await conn.execute('DELETE FROM ui_messages WHERE conversation_id=?', (cid,))
             await conn.execute('DELETE FROM message_queue WHERE conversation_id=?', (cid,))
+            await conn.execute('DELETE FROM text_stitch_drafts WHERE conversation_id=?', (cid,))
             await conn.execute('DELETE FROM message_queue_controls WHERE conversation_id=?', (cid,))
             await conn.execute('DELETE FROM message_queue_requests WHERE conversation_id=?', (cid,))
             await conn.execute('DELETE FROM turn_operations WHERE turn_id IN (SELECT id FROM conversation_turns WHERE conversation_id=?)', (cid,))

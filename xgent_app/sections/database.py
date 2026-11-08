@@ -465,6 +465,8 @@ class BotMemoryDB(ConversationStore):
             logger.warning(f"token 用量统计历史迁移失败（下次启动重试）: {e}")
 
         await self.migrate_conversations()
+        from xgent_app.text_stitch import ensure as ensure_text_stitch
+        await ensure_text_stitch(conn)
         from xgent_app.conversation_branching import repair_restored_workspaces
         await repair_restored_workspaces(self, os.path.dirname(os.path.abspath(self.db_path)))
         default_session = await self.get_session('global_memory')
@@ -1558,6 +1560,7 @@ class BotMemoryDB(ConversationStore):
         cursor = await conn.execute('SELECT COUNT(*) n FROM chat_messages WHERE session_id=?', (cid,))
         counts['chat_messages'] = int((await cursor.fetchone())['n'])
         await conn.execute('DELETE FROM chat_messages WHERE session_id=?', (cid,))
+        await conn.execute('DELETE FROM text_stitch_drafts WHERE conversation_id=?',(cid,))
         cursor = await conn.execute('SELECT COALESCE(MAX(id),0)+1 n FROM global_messages')
         boundary = int((await cursor.fetchone())['n'])
         generation = await self._allocate_conversation_generation(conn)

@@ -1050,9 +1050,18 @@ class PendingTextConversation:
         self.attachments: List[Dict[str, Any]] = []
         self.committing = False
         self.conversation_context = conversation_snapshot()
+        if self.conversation_context.get('origin')=='telegram':
+            self.conversation_context.update(purpose='chat',run_id=None)
         self.first_at = time.monotonic()
         self.last_at = self.first_at
         self.prompt_message: Optional[Any] = None
+        self.prompt_messages: List[Any] = []
+        self.prompt_lock = asyncio.Lock()
+        self.receiving_ids = set()
+        self.prompt_text = None
+        self.persist_lock = asyncio.Lock()
+        self.stitch_id = uuid.uuid4().hex
+        self.prompt_ids = []
 
     def append(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
         self.update = update
@@ -1071,6 +1080,7 @@ _pending_text_conversations: Dict[Tuple[int, int], PendingTextConversation] = {}
 _pending_text_conversations_lock = threading.RLock()
 _stitch_receiving = {}
 _stitch_cancellations = {}
+_stitch_restore_lock = asyncio.Lock()
 
 
 def merge_text_conversation_parts(parts: List[str]) -> str:
@@ -1787,13 +1797,8 @@ def media_conversation_entry(function):
     async def wrapped(update, *args, **kwargs):
         if not await authorize_before_conversation(update, *args, **kwargs):
             return None
-        group = getattr(getattr(update, 'message', None), 'media_group_id', None)
-        if function.__name__ in {'handle_document_message', 'handle_media_message'}:
-            group = None  # Documents use the existing explicit Done/Clear buffer.
-        if not group:
-            async with conversation_operation(execution=function.__name__ not in {'handle_document_message', 'handle_media_message'}):
-                return await function(update, *args, **kwargs)
-        scope = await admit_media_album(update, group)
-        with bind_conversation(scope):
+        # Receiving an attachment never owns execution. Photos, albums and
+        # files use the existing explicit Send/Clear stitching buffer alike.
+        async with conversation_operation(execution=False):
             return await function(update, *args, **kwargs)
     return wrapped

@@ -324,7 +324,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "act_cancel_text_stitch":
         await UserDataManager.init()
-        await cancel_text_conversation(update)
+        await cancel_text_conversation(update,context)
         return
 
     # ask 协议表单：选项切换 / 自定义或密钥录入 / 提交 / 取消。
@@ -419,13 +419,13 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 key = get_text_conversation_buffer_key(update)
                 with _pending_text_conversations_lock:
                     pending = _pending_text_conversations.get(key)
-                    if pending and pending.attachments:
+                    if pending and (pending.attachments or pending.receiving_ids):
                         pending = None  # File-triggered stitching remains explicit Done/Clear.
                     else:
                         _pending_text_conversations.pop(key, None)
-                if pending and pending.prompt_message is not None:
-                    with contextlib.suppress(Exception):
-                        await pending.prompt_message.edit_text("🧹 已关闭文字拼接，并清空本次拼接内容。")
+                if pending:
+                    await remove_text_stitch(pending)
+                    await delete_text_stitch_prompts(pending)
             await GlobalRecorder.record_system_op(
                 f"文字拼接模式切换为: {get_text_stitch_mode_label(mode)}",
                 {"text_stitch_mode": mode}

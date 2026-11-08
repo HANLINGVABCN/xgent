@@ -168,16 +168,16 @@ async def workflows(bot, root):
             assert len(pending.attachments) == 2 and not process.called
             assert not await h.db.get_attachment_records()
             await bot.queue_text_conversation(*first, 'instructions for both files')
-            # A photo remains an independent request and leaves the buffer intact.
+            # A photo joins the same explicit Send/Clear buffer.
             photo = upload_update(h, 'photo', 503, image_bytes())
             await bot.handle_photo_message(*photo)
-            assert process.await_count == 1 and len(pending.attachments) == 2
+            assert process.await_count == 0 and len(pending.attachments) == 3
             process.reset_mock()
             await bot.finish_text_conversation(*first)
             assert process.await_count == 1
             assert 'instructions for both files' in process.call_args.args[2]
             rows = await h.db.get_attachment_records()
-            assert len(json.loads(rows[-1]['metadata'])['attachments']) == 2
+            assert len(json.loads(rows[-1]['metadata'])['attachments']) == 3
             assert not bot.has_pending_text_conversation(first[0])
             await bot.handle_document_message(*first)
             assert not bot.has_pending_text_conversation(first[0])

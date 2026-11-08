@@ -131,6 +131,7 @@ class Harness:
 
     async def __aexit__(self, *exc):
         self.bot.cancel_pending_album_conversations()
+        self.bot._pending_text_conversations.clear()
         await self.http.aclose()
         await self.sdk.close()
         await self.bot.get_conversations().close()
@@ -529,18 +530,22 @@ async def check_upload_entrypoints(bot, root):
     async with Harness(bot, root) as h:
         png, webp, jpeg = image_bytes("PNG"), image_bytes("WEBP"), image_bytes("JPEG")
         msg = h.update.message
+        msg.message_id = 1001
         msg.caption = CAPTION
         msg.document = SimpleNamespace(file_name="photo.bin", mime_type="application/octet-stream",
                                        file_size=len(png))
         with patch.object(bot, "download_telegram_file", AsyncMock(return_value=png)):
             await bot.handle_document_message(h.update, h.context)
+            await bot.finish_text_conversation(h.update,h.context)
         assert unpack_request(h.requests[-1])[1] == [png]
         result["telegram_image_document"] = True
 
         msg.photo = [object()]
+        msg.message_id = 1002
         msg.media_group_id = None
         with patch.object(bot, "download_telegram_file", AsyncMock(return_value=webp)):
             await bot.handle_photo_message(h.update, h.context)
+            await bot.finish_text_conversation(h.update,h.context)
         assert unpack_request(h.requests[-1])[1] == [png, webp]
         result["telegram_photo"] = True
 
@@ -566,7 +571,7 @@ async def check_upload_entrypoints(bot, root):
             )]
             updates.append((update, context))
 
-        async def download(photo):
+        async def download(photo,destination=None):
             await asyncio.sleep(photo.delay)
             return photo.data
 
@@ -576,13 +581,11 @@ async def check_upload_entrypoints(bot, root):
         ):
             await asyncio.gather(*(bot.handle_photo_message(update, context) for update, context in updates))
             assert len(h.requests) == before
-            assert len(await h.db.get_attachment_records()) == 3
+            assert not await h.db.get_attachment_records()
             await bot.handle_photo_message(*updates[0])
-            assert len(await h.db.get_attachment_records()) == 3
-            pending = bot._pending_album_conversations[(1, "album-test")]
-            await bot.flush_album_conversation((1, "album-test"))
-            await asyncio.gather(pending.flush_task, return_exceptions=True)
-            assert pending.flush_task.done()
+            pending = bot._pending_text_conversations[bot.get_text_conversation_buffer_key(updates[0][0])]
+            assert len(pending.attachments)==3
+            await bot.finish_text_conversation(*updates[0])
         assert len(h.requests) == before + 1
         texts, images, _ = unpack_request(h.requests[-1])
         assert images == [image_bytes("PNG", (i, 20, 30)) for i in (101, 102, 103)]
@@ -645,23 +648,13 @@ async def check_concurrent_upload_order(bot, root):
                 task = asyncio.create_task(handler(*upload_update(h, kind, 101, first)))
                 try:
                     await asyncio.wait_for(started.wait(), 10)
-                    from xgent_app.conversations import ConversationBusy
-                    if kind == 'photo':
-                        try:
-                            await handler(*upload_update(h, kind, 102, second))
-                        except ConversationBusy:
-                            pass
-                        else:
-                            raise AssertionError('busy photo request was admitted')
-                    else:
-                        await handler(*upload_update(h, kind, 102, second))
+                    await handler(*upload_update(h, kind, 102, second))
                 finally:
                     release.set()
                     await asyncio.wait_for(task, 10)
             with patch.object(bot, 'download_telegram_file', AsyncMock(return_value=second)), patch.object(bot, 'process_conversation', AsyncMock()):
                 await handler(*upload_update(h, kind, 102, second))
-                if kind == 'document':
-                    await bot.finish_text_conversation(h.update, h.context)
+                await bot.finish_text_conversation(h.update, h.context)
             rows = await h.db.get_attachment_records()
             refs = [ref for row in rows for ref in json.loads(row['metadata'])['attachments']]
             assert [ref["source_message_id"] for ref in refs] == [101, 102]
@@ -748,28 +741,16 @@ async def seed_pending_albums(bot, root):
                 await bot.handle_photo_message(*upload_update(
                     h, "photo", i, image_bytes("PNG", (i, 20, 30)), "pending-photos",
                 ))
-            # A second album is a separate request: explicitly stop the first
-            # pending group without clearing its durable uploads before admitting it.
-            manager = bot.get_conversations()
-            running = (await manager.state())['running']
-            await manager.request_stop(running['run_id'])
-            async def stopped():
-                while manager.busy():
-                    await asyncio.sleep(0.01)
-            await asyncio.wait_for(stopped(), 5)
-            assert len(await h.db.get_attachment_records()) == 3
+            # Two album groups share the same manual send, with no automatic run.
+            assert not bot.get_conversations().busy() and not await h.db.get_attachment_records()
             for i, data in ((203, image_bytes("JPEG")), (201, image_bytes("WEBP")),
                             (202, LONG_TEXT.encode())):
                 await bot.handle_document_message(*upload_update(
                     h, "document", i, data, "pending-documents",
                 ))
             with patch.object(bot, 'process_conversation', AsyncMock()):
-                running = (await manager.state())['running']
-                if running:
-                    await manager.request_stop(running['run_id'])
-                    await asyncio.wait_for(stopped(), 5)
                 await bot.finish_text_conversation(h.update, h.context)
-        assert len(await h.db.get_attachment_records()) == 6
+        assert sum(len(json.loads(row['metadata'])['attachments']) for row in await h.db.get_attachment_records()) == 6
         assert not h.requests
         assert not bot._pending_album_conversations
         return {"persisted_before_any_flush": True}
@@ -778,7 +759,7 @@ async def seed_pending_albums(bot, root):
 async def after_pending_albums_restart(bot, root):
     async with Harness(bot, root) as h:
         assert not bot._pending_album_conversations
-        assert len(await h.db.get_attachment_records()) == 6
+        assert sum(len(json.loads(row['metadata'])['attachments']) for row in await h.db.get_attachment_records()) == 6
         await h.call(question="after restart before album reply")
         texts, images, _ = unpack_request(h.requests[-1])
         assert images == [
@@ -866,9 +847,8 @@ async def check_malformed_ingress(bot, root):
             with patch.object(bot, "download_telegram_file", AsyncMock(return_value=data)):
                 pair = upload_update(h, kind, 100, data, name=name)
                 await handler(*pair)
-                if kind == 'document':
-                    assert not h.requests[before:]
-                    await bot.finish_text_conversation(*pair)
+                assert not h.requests[before:]
+                await bot.finish_text_conversation(*pair)
             rows = await h.db.get_attachment_records()
             assert len(rows) == 1
             assert json.loads(rows[0]["metadata"])["attachments"][0]["kind"] == ('invalid' if kind == 'photo' else 'binary')
