@@ -759,7 +759,7 @@ class ConversationStore(ChildConversationStore, QueueStore):
         self._config_cache.pop('telegram_conversation_id', None)
         return changed
 
-    async def request_conversation_stop(self, run_id, conversation_id=None):
+    async def request_conversation_stop(self, run_id, conversation_id=None, *, reason='explicit_stop', origin='legacy'):
         async with self._transaction() as conn:
             runs = await _config(conn, 'conversation_runs', {})
             running = next((run for run in runs.values() if run.get('run_id') == run_id), None)
@@ -770,6 +770,9 @@ class ConversationStore(ChildConversationStore, QueueStore):
             if running.get('stop_requested'):
                 return True
             running['stop_requested'] = True
+            running['stop_reason'] = str(reason)
+            running['stop_origin'] = str(origin)
+            running['stop_requested_at'] = time.time()
             await self._queue_pause_conversation(conn, running['conversation_id'], 'stopped')
             await _set_config(conn, 'conversation_runs', runs)
             await _set_config(conn, 'conversation_revision', int(await _config(conn, 'conversation_revision', 0)) + 1)

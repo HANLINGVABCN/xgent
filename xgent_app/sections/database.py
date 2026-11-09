@@ -359,6 +359,12 @@ class BotMemoryDB(ConversationStore):
                 notice_started_at REAL,
                 notice_sent_at REAL,
                 delivery_started_at REAL,
+                delivery_state TEXT,
+                delivery_record_id INTEGER,
+                delivery_conversation_run_id TEXT,
+                delivery_error TEXT,
+                delivery_retry_at REAL,
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
                 delivered_at REAL,
                 created_at REAL NOT NULL,
                 UNIQUE(task_id, scheduled_at),
@@ -384,6 +390,12 @@ class BotMemoryDB(ConversationStore):
             'ALTER TABLE trigger_runs ADD COLUMN notice_started_at REAL',
             'ALTER TABLE trigger_runs ADD COLUMN notice_sent_at REAL',
             'ALTER TABLE trigger_runs ADD COLUMN delivery_started_at REAL',
+            'ALTER TABLE trigger_runs ADD COLUMN delivery_state TEXT',
+            'ALTER TABLE trigger_runs ADD COLUMN delivery_record_id INTEGER',
+            'ALTER TABLE trigger_runs ADD COLUMN delivery_conversation_run_id TEXT',
+            'ALTER TABLE trigger_runs ADD COLUMN delivery_error TEXT',
+            'ALTER TABLE trigger_runs ADD COLUMN delivery_retry_at REAL',
+            'ALTER TABLE trigger_runs ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0',
         ):
             try:
                 await conn.execute(migration)
@@ -2012,6 +2024,8 @@ class BotMemoryDB(ConversationStore):
             'finished_at', 'status', 'trigger_reason', 'matched_conditions',
             'exit_code', 'output', 'output_path', 'error', 'notice_started_at',
             'notice_sent_at', 'delivery_started_at', 'delivered_at',
+            'delivery_state', 'delivery_record_id', 'delivery_conversation_run_id',
+            'delivery_error', 'delivery_retry_at', 'delivery_attempts',
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
         if not updates:
@@ -2028,13 +2042,45 @@ class BotMemoryDB(ConversationStore):
         async with self._write() as conn:
             cursor = await conn.execute('''
                 UPDATE trigger_runs
-                SET delivery_started_at = ?
+                SET delivery_started_at = ?, delivery_state = 'generating',
+                    delivery_attempts = delivery_attempts + 1
                 WHERE run_id = ?
                   AND finished_at IS NOT NULL
                   AND delivered_at IS NULL
                   AND delivery_started_at IS NULL
-            ''', (claimed_at, run_id))
+                  AND COALESCE(delivery_state, '') != 'paused'
+                  AND (delivery_retry_at IS NULL OR delivery_retry_at <= ?)
+            ''', (claimed_at, run_id, claimed_at))
             return bool(cursor.rowcount)
+
+    async def trigger_delivery_has_progress(self, run: Dict[str, Any]) -> bool:
+        """Never automatically replay a reply that may already have run tools."""
+        owner = run.get('delivery_conversation_run_id')
+        if not owner:
+            return True  # Old interrupted deliveries have no trustworthy checkpoint.
+        conn = await self._get_conn()
+        cursor = await conn.execute('''SELECT EXISTS(
+            SELECT 1 FROM global_messages WHERE
+            json_extract(metadata, '$.run_id') = ?
+            AND msg_type IN ('ai_reply', 'agent_result', 'media_reply', 'presentation_note')
+            AND json_extract(metadata, '$.trigger_result') IS NULL
+        ) OR EXISTS(
+            SELECT 1 FROM turn_operations o JOIN conversation_turns t ON t.id=o.turn_id
+            WHERE t.run_id=?
+        )''', (owner, owner))
+        row = await cursor.fetchone()
+        await cursor.close()
+        return bool(row[0])
+
+    async def defer_trigger_delivery(self, run_id: str, reason: str, *, paused: bool = False):
+        run = await self.get_trigger_run(run_id)
+        if not run or run.get('delivered_at') is not None:
+            return
+        paused = paused or int(run.get('delivery_attempts') or 0) >= 3 or await self.trigger_delivery_has_progress(run)
+        delay = min(300, 20 * 2 ** min(4, max(0, int(run.get('delivery_attempts') or 1) - 1)))
+        await self.finish_trigger_run(run_id, delivery_started_at=None,
+            delivery_state='paused' if paused else 'retry', delivery_error=reason[:1000],
+            delivery_retry_at=None if paused else time.time() + delay)
 
     async def get_trigger_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         conn = await self._get_conn()
@@ -2084,14 +2130,15 @@ class BotMemoryDB(ConversationStore):
             WHERE r.finished_at IS NOT NULL AND r.delivered_at IS NULL
               AND r.status IN ('completed', 'condition_matched', 'condition_unmatched', 'failed', 'interrupted')
               AND t.status != 'cancelled'
+              AND COALESCE(r.delivery_state, '') != 'paused'
+              AND (r.delivery_retry_at IS NULL OR r.delivery_retry_at <= ?)
             ORDER BY r.finished_at ASC
-        ''')
+        ''', (time.time(),))
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
     async def finalize_interrupted_trigger_deliveries(self) -> List[Dict[str, Any]]:
-        # SELECT 出来的 run_id 紧接着被 UPDATE，必须同事务，
-        # 否则中途崩溃会让这批 run 既被返回投递、又没标记 delivered_at。
+        # 恢复领取状态，不把“开始投递”当成“已经送达”。
         async with self._transaction() as conn:
             cursor = await conn.execute('''
                 SELECT r.*
@@ -2106,17 +2153,9 @@ class BotMemoryDB(ConversationStore):
             rows = [dict(row) for row in await cursor.fetchall()]
             if not rows:
                 return []
-            run_ids = [row['run_id'] for row in rows]
-            placeholders = ', '.join('?' for _ in run_ids)
-            await conn.execute(
-                f'''
-                UPDATE trigger_runs
-                SET delivered_at = ?
-                WHERE run_id IN ({placeholders}) AND delivered_at IS NULL
-                ''',
-                (time.time(), *run_ids),
-            )
-            return rows
+        for row in rows:
+            await self.defer_trigger_delivery(row['run_id'], '服务重启中断回执，执行结果仍保留')
+        return rows
 
     async def interrupt_running_trigger_runs(self) -> int:
         now = time.time()

@@ -56,16 +56,16 @@ def test_final_details_use_last_reply_and_missing_values_remain_explicit():
     facts = {'model':'incorrect-fallback','round':3,'usage':{'input_tokens':333,'output_tokens':33},'elapsed_seconds':2}
     summary = {'rounds':3,'operations':2,'elapsed_seconds':5,'reason':'stopped'}
     details = reply_details(row, facts, summary)[0]
-    assert details.startswith('<blockquote expandable>↑ 333 · ↓ 33 · cache 0 · 2s\n')
-    assert 'P&lt;&amp; / actual-model' in details
-    assert details.endswith('2023-11-15 06:13:20</blockquote>')
+    assert '↑333（未提供） ↓33 2s 16.5tok/s' in details
+    assert 'P&lt;&amp;/actual-model' in details
+    assert details.endswith('2023-11-15 06:13</blockquote>')
     assert '回复详情' not in details and '模型：' not in details and '时间：' not in details
-    assert details.index('↑ 333') < details.index('actual-model') < details.index('2023-11-15')
+    assert details.index('↑333') < details.index('actual-model') < details.index('2023-11-15')
     assert '总耗时5s' in details
     assert '共执行 3 轮，2 个操作' in details and 'stopped' not in details
     missing = reply_details({'metadata':{}}, {})[0]
-    assert missing.endswith('\n未提供\n未记录</blockquote>')
-    assert '↑ 未提供 · ↓ 未提供 · cache 0 · 耗时未记录' in missing
+    assert missing.endswith('服务商未记录/模型未记录 时间未记录</blockquote>')
+    assert '↑未提供（未提供） ↓未提供 耗时未记录 速率未提供' in missing
 
 
 def test_details_overflow_becomes_only_the_final_continuation():

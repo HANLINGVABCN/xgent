@@ -115,7 +115,7 @@ def get_or_create_stop_event() -> asyncio.Event:
         event = get_conversations().stop_event()
         if event is not None:
             return event
-        return _scoped_stop_events.setdefault((scope.conversation_id, scope.generation), asyncio.Event())
+        return _scoped_stop_events.setdefault((scope.conversation_id, scope.generation, scope.run_id), asyncio.Event())
     if _stop_generation_event is None:
         _stop_generation_event = asyncio.Event()
     return _stop_generation_event
@@ -124,7 +124,7 @@ def get_or_create_stop_event() -> asyncio.Event:
 def is_stop_requested() -> bool:
     scope = current_scope(required=False)
     if scope is not None:
-        event = get_conversations().stop_event() or _scoped_stop_events.get((scope.conversation_id, scope.generation))
+        event = get_conversations().stop_event() or _scoped_stop_events.get((scope.conversation_id, scope.generation, scope.run_id))
         return bool(event and event.is_set())
     return bool(_stop_generation_event and _stop_generation_event.is_set())
 
@@ -862,8 +862,11 @@ def build_token_usage_message(usage: Optional[Dict[str, int]], elapsed_seconds: 
     if input_tokens is None and output_tokens is None:
         return None
 
-    from xgent_app.presentation import usage_line
-    body = usage_line({'usage': usage, 'elapsed_seconds': elapsed_seconds})
+    from xgent_app.presentation import current_turn, usage_line
+    from xgent_app.conversations import reply_generation_snapshot
+    turn = current_turn()
+    identity = (turn.active_reply if turn and turn.active_reply else None) or reply_generation_snapshot() or {}
+    body = usage_line({**identity, 'usage': usage, 'elapsed_seconds': elapsed_seconds})
     return f"<i>{html.escape(body)}</i>"
 
 

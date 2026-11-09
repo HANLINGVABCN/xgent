@@ -356,7 +356,7 @@ async def poll_conversation_jobs(namespace):
                     result = await db.conversation_job_result(job['id'], include_content=False, _allow_invalid=True)
                     await db.cancel_conversation_job(job['id'], reason='技能已关闭、任务已取消或所属上下文已改变')
                     if result.get('run_id'):
-                        await manager.request_stop(result['run_id'], job['conversation_id'])
+                        await manager.request_stop(result['run_id'], job['conversation_id'], reason='cancel_child_job')
                     continue
                 if job['status'] == 'queued':
                     item = await db.queue_item(job['queue_id']) if job['queue_id'] else None

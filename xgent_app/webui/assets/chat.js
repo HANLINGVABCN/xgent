@@ -323,7 +323,7 @@ import {installViewportFit} from './viewport.js';
     if (isNaN(d.getTime())) d = new Date();
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, '0') + "-" +
       String(d.getDate()).padStart(2, '0') + " " + String(d.getHours()).padStart(2, '0') + ":" +
-      String(d.getMinutes()).padStart(2, '0') + ":" + String(d.getSeconds()).padStart(2, '0');
+      String(d.getMinutes()).padStart(2, '0');
   }
 
   function applyAiGeneration(entry, timestamp, generation) {
@@ -696,10 +696,12 @@ import {installViewportFit} from './viewport.js';
     }
     const huds=entry.body.querySelectorAll('.token-hud');
     if(huds.length){entry.footerMeta.querySelectorAll('.token-hud').forEach(node=>node.remove());huds.forEach(node=>entry.footerMeta.append(node));}
+    const unifiedUsage=!!entry.footerMeta.querySelector('[data-usage-version="2"]');
     const ts=entry.bubble.querySelector('.ts');if(ts&&!entry.footerMeta.contains(ts))entry.footerMeta.prepend(ts);
     if(entry.aiMeta&&entry.head&&!entry.head.contains(entry.aiMeta))entry.head.append(entry.aiMeta);
+    if(entry.aiMeta&&unifiedUsage&&!entry.modelError)entry.aiMeta.hidden=true;
     if(entry.replyTime){
-      entry.replyTime.textContent=entry.durable&&entry.timestamp!=null?
+      entry.replyTime.textContent=!unifiedUsage&&entry.durable&&entry.timestamp!=null?
         detailedTime(entry.aiGeneration?.generated_at??entry.timestamp):'';
       entry.replyTime.hidden=!entry.replyTime.textContent;
       if(!entry.footerMeta.contains(entry.replyTime))entry.footerMeta.prepend(entry.replyTime);

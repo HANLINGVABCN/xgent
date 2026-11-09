@@ -2517,7 +2517,7 @@ async def _clear_current_conversation_inner():
         # a blocked upload/network read (or on our own task): stale writes are
         # rejected by the version guard and the execution slot remains occupied
         # until the old task really exits.
-        await manager.request_stop(running['run_id'], scope.conversation_id)
+        await manager.request_stop(running['run_id'], scope.conversation_id, reason='clear_conversation')
     db = await BotMemoryDB.get_instance()
     old_generation = await db.get_attachment_generation()
     counts = await db.clear_all_conversation_memory()
@@ -2557,7 +2557,7 @@ async def _finish_conversation_deletion(cid):
         running = (await manager.state()).get('runs', {}).get(cid)
         if not running or running['conversation_id'] != cid:
             break
-        await manager.request_stop(running['run_id'], cid)
+        await manager.request_stop(running['run_id'], cid, reason='delete_conversation')
         await asyncio.sleep(.1)
     SECRET_STORE.purge(cid)
     PENDING_ASKS.purge_conversation(cid)

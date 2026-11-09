@@ -11,9 +11,12 @@ from dataclasses import dataclass, field
 import html
 import copy
 import json
+import math
 import re
 import time
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any
 
 from .protocols import ProtocolParser
@@ -97,24 +100,73 @@ def _number(value):
     return f'{value:,}' if isinstance(value, int) and not isinstance(value, bool) else '未提供'
 
 
-def usage_line(reply):
+def reply_usage_facts(reply, *, row=None):
+    """Use the actual reply identity for live, saved and client-only metrics."""
+    result = dict(reply or {})
+    row = row or {}
+    metadata = metadata_dict(row.get('metadata'))
+    generation = metadata_dict(metadata.get('ai_generation'))
+    for key in ('provider', 'model', 'generated_at'):
+        if generation.get(key) is not None and generation.get(key) != '':
+            result[key] = generation[key]
+    if result.get('generated_at') is None and row.get('timestamp') is not None:
+        result['generated_at'] = row['timestamp']
+    return result
+
+
+def _compact_decimal(value):
+    return f'{value:,.1f}'.rstrip('0').rstrip('.')
+
+
+def usage_parts(reply, *, time_at_end=False, timezone='Asia/Shanghai'):
+    """One visible format; cache is a subset of input, rate is output/elapsed."""
     usage = reply.get('usage') or {}
     if not usage and reply.get('elapsed_seconds') is None:
-        return ''
-    return (f"↑ {_number(usage.get('input_tokens'))} · "
-            f"↓ {_number(usage.get('output_tokens'))} · cache {_number(usage.get('cached_tokens') or 0)} · "
-            f"{approximate_seconds(reply['elapsed_seconds']) if reply.get('elapsed_seconds') is not None else '耗时未记录'}")
+        return []
+    stamp = reply.get('generated_at')
+    timestamp = '时间未记录'
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and math.isfinite(stamp):
+        try:
+            timestamp = datetime.fromtimestamp(stamp, ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M')
+        except (ValueError, OverflowError, OSError, ZoneInfoNotFoundError):
+            pass
+    elapsed = reply.get('elapsed_seconds')
+    valid_elapsed = (isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)
+                     and math.isfinite(elapsed) and elapsed >= 0)
+    output = usage.get('output_tokens')
+    valid_output = isinstance(output, int) and not isinstance(output, bool) and output >= 0
+    provider = str(reply.get('provider') or '服务商未记录')
+    model = str(reply.get('model') or '模型未记录')
+    parts = [
+        ('input', f"↑{_number(usage.get('input_tokens'))}（{_number(usage.get('cached_tokens'))}）"),
+        ('output', f"↓{_number(output)}"),
+        ('elapsed', _compact_decimal(elapsed) + 's' if valid_elapsed else '耗时未记录'),
+        ('speed', _compact_decimal(output / elapsed) + 'tok/s'
+         if valid_elapsed and elapsed > 0 and valid_output else '速率未提供'),
+        ('model', provider + '/' + model),
+    ]
+    if time_at_end:
+        parts.append(('time', timestamp))
+    else:
+        parts.insert(0, ('time', timestamp))
+    return parts
+
+
+def usage_line(reply, *, time_at_end=False, timezone='Asia/Shanghai'):
+    return ' '.join(text for _, text in usage_parts(reply, time_at_end=time_at_end, timezone=timezone))
 
 
 def usage_details(reply):
     usage = reply.get('usage') or {}
     elapsed = reply.get('elapsed_seconds')
     output = usage.get('output_tokens')
-    rate = f'{output / elapsed:.1f} tokens/s' if isinstance(output, int) and elapsed and elapsed > 0 else '未提供'
+    parts = dict(usage_parts(reply))
+    rate = parts.get('speed', '速率未提供')
     rows = [
-        f"轮次：R{reply.get('round', '?')}", f"模型：{reply.get('model') or '未提供'}",
+        usage_line(reply),
+        f"轮次：R{reply.get('round', '?')}",
         f"输入 Token：{_number(usage.get('input_tokens'))}",
-        f"缓存 Token：{_number(usage.get('cached_tokens'))}",
+        f"缓存 Token：{_number(usage.get('cached_tokens'))}（已包含在输入量中）",
         f"输出 Token：{_number(output)}", f"思考 Token：{_number(usage.get('reasoning_tokens'))}",
         f"可见输出 Token：{_number(usage.get('visible_output_tokens'))}",
         f"总 Token：{_number(usage.get('total_tokens'))}",
@@ -132,7 +184,10 @@ def footer_html(presentation, *, expanded=False):
     pieces = []
     line = usage_line(presentation)
     if line:
-        pieces.append('<i>' + html.escape(line) + '</i>')
+        parts = usage_parts(presentation)
+        pieces.append('<span class="usage-line" data-usage-version="2">' + ' '.join(
+            '<span class="usage-' + key + '">' + html.escape(text) + '</span>'
+            for key, text in parts) + '</span>')
     if presentation.get('summary'):
         pieces.append('<i>' + html.escape(summary_line(presentation['summary'])) + '</i>')
     if expanded and line:
@@ -240,6 +295,9 @@ class PresentationTurn:
         self.active_reply = {'version': 1, 'mode': self.mode, 'kind': 'ai_reply',
             'round': len(self.replies) + 1, 'model': getattr(reply, 'presentation_model', ''),
             'message_ids': ids, 'record_id': None, 'execution_schema': 1}
+        from .conversations import reply_generation_snapshot
+        generation = reply_generation_snapshot() or {}
+        self.active_reply.update(generation)
         from .tool_calls import current_session
         if current_session() is not None:
             self.active_reply['agent_call_mode'] = current_session().mode

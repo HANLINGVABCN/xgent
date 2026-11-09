@@ -101,7 +101,7 @@ async def main():
                                 interrupt=page.locator('.bubble.ai').get_by_role('button',name='❌ 停止回答',exact=True)
                                 assert await interrupt.is_visible()
                                 assert await interrupt.evaluate('button=>{const bubble=button.closest(".bubble"),footer=bubble.querySelector(".message-footer");return button.closest(".reply-run-controls")===bubble.lastElementChild&&button.getBoundingClientRect().top>=footer.getBoundingClientRect().bottom;}')
-                                assert 'cache 0' in await page.locator('.bubble.ai').inner_text()
+                                assert '（未提供）' in await page.locator('.bubble.ai').inner_text()
                                 assert not task.done() and not done.exists()
                                 assert len(spawned)==1 and spawned[0].returncode is None
                                 snapshot=h.outbox.snapshot()

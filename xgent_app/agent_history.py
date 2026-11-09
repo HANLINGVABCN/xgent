@@ -54,6 +54,12 @@ async def persist_agent_result(
         if delivery and Path(delivery['path']).resolve() == Path(media[0]['path']).resolve():
             metadata['file_delivery'] = dict(delivery)
             media[0]['delivery_kind'] = delivery['kind']
+            caption = str(delivery.get('caption') or '')
+            import html
+            metadata['display'] = {'content': html.escape(caption).replace('\n', '<br>'), 'parse_mode': 'HTML'}
+            metadata['web_display'] = {'version': 1, 'presentation_mode': 'folded',
+                'segments': [{'kind': 'html', 'text': '<span class="file-delivery-note">'
+                             + html.escape(caption).replace('\n', '<br>') + '</span>'}]}
             outbox = getattr(message.bot, 'outbox', None)
             if outbox is not None:
                 metadata['web_live'] = {'epoch': outbox.snapshot()['epoch'], 'message_ids': [message.message_id]}

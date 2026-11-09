@@ -119,9 +119,10 @@ function sanitizeHtml(htmlStr) {
           // 保留：服务端 render_folded_html 用 <blockquote expandable> 标记
           // 「可展开折叠的协议代码块」（与电报原生 expandable 同源），网页据此做
           // 折叠交互（CSS blockquote[expandable] + bindContentClicks 里的点击切换）。
+        } else if (c.tagName === "SPAN" && a.name === "data-usage-version" && a.value === "2") {
         } else if (a.name === "class") {
           var classes = a.value.split(/\s+/).filter(function (name) {
-            return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note|file-write-result|stop-notice)$/.test(name);
+            return /^(language-[a-zA-Z0-9_+#.-]+|ta-(left|center|right)|task-item|task-checkbox|checked|table-wrap|file-delivery-note|file-write-result|stop-notice|usage-(line|time|input|output|elapsed|speed|model))$/.test(name);
           });
           if (classes.length) c.setAttribute("class", classes.join(" "));
           else c.removeAttribute("class");

@@ -133,7 +133,7 @@ def test_short_tool_blocks_are_really_foldable_in_tui_and_plain_cli_stays_compac
 
 def test_missing_usage_is_unknown_and_failures_remain_visible():
     line=usage_line({'round':1,'usage':{'input_tokens':100},'elapsed_seconds':1})
-    assert '↓ 未提供' in line and 'cache 0' in line
+    assert '↓未提供' in line and '（未提供）' in line
     assert '耗时未记录' in usage_line({'usage':{'input_tokens':100}})
     assert '思考 Token：未提供' in usage_details({'round':1,'usage':{}})
     failure=operation_html({'kind':'run','success':False,'return_code':1,'output':'permission denied'})
@@ -148,11 +148,11 @@ def test_new_replies_keep_response_timing_live_and_after_refresh(turns):
         for message in case['shown']:
             if message['msg_type']=='ai_reply':
                 footer=next(segment['text'] for segment in message['web_display']['segments'] if segment.get('footer'))
-                assert 'cache 2,130' in footer and '约 ' in footer,case['name']
+                assert '（2,130）' in footer and 'tok/s' in footer,case['name']
                 assert '未采集' not in footer and '耗时未记录' not in footer,case['name']
         final=case['final']
         footer=next(segment['text'] for segment in final['web_display']['segments'] if segment.get('footer'))
-        assert 'cache 2,130' in footer and '约 ' in footer,case['name']
+        assert '（2,130）' in footer and 'tok/s' in footer,case['name']
 
 
 def test_independent_cli_namespace_reprojects_history_without_server_module(monkeypatch, tmp_path):
@@ -193,6 +193,8 @@ def test_browser_retired_mode_events_preserve_expansion_and_reject_stale_snapsho
             route.fulfill(json={'messages':messages,'ui_generation':case['final']['ui_generation'],'busy':False,
                 'presentation_mode':mode[0],'next_cursor':None,'live':{**live,'frames':[]}})
         context.route('**/api/workbench/history?*',history)
+        context.route('**/api/workbench/command-output?*',lambda route:route.fulfill(json={
+            'text':'实际输出','offset':0,'next_offset':12,'size':12,'eof':True,'details':{'return_code':0}}))
         assert context.request.post(base+'/api/login',data={'password':'temporary-test-only'}).ok
         page=context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:
@@ -205,22 +207,23 @@ def test_browser_retired_mode_events_preserve_expansion_and_reject_stale_snapsho
             page.wait_for_function("document.querySelector('blockquote.execution-block').classList.contains('expanded')")
             assert 'uptime' in command.locator('pre').inner_text()
             page.reload();page.locator('.token-hud').first.wait_for()
-            assert page.locator('blockquote.execution-block').first.locator('pre').is_visible()
+            assert page.locator('blockquote.execution-block').first.locator('.execution-pre').is_visible()
             mode[0]='detailed'
             server.outbox.put({'type':'presentation_changed','presentation_mode':'detailed'})
             page.wait_for_timeout(300)
             assert page.locator('[data-presentation-mode=detailed]').count()==0
             assert page.locator('.msg-row').count()==5
-            assert page.locator('blockquote.execution-block').first.locator('pre').is_visible()
-            output=page.locator('.msg-row.cmd .execution-block').first
-            output.locator('.execution-row').click()
-            output.get_by_role('button',name='查看执行信息').click()
-            assert '返回码' in output.locator('.execution-details').inner_text()
+            assert page.locator('blockquote.execution-block').first.locator('.execution-pre').is_visible()
+            output=page.locator('.bubble.ai .command-with-output').first
+            output.locator('.command-output-button').click()
+            output.locator('.output-page-text').wait_for()
+            output.locator('.command-result-details summary').click()
+            assert '返回码' in output.locator('.command-result-details').inner_text()
             mode[0]='folded'
             server.outbox.put({'type':'presentation_changed','presentation_mode':'folded'})
             page.locator('.token-hud').first.wait_for()
             assert page.locator('.msg-row').count()==5
-            assert page.locator('blockquote.execution-block').first.locator('pre').is_visible()
+            assert page.locator('blockquote.execution-block').first.locator('.execution-pre').is_visible()
             stale={**case['final'],'presentation_mode':'detailed','text':'stale snapshot'}
             server.outbox.put(stale)
             page.wait_for_timeout(400)

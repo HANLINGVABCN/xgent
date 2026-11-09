@@ -2064,7 +2064,7 @@ def telegram_entry(handler):
                     target = action.split(':', 2)
                     run_id = target[1] if len(target)>1 else ''
                     ref = target[2] if len(target)>2 else None
-                    accepted = await manager.request_stop(run_id) if run_id and (
+                    accepted = await manager.request_stop(run_id, reason='stop_button') if run_id and (
                         ref is None or active_target(run_id,ref)) else False
                     await query.answer('已收到停止请求' if accepted else '该回合已结束，停止按钮已失效。')
                     return
@@ -2150,7 +2150,7 @@ def mirror_to_web(handler):
 
 
 async def _web_request_stop(run_id=None, conversation_id=None):
-    return await get_conversations().request_stop(run_id, conversation_id)
+    return await get_conversations().request_stop(run_id, conversation_id, reason='web_stop')
 
 
 def _web_is_busy() -> bool:

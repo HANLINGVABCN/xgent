@@ -84,7 +84,7 @@ async def cmd_stop_answer(update, context):
     state=await manager.state()
     cid=scope.conversation_id if scope else state.get('telegram_conversation_id')
     run=(state.get('runs') or {}).get(cid) or {}
-    accepted=await manager.request_stop(run['run_id'],cid) if run.get('run_id') else False
+    accepted=await manager.request_stop(run['run_id'],cid,reason='stop_command') if run.get('run_id') else False
     await context.bot.send_message(chat_id=update.effective_chat.id,
         text='⏹ 已请求停止当前会话，已有结果保留。' if accepted else '当前会话没有正在执行的回答。')
 

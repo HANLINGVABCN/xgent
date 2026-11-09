@@ -339,11 +339,13 @@ def apply_history_presentation(message, record, metadata, *, namespace=None, mod
         # A system receipt has its own frozen display, not an AI/tool reply.
         message['presentation_mode'] = 'folded'
         return
-    from .presentation import normalize_mode, ai_html, operation_html, footer_html, metadata_dict, current_turn
+    from .presentation import normalize_mode, ai_html, operation_html, footer_html, metadata_dict, current_turn, reply_usage_facts
     from .agent_status import compact_agent_round_status
     from .web_display import build_web_display, build_operation_display, web_footer_html
     ns = namespace if namespace is not None else _section_ns()
     presentation = metadata_dict(metadata.get('presentation'))
+    if record.get('msg_type') in {'ai_reply', 'media_reply'}:
+        presentation = reply_usage_facts(presentation, row=record)
     if isinstance(metadata.get('native_calls'), list) and metadata['native_calls']:
         presentation = {**presentation, 'native_calls': metadata['native_calls'], 'agent_call_mode': 'toolcall'}
     kind, raw = record.get('msg_type'), str(record.get('content') or '')

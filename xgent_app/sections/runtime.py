@@ -650,7 +650,7 @@ async def run_app() -> int:
         manager = get_conversations()
         for run in list(manager._runs.values()):
             if run.scope.run_id:
-                await manager.request_stop(run.scope.run_id, run.scope.conversation_id)
+                await manager.request_stop(run.scope.run_id, run.scope.conversation_id, reason='shutdown')
         with contextlib.suppress(Exception):
             await get_text_queue().close()
         with contextlib.suppress(Exception):

@@ -113,7 +113,7 @@ async def display_matrix(bot, root):
                         first = next(message for message in native.messages.values() if 'FIRST_REPLY' in message['text'])
                         running = next(message for message in native.messages.values() if 'run-x · 执行中' in message['text'])
                         assert not buttons(first), buttons(first)
-                        assert '回复详情' not in first['text'] and '↑ 111' not in first['text']
+                        assert '回复详情' not in first['text'] and '↑111' not in first['text']
                         assert buttons(running)==['❌ 停止回答'],buttons(running)
                         if outcome=='stopped':
                             scope = contexts[-1][2]
@@ -133,8 +133,8 @@ async def display_matrix(bot, root):
                         assert not any('停止回答' in label for message in native.messages.values() for label in buttons(message))
                         assert all(len(message['text'].encode('utf-16-le'))//2 <= (32768 if message.get('rich') else 4096)
                                    for message in native.messages.values())
-                        assert '↑ '+('333' if outcome=='success' else '111')+' ·' in all_text
-                        assert 'cache 0' in all_text
+                        assert '↑'+('333' if outcome=='success' else '111')+'（' in all_text
+                        assert '（未提供）' in all_text
                         assert any(('🟢 run-x' if outcome!='stopped' else '⚪ run-x') in message['text'] for message in native.messages.values())
                         assert '已折叠 11 行 · 存档：' in html.unescape(re.sub(r'<[^>]+>', '', all_text))
                         metadata = json.loads(ai[-1]['metadata']) if isinstance(ai[-1]['metadata'],str) else ai[-1]['metadata']
@@ -193,7 +193,7 @@ async def single_reply_edges(bot, root):
                         if outcome=='overflow':
                             assert raw in texts
                             assert any(text.startswith('<blockquote expandable>↑') for text in texts)
-                        if outcome=='no_usage':assert any('↑ 未提供 · ↓ 未提供 · cache 0' in text for text in texts)
+                        if outcome=='no_usage':assert any('↑未提供（未提供） ↓未提供' in text for text in texts)
                         assert not any('<blockquote expandable>↑' in str(frame.get('text','')) for frame in h.drain_frames())
                         cases.append({'style':style,'outcome':outcome,'details_once':True})
             finally:await channel.aclose()

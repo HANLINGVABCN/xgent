@@ -66,6 +66,11 @@ async def _sync_presentation_footer(context, row_id, reply):
     metadata = metadata_dict(row.get('metadata'))
     display_raw = (metadata.get('stopped_reply') or {}).get('partial', row['content'])
     presentation = {k: v for k, v in facts.items() if k not in {'record_id', 'message_ids', 'base_fragment'}}
+    from xgent_app.presentation import reply_usage_facts
+    presentation = reply_usage_facts(presentation, row=row)
+    for key in ('provider', 'model', 'generated_at'):
+        if key in presentation:
+            facts[key] = presentation[key]
     presentation['revision'] = int((metadata.get('presentation') or {}).get('revision', 0)) + 1
     metadata['presentation'] = presentation
     footer = footer_html(presentation) if turn.folded else ''
@@ -2471,7 +2476,11 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
                                 chat_id=update.effective_chat.id,
                                 notice=sendfile_notice,
                             )
-                            await publish_saved_reply(context, file_record_id)
+                            from types import SimpleNamespace
+                            sender = current_turn().last_message
+                            file_reply = (SimpleNamespace(presentation_message_ids=[sender.message_id])
+                                          if sender and getattr(sender, 'file_delivery', None) else None)
+                            await publish_saved_reply(context, file_record_id, file_reply)
                             await add_tool_context(
                                 _ctx_with_notice(build_sendfile_context_message(sendfile_notice), smart_notice)
                             )

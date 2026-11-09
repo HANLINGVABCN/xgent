@@ -127,7 +127,7 @@ def test_real_shell_single_rows_inline_actions_and_copying(full_output_server, t
                 assert page.locator('.bubble.cmd .msg-actions,.bubble.sys .msg-actions').count()==0
                 assert page.locator('.bubble.sys .bubble-header:visible,.bubble.cmd .bubble-header:visible').count()==0
                 assert page.locator('.bubble.ai .bubble-header:visible').count()==1
-                assert page.locator('.bubble-header .ai-generation-meta:visible').count()==1
+                assert page.locator('.bubble-header .ai-generation-meta:visible').count()==0
                 assert page.locator('.footer-meta .ai-generation-meta').count()==0
                 page.locator('.bubble.ai .copy-message-action').first.click()
                 assert page.evaluate('navigator.clipboard.readText()').replace('\r\n','\n')==case['expected_raw'][0]
@@ -177,7 +177,8 @@ def test_reply_footer_and_single_author_survive_live_adoption_pruning_and_refres
             value['turn_id']=turn
         if kind=='ai_reply':
             value['ai_generation']={'provider':'p','model':'m','generated_at':timestamp+mid}
-            facts={'usage':{'input_tokens':4110,'output_tokens':86,'cached_tokens':3660},'elapsed_seconds':1}
+            facts={'usage':{'input_tokens':4110,'output_tokens':86,'cached_tokens':3660},'elapsed_seconds':1,
+                   'provider':'p','model':'m','generated_at':timestamp+mid}
             value['web_display']=build_web_display(text,mode=mode[0],presentation=facts)
         return value
 
@@ -220,7 +221,7 @@ def test_reply_footer_and_single_author_survive_live_adoption_pruning_and_refres
                 assert page.locator('[data-record-id="5"] .bubble-header').is_hidden()
                 assert page.locator('[data-record-id="9"] .bubble-header').is_hidden()
                 assert page.locator('[data-record-id="13"] .bubble-header').is_hidden()
-                assert page.locator('.bubble-header .ai-generation-meta:visible').count()==3
+                assert page.locator('.bubble-header .ai-generation-meta:visible').count()==0
                 assert page.locator('.footer-meta .ai-generation-meta').count()==0
                 assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
                 for row in page.locator('.msg-row.ai').all():
@@ -229,18 +230,18 @@ def test_reply_footer_and_single_author_survive_live_adoption_pruning_and_refres
                     assert model.text_content()=='p / m'
                     meta=row.locator('.footer-meta .reply-timestamp')
                     assert '模型' not in meta.inner_text()
-                    assert meta.bounding_box()['y']>=body['y']+body['height']
+                    assert meta.is_hidden()
                     hud=row.locator('.footer-meta .token-hud')
-                    assert '↑ 4,110 · ↓ 86 · cache 3,660 · 约 1.0 秒' in hud.inner_text()
-                    assert meta.evaluate('(n)=>n.compareDocumentPosition(n.parentElement.querySelector(".token-hud"))&Node.DOCUMENT_POSITION_FOLLOWING')
+                    assert '↑4,110（3,660） ↓86 1s 86tok/s p/m' in hud.inner_text()
+                    assert '模型' not in hud.inner_text()
                     assert hud.evaluate('(n)=>getComputedStyle(n).display')=='inline'
                     if width==1440:
                         positions=row.evaluate('''(n)=>{
-                            const a=n.querySelector('.reply-timestamp').getClientRects()[0];
-                            const b=n.querySelector('.token-hud i').getClientRects()[0];
+                            const a=n.querySelector('.usage-time').getClientRects()[0];
+                            const b=n.querySelector('.usage-input').getClientRects()[0];
                             return {sameLine:Math.abs(a.y-b.y)<2,gap:b.x-a.right};
                         }''')
-                        assert positions['sameLine'] and 8<=positions['gap']<=16,positions
+                        assert positions['sameLine'] and 1<=positions['gap']<=8,positions
                 page.locator('[data-record-id="5"] .copy-message-action').click()
                 assert page.evaluate('navigator.clipboard.readText()')=='第二轮：结果已确认。'
                 page.locator('#log').evaluate('(n)=>n.scrollTop=0')

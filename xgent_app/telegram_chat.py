@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from .protocols import ProtocolParser, _telegram_units
 
@@ -68,28 +66,22 @@ def output_chunks(operation):
 
 
 def reply_details(row, facts, summary=None, *, timezone='Asia/Shanghai'):
-    from .presentation import metadata_dict, summary_line, usage_line
+    from .presentation import metadata_dict, reply_usage_facts, summary_line, usage_line
 
     metadata = metadata_dict(row.get('metadata'))
-    generation = metadata.get('ai_generation') or {}
-    provider = str(generation.get('provider') or '')
-    model = str(generation.get('model') or facts.get('model') or '')
-    model_name = ' / '.join(value for value in (provider, model) if value) or '未提供'
-    stamp = generation.get('generated_at', row.get('timestamp'))
-    generated_at = (datetime.fromtimestamp(float(stamp), ZoneInfo(timezone)).strftime('%Y-%m-%d %H:%M:%S')
-                    if isinstance(stamp, (int, float)) else '未记录')
     presentation = metadata.get('presentation') or {}
     usage = facts.get('usage') or presentation.get('usage') or {}
-    line = usage_line({**presentation, **facts, 'usage': {'input_tokens': usage.get('input_tokens'),
-        'output_tokens': usage.get('output_tokens'), 'cached_tokens': usage.get('cached_tokens')}})
+    values = reply_usage_facts({**presentation, **facts, 'usage': {'input_tokens': usage.get('input_tokens'),
+        'output_tokens': usage.get('output_tokens'), 'cached_tokens': usage.get('cached_tokens')}}, row=row)
+    line = usage_line(values, time_at_end=True, timezone=timezone)
     def compact_time(text):
         return re.sub(r'约 (\d+(?:\.\d+)?) 秒', lambda match: match[1].rstrip('0').rstrip('.') + 's'
                       if '.' in match[1] else match[1] + 's', text)
-    lines = [compact_time(line)]
+    lines = []
     if summary:
         # The separate terminal notice already states stop/failure once.
         lines.append(compact_time(summary_line({**summary, 'reason': ''})))
-    lines.extend([model_name, generated_at])
+    lines.append(line)
     return quote_chunks('\n'.join(lines))
 
 

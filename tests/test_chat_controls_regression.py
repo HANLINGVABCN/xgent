@@ -113,7 +113,8 @@ def test_live_model_header_system_menu_and_stop_target(full_output_server,tmp_pa
     cid='A'; generation=7; run_id='live-run-A'
     modes=['前台流式输出中...','后台流式输出中...','非流式输出中...']
     body='最终正文，保留原文。'
-    display=build_web_display(body,presentation={'usage':{'input_tokens':10,'output_tokens':3,'cached_tokens':0},'elapsed_seconds':1})
+    display=build_web_display(body,presentation={'usage':{'input_tokens':10,'output_tokens':3,'cached_tokens':0},'elapsed_seconds':1,
+        'provider':'p','model':'current-model','generated_at':1793275200})
     record={'id':2,'role':'assistant','msg_type':'ai_reply','content':body,'timestamp':1793275200,
             'ai_generation':{'provider':'p','model':'current-model','generated_at':1793275200},
             'run_id':run_id,'conversation_id':cid,'web_display':display}
@@ -160,8 +161,10 @@ def test_live_model_header_system_menu_and_stop_target(full_output_server,tmp_pa
             server.outbox.put({**record,'type':'record_snapshot','record_id':2,'text':body,'ui_generation':generation,
                               'replace_message_ids':[91]})
             page.locator('[data-record-id="2"]').wait_for()
-            assert page.locator('[data-record-id="2"] .reply-timestamp').is_visible()
-            assert page.locator('.bubble.ai .bubble-header .ai-generation-meta:visible').count()==1
+            assert page.locator('[data-record-id="2"] .reply-timestamp').is_hidden()
+            assert page.locator('[data-record-id="2"] .usage-time').is_visible()
+            assert 'p/current-model' in page.locator('[data-record-id="2"] .token-hud').inner_text()
+            assert page.locator('.bubble.ai .bubble-header .ai-generation-meta:visible').count()==0
             assert page.locator('#btn-stop').is_visible()
             # Durable system menus keep only their dedicated controls.
             server.outbox.put({'type':'message','conversation_id':cid,'run_id':run_id,'msg_type':'ui_message',

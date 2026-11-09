@@ -12,6 +12,7 @@ import dataclasses
 import functools
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -573,11 +574,16 @@ class ConversationManager:
                 event.set()
             run.stop = event
 
-    async def request_stop(self, run_id, conversation_id=None):
+    async def request_stop(self, run_id, conversation_id=None, *, reason='explicit_stop'):
         if not run_id:
             raise ConversationChanged('停止按钮已失效，请使用当前回合的停止按钮。')
         db = await self.factory()
-        accepted = await db.request_conversation_stop(str(run_id), conversation_id)
+        from .interaction import identity
+        origin, purpose = identity()
+        accepted = await db.request_conversation_stop(str(run_id), conversation_id,
+            reason=reason, origin=origin)
+        logging.getLogger(__name__).info('停止来源 origin=%s purpose=%s reason=%s run=%s conversation=%s accepted=%s',
+            origin, purpose, reason, run_id, conversation_id, accepted)
         run = self.runtime(run_id)
         if accepted and run is not None:
             run.stop.set()

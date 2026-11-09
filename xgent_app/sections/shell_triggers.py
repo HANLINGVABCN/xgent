@@ -1907,7 +1907,15 @@ class SelfTriggerManager:
         """格式化输出所有活跃任务。"""
         db = await BotMemoryDB.get_instance()
         tasks = await db.list_trigger_tasks(active_only=True)
-        if not tasks:
+        cursor = await (await db._get_conn()).execute('''
+            SELECT r.run_id, r.task_id, r.delivery_state, r.delivery_retry_at, r.delivery_error
+            FROM trigger_runs r JOIN trigger_tasks t ON t.id=r.task_id
+            WHERE r.finished_at IS NOT NULL AND r.delivered_at IS NULL AND t.status!='cancelled'
+              AND r.status IN ('completed','condition_matched','condition_unmatched','failed','interrupted')
+            ORDER BY r.finished_at DESC LIMIT 20''')
+        pending = [dict(row) for row in await cursor.fetchall()]
+        await cursor.close()
+        if not tasks and not pending:
             return "📋 当前没有活跃的触发任务"
 
         lines = [f"📋 活跃触发任务: {len(tasks)} 个\n"]
@@ -1936,6 +1944,15 @@ class SelfTriggerManager:
                 f"🔕 连续静默去重: {duplicate_count} 次\n"
                 f"⏳ 当前退避: {backoff_text}"
             )
+        if pending:
+            lines.append(f'\n📨 尚未完成的 AI 回执：{len(pending)} 个（后台执行结果已保留）')
+            for run in pending:
+                state = {'paused': '已暂停，可在原对话继续处理', 'retry': '等待重试',
+                         'generating': '生成中'}.get(run.get('delivery_state'), '等待当前对话空闲')
+                delay = max(0, int(float(run.get('delivery_retry_at') or 0) - now))
+                lines.append(f"• {run['task_id']} / {run['run_id']}：{state}"
+                             + (f'，{delay} 秒后重试' if delay else '')
+                             + (f"\n  原因：{run['delivery_error']}" if run.get('delivery_error') else ''))
         return "\n".join(lines)
 
     @classmethod
@@ -2022,25 +2039,10 @@ class SelfTriggerManager:
         if resumed_legacy_count:
             logger.warning(f'已恢复 {resumed_legacy_count} 个被旧版消息风暴熔断暂停的 repeat 任务')
         interrupted_deliveries = await db.finalize_interrupted_trigger_deliveries()
-        for run in interrupted_deliveries:
-            task = await db.get_trigger_task(run['task_id'])
-            if task is None or not task.get('repeat') or run.get('status') != 'condition_matched':
-                continue
-            backoff_until = time.time() + cls.REPEAT_DUPLICATE_BACKOFF_BASE_SECONDS
-            await db.update_trigger_task(
-                task['id'],
-                status='pending',
-                next_run_at=backoff_until,
-                last_result_hash=cls._repeat_result_signature(run),
-                duplicate_count=0,
-                backoff_seconds=cls.REPEAT_DUPLICATE_BACKOFF_BASE_SECONDS,
-                backoff_until=backoff_until,
-                last_error=None,
-            )
         if interrupted_deliveries:
             logger.warning(
                 f'检测到 {len(interrupted_deliveries)} 个已开始但未确认完成的 trigger 投递，'
-                '为避免重启后重复回复，已停止自动重放'
+                '未产生回复的稍后重试；已有回复或工具操作的保留结果并暂停自动重放'
             )
 
         active_tasks = await db.list_trigger_tasks(active_only=True)
@@ -2189,6 +2191,8 @@ class SelfTriggerManager:
         if cls._stopping or cls._scheduler is None:
             return
         db = await BotMemoryDB.get_instance()
+        for run in await db.list_undelivered_trigger_runs():
+            cls._schedule_delivery(run['run_id'], run['task_id'])
         try:
             tasks = await db.list_trigger_tasks(active_only=True)
         except Exception:
@@ -2570,7 +2574,10 @@ class SelfTriggerManager:
         if cls._stopping or run_id in cls._delivery_run_ids:
             return
         cls._delivery_run_ids.add(run_id)
-        execution_task = asyncio.create_task(cls._deliver_run(run_id))
+        import contextvars
+        # A future receipt must not inherit the registering turn's cancellation,
+        # model session, presentation or menu callback context.
+        execution_task = asyncio.create_task(cls._deliver_run(run_id), context=contextvars.Context())
         cls._execution_tasks.add(execution_task)
         cls._delivery_tasks_by_task.setdefault(task_id, set()).add(execution_task)
 
@@ -2605,9 +2612,15 @@ class SelfTriggerManager:
             with interaction('task', 'notification'):
                 async with conversation_operation(task['conversation_id'], execution=True, wait=True,
                                                   allow_archived=True, fresh=True):
+                    scope = current_scope()
+                    logger.info('trigger 回执接入 run=%s task=%s conversation=%s stop_set=%s',
+                        run_id, task['id'], scope.conversation_id, get_conversations().runtime().stop.is_set())
                     await cls._deliver_run_inner(run_id)
         except ConversationError:
             return  # Deleted conversations must never wake or retarget a task.
+        except Exception as exc:
+            logger.error(f'trigger 回执 {run_id} 投递异常，保留未送达状态', exc_info=True)
+            await db.defer_trigger_delivery(run_id, str(exc))
 
     @classmethod
     async def _deliver_run_inner(cls, run_id: str):
@@ -2630,6 +2643,7 @@ class SelfTriggerManager:
         if not await db.claim_trigger_run_delivery(run_id, time.time()):
             logger.info(f'trigger run {run_id} 已由其他投递协程领取，跳过重复投递')
             return
+        await db.finish_trigger_run(run_id, delivery_conversation_run_id=current_scope().run_id)
 
         matched_conditions: List[str] = []
         with contextlib.suppress(Exception):
@@ -2694,13 +2708,27 @@ class SelfTriggerManager:
             # Live delivery and refresh must never expose different bodies.
             result_display = build_trigger_result_display(visible_notice, run)
             result_policy = MessagePolicy('status', 'assistant', CHANNELS, True, 'task').to_dict()
-            result_record_id = await GlobalRecorder.record_user_message(
-                internal_result, MessageType.USER_TEXT, int(task['chat_id']), metadata={
-                    **result_display, 'message_policy': result_policy,
-                    'trigger_result': {'version': 1, 'task_id': task['id'], 'run_id': run_id},
-                },
-            )
-            if run.get('notice_started_at') is None:
+            result_record_id = run.get('delivery_record_id')
+            if result_record_id is None:
+                cursor = await (await db._get_conn()).execute(
+                    "SELECT id FROM global_messages WHERE session_id=? AND "
+                    "json_extract(metadata,'$.trigger_result.run_id')=? ORDER BY id LIMIT 1",
+                    (task['conversation_id'], run_id))
+                saved = await cursor.fetchone()
+                await cursor.close()
+                result_record_id = saved['id'] if saved else None
+            if result_record_id is None:
+                result_record_id = await GlobalRecorder.record_user_message(
+                    internal_result, MessageType.USER_TEXT, int(task['chat_id']), metadata={
+                        **result_display, 'message_policy': result_policy,
+                        'trigger_result': {'version': 1, 'task_id': task['id'], 'run_id': run_id,
+                                           'notice': visible_notice},
+                    },
+                )
+                if result_record_id is None:
+                    raise RuntimeError('后台任务结果未成功保存，未唤醒 AI')
+            await db.finish_trigger_run(run_id, delivery_record_id=result_record_id)
+            if run.get('notice_sent_at') is None:
                 await db.finish_trigger_run(run_id, notice_started_at=time.time())
                 try:
                     with message_presentation({
@@ -2745,7 +2773,17 @@ class SelfTriggerManager:
                 cls._notify_if_waiting(task, bot, lock_acquired, process_task)
             )
             await process_task
-            await db.finish_trigger_run(run_id, delivered_at=time.time())
+            runtime = get_conversations().runtime()
+            outcome = 'stopped' if runtime and runtime.stop.is_set() else runtime.outcome if runtime else 'failed'
+            if outcome not in {'completed', 'ask'}:
+                await db.defer_trigger_delivery(run_id, f'AI 回执未完成：{outcome}', paused=outcome == 'stopped')
+                await cls._update_delivery_receipt(run_id, context)
+                logger.warning(f'trigger 回执 {run_id} 未确认完成（{outcome}），未标记送达')
+                return
+            await db.finish_trigger_run(run_id, delivered_at=time.time(), delivery_state='delivered',
+                                        delivery_error=None, delivery_retry_at=None)
+            if run.get('delivery_state') == 'retry':
+                await cls._update_delivery_receipt(run_id, context)
             if task.get('repeat') and run.get('status') == 'condition_matched':
                 await db.update_trigger_task(
                     task['id'],
@@ -2758,29 +2796,52 @@ class SelfTriggerManager:
         except asyncio.CancelledError:
             if process_task and not process_task.done():
                 process_task.cancel()
+                await asyncio.gather(process_task, return_exceptions=True)
+            with contextlib.suppress(Exception):
+                await db.defer_trigger_delivery(run_id, '回执投递被中断，完整结果已保留')
             raise
         except Exception as exc:
             logger.error(f"投递 trigger run {run_id} 失败: {exc}", exc_info=True)
             with contextlib.suppress(Exception):
-                await db.finish_trigger_run(run_id, delivered_at=time.time())
-                if task.get('repeat') and run.get('status') == 'condition_matched':
-                    await db.update_trigger_task(
-                        task['id'],
-                        last_result_hash=cls._repeat_result_signature(run),
-                        duplicate_count=0,
-                        backoff_seconds=0,
-                        backoff_until=None,
-                    )
-            with contextlib.suppress(Exception):
-                await bot.send_message(
-                    chat_id=int(task['chat_id']),
-                    text=f"⚠️ 后台任务 {task['id']} 已产生结果，但 AI 唤醒失败: {str(exc)[:200]}",
-                )
-            with contextlib.suppress(Exception):
-                await cls._restart_repeat_after_delivery(task['id'], run)
+                await db.defer_trigger_delivery(run_id, f'AI 回执投递失败：{str(exc)[:200]}')
+                await cls._update_delivery_receipt(run_id, context)
         finally:
             if wait_notice_task and not wait_notice_task.done():
                 wait_notice_task.cancel()
+
+    @classmethod
+    async def _update_delivery_receipt(cls, run_id: str, context: Any):
+        """Update the existing result card, retaining one model-context record."""
+        db = await BotMemoryDB.get_instance()
+        run = await db.get_trigger_run(run_id)
+        if not run or not run.get('delivery_record_id'):
+            return
+        row = await db.get_display_message(run['delivery_record_id'])
+        if not row:
+            return
+        from xgent_app.presentation import metadata_dict, message_presentation
+        from xgent_app.trigger_presentation import build_trigger_result_display
+        from xgent_app.web_display import web_display_scope
+        metadata = metadata_dict(row.get('metadata'))
+        old = (metadata.get('display') or {}).get('content', '')
+        notice = (metadata.get('trigger_result') or {}).get('notice') or html.unescape(old.split('\n\n', 1)[0])
+        status = ('AI 回执已完成。' if run.get('delivery_state') == 'delivered' else
+                  'AI 回执已暂停，执行结果已保留，可在本对话继续处理。' if run.get('delivery_state') == 'paused' else
+                  'AI 回执尚未完成，稍后自动重试；后台命令不会重新执行。')
+        notice = notice.replace('系统已记录完整执行结果，正在检查是否继续唤醒 AI。', status)
+        # Replace the previous state on later retries, rather than accumulating notices.
+        notice = re.sub(r'AI 回执(?:已暂停|尚未完成)[^\n]*', status, notice)
+        display = build_trigger_result_display(notice, run)
+        await db.patch_display_metadata(row['id'], display)
+        policy = metadata.get('message_policy')
+        with message_presentation({'kind': MessageType.USER_TEXT, 'record_id': row['id'],
+                'purpose': 'status', 'message_policy': policy}), web_display_scope(display['web_display']):
+            ids = (metadata.get('web_live') or {}).get('message_ids', [])
+            if ids:
+                with contextlib.suppress(Exception):
+                    await context.bot.edit_message_text(chat_id=row['chat_id'], message_id=ids[0],
+                        text=display['display']['content'], parse_mode='HTML')
+        await publish_saved_reply(context, row['id'])
 
     @classmethod
     async def _restart_repeat_after_delivery(cls, task_id: str, run: Dict[str, Any]):
