@@ -3,6 +3,7 @@ const instances=new Set();
 const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const base='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+esc(csp)+'"><style>html,body{margin:0;min-height:0;box-sizing:border-box}body{font-family:system-ui,sans-serif}html[data-xgent-graphic],html[data-xgent-graphic] body{width:100%!important;height:100%!important;min-height:0!important;margin:0!important;padding:0!important;overflow:hidden!important}html[data-xgent-graphic] body>svg{display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important}html[data-xgent-embedded] svg[data-xgent-canvas]{display:block;width:100%!important;height:auto!important;max-width:100%!important}</style>';
+const compactStyle='<style>html[data-xgent-card],html[data-xgent-card] body{overflow:hidden!important;scrollbar-gutter:auto!important}</style>';
 const icon=path=>'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+path+'"/></svg>';
 const codeIcon=icon('M8 6 2 12l6 6m8-12 6 6-6 6');
 const expandIcon=icon('M5 19 19 5M5 13v6h6M13 5h6v6');
@@ -30,11 +31,11 @@ function drawingSize(source,format){
 }
 
 function pageRuntime(token,draft){
-  let queued=false,lastSize='',observed=new Set(),compactRoot=null;
+  let queued=false,lastSize='',observed=new Set(),compactRoot=null,compactWidth=0,compactSignature='';
   const observer=new ResizeObserver(schedule);
   function schedule(){if(!queued){queued=true;requestAnimationFrame(report);}}
   function report(){
-    queued=false;if(!document.body)return;
+    queued=false;if(!document.body||!document.body.getClientRects().length)return;
     const body=document.body,children=Array.from(body.children).filter(node=>!['SCRIPT','STYLE','LINK','META','TITLE','BASE','TEMPLATE'].includes(node.tagName));
     // Observe content as well as body: fixed-height pages can have overflowing
     // children, while compact cards need both their width and height measured.
@@ -44,16 +45,23 @@ function pageRuntime(token,draft){
     const style=getComputedStyle(body),paddingX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight),paddingY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
     let width=document.documentElement.clientWidth,height=Math.max(body.getBoundingClientRect().height,body.scrollHeight),compact=false,drawing=null;
     if(children.length===1){const child=children[0],rect=child.getBoundingClientRect(),css=getComputedStyle(child);
+      if(!child.getClientRects().length||rect.width<=0)return;
       const px=value=>parseFloat(value)||0;
       const marginX=px(css.marginLeft)+px(css.marginRight),marginY=px(css.marginTop)+px(css.marginBottom);
       const measured=rect.width+paddingX+marginX;
       const bounded=Number.isFinite(parseFloat(css.maxWidth))||/^\s*[\d.]+px\s*$/.test(child.style.width);
       if(measured>0&&(bounded||Math.abs(measured-width)>2||compactRoot===child)){
-        width=measured;compact=true;compactRoot=child;
+        const signature=[css.maxWidth,css.minWidth,child.style.width,paddingX,marginX].join(':');
+        if(compactRoot!==child||signature!==compactSignature){compactWidth=0;compactSignature=signature;}
+        // A scrollbar or reserved gutter is not a smaller design canvas. Pin
+        // the first natural width; later height changes must never deduct it.
+        const gutter=Math.max(0,Math.min(64,innerWidth-document.documentElement.offsetWidth));
+        if(!compactWidth)compactWidth=measured+(measured>=document.documentElement.offsetWidth-2?gutter:0);
+        width=compactWidth;compact=true;compactRoot=child;
         // A 100vh centered body is viewport filler, not the card's canvas.
         // Size from the complete card and its real outer spacing instead.
-        height=rect.height+paddingY+marginY;
-      }else compactRoot=null;
+        height=(child.offsetHeight||rect.height)+paddingY+marginY;
+      }else{compactRoot=null;compactWidth=0;}
       if(!compact)height=Math.max(height,rect.height+paddingY+marginY);
       const svgs=child.tagName.toLowerCase()==='svg'?[child]:Array.from(child.querySelectorAll('svg'));
       if(svgs.length===1&&child.textContent.trim()===svgs[0].textContent.trim()&&!child.matches('button,a')){
@@ -88,7 +96,9 @@ function pageRuntime(token,draft){
   }
   function layout(data){
     document.documentElement.toggleAttribute('data-xgent-graphic',!!data.graphic);
-    document.documentElement.toggleAttribute('data-xgent-embedded',!!data.embedded);schedule();
+    document.documentElement.toggleAttribute('data-xgent-embedded',!!data.embedded);
+    document.documentElement.toggleAttribute('data-xgent-card',!!data.compact);
+    if(data.reset){compactRoot=null;compactWidth=0;compactSignature='';lastSize='';}schedule();
   }
   function attrs(target,source){
     for(const attr of Array.from(target.attributes))if(!source.hasAttribute(attr.name))target.removeAttribute(attr.name);
@@ -148,7 +158,7 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   let controller,token='',revision=0,expanded=false,previousFocus,sourceMode=false;
   let current,owner=recordId,source=null,complete=false,draftReady=false,draftStarted=false,timer,blobUrl,destroyed=false,renderedSource=null,downloadKey;
   let sourcePaint=0,sourceScroll=0,sourceAtEnd=true,autoScrollTop=null,printedSource='',sentDraft=null,draftInFlight=false;
-  let graphic=null,declaredGraphic=null,viewportPage=false,stageMinHeight=0,contentWidth=null,contentHeight=160,compactPage=false,layoutWidth=560,layoutHeight=200,layoutQueued=false,lastLayout='';
+  let graphic=null,declaredGraphic=null,viewportPage=false,stageMinHeight=0,contentWidth=null,contentHeight=160,compactPage=false,layoutWidth=560,layoutHeight=200,layoutQueued=false,lastLayout='',measured=false,resetMeasure=false;
   let manualSize=null,sizeKey='',drag=null;
   const area=card.closest('#log'),host=card.closest('.body')||mount;
   function readSizes(){try{const value=JSON.parse(localStorage.getItem('xgent-visual-sizes')||'{}');return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}catch{return {};}}
@@ -168,10 +178,14 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
       localStorage.setItem('xgent-visual-sizes',JSON.stringify(values));
     }catch{}
   }
-  function resetSizing(){manualSize=null;saveSize();scheduleLayout();}
+  function resetSizing(){
+    manualSize=null;saveSize();
+    if(!graphic&&!viewportPage){contentWidth=null;contentHeight=160;compactPage=false;measured=false;resetMeasure=true;lastLayout='';}
+    scheduleLayout();
+  }
   function scheduleLayout(){if(!layoutQueued){layoutQueued=true;requestAnimationFrame(applyLayout);}}
   function applyLayout(){
-    layoutQueued=false;if(destroyed||!card.isConnected)return;
+    layoutQueued=false;if(destroyed||!card.isConnected||!card.getClientRects().length)return;
     const availableWidth=Math.max(1,host.clientWidth||mount.clientWidth||320);
     const sideSpace=sourceMode||expanded?0:22;
     const readingHeight=area?.clientHeight||innerHeight;
@@ -187,7 +201,13 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     const widthLimit=expanded?Math.max(1,card.clientWidth-2):Math.max(1,availableWidth-sideSpace-2);
     const preferred=expanded?1:.8;
     let scale=preferred,displayWidth,displayHeight;
-    if(manualSize&&!sourceMode&&!expanded){
+    if(!measured&&!graphic&&!viewportPage&&!sourceMode){
+      // Measure the source at a stable CSS viewport before applying saved
+      // display preferences, including old narrow/corrupted logical sizes.
+      layoutWidth=Math.min(current?.width||560,800);layoutHeight=current?.height||200;
+      scale=Math.min(preferred,widthLimit/layoutWidth,heightLimit/layoutHeight);
+      displayWidth=layoutWidth*scale;displayHeight=layoutHeight*scale;
+    }else if(manualSize&&!sourceMode&&!expanded){
       layoutWidth=manualSize.logicalWidth;layoutHeight=manualSize.logicalHeight;
       scale=Math.min(manualSize.width/layoutWidth,widthLimit/layoutWidth,heightLimit/layoutHeight);
       displayWidth=layoutWidth*scale;displayHeight=layoutHeight*scale;
@@ -220,11 +240,11 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
       viewport.style.width=(sourceMode?cardWidth-2:displayWidth)+'px';
       viewport.style.height=(sourceMode?Math.min(maxHeight,Math.max(240,displayHeight)):displayHeight)+'px';
     }else{card.style.width='';viewport.style.width='100%';viewport.style.height='';}
-    const key=[layoutWidth,layoutHeight,scale,!!graphic,graphic?.embedded].join(':');
+    const key=[layoutWidth,layoutHeight,scale,!!graphic,graphic?.embedded,compactPage].join(':');
     for(const child of viewport.querySelectorAll('iframe')){
       child.style.width=layoutWidth+'px';child.style.height=layoutHeight+'px';child.style.setProperty('--visual-scale',String(scale));
     }
-    if(key!==lastLayout){lastLayout=key;frame.contentWindow?.postMessage({type:'xgent-visual-layout',token,graphic:!!graphic&&!graphic.embedded,embedded:!!graphic?.embedded},'*');}
+    if(key!==lastLayout||resetMeasure){lastLayout=key;frame.contentWindow?.postMessage({type:'xgent-visual-layout',token,graphic:!!graphic&&!graphic.embedded,embedded:!!graphic?.embedded,compact:compactPage,reset:resetMeasure},'*');resetMeasure=false;}
   }
   const layoutObserver=new ResizeObserver(scheduleLayout);layoutObserver.observe(host);if(area)layoutObserver.observe(area);
   window.addEventListener('resize',scheduleLayout);
@@ -304,7 +324,7 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     if(sourceMode||destroyed)return;
     if(!draftStarted){
       draftStarted=true;draftReady=false;draftInFlight=false;sentDraft=null;token=crypto.randomUUID();
-      frame.srcdoc='<!doctype html><html'+(graphic&&!graphic.embedded?' data-xgent-graphic':'')+'><head>'+base+'</head><body><script>('+pageRuntime.toString()+')('+JSON.stringify(token)+',true);</script></body></html>';
+      frame.srcdoc='<!doctype html><html'+(graphic&&!graphic.embedded?' data-xgent-graphic':'')+'><head>'+base+compactStyle+'</head><body><script>('+pageRuntime.toString()+')('+JSON.stringify(token)+',true);</script></body></html>';
     }
     if(!timer)timer=setTimeout(flushDraft,120);
   }
@@ -317,7 +337,7 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     const next=document.createElement('iframe');next.className='visual-page-frame visual-page-staging';next.title=current.title||'渲染页面';next.setAttribute('sandbox','allow-scripts');next.referrerPolicy='no-referrer';next.hidden=sourceMode;
     const old=frame;frame=next;viewport.insertBefore(next,old);old.className='visual-page-previous';
     next.onload=()=>{if(destroyed||token!==activeToken)return;requestAnimationFrame(()=>{if(destroyed||token!==activeToken)return;next.classList.remove('visual-page-staging');old.remove();showPreview();status.hidden=true;});};
-    next.srcdoc='<!doctype html><html'+(graphic&&!graphic.embedded?' data-xgent-graphic':'')+'><head>'+base+bridge+'</head><body>'+source+'</body></html>';
+    next.srcdoc='<!doctype html><html'+(graphic&&!graphic.embedded?' data-xgent-graphic':'')+'><head>'+base+compactStyle+bridge+'</head><body>'+source+'</body></html>';
     lastLayout='';scheduleLayout();
   }
   function accept(page){
@@ -357,6 +377,8 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
       else if(data.type==='xgent-visual-ready'){lastLayout='';scheduleLayout();}
       else if(data.type==='xgent-visual-painted'){draftInFlight=false;if(data.visible)showPreview();if(sentDraft!==source&&!sourceMode)renderDraft();}
       else if(data.type==='xgent-visual-size'&&Number.isFinite(data.height)&&data.height>0&&!declaredGraphic){
+        if(sourceMode||!card.getClientRects().length)return;
+        measured=true;
         const size=data.drawing;
         graphic=size&&Number.isFinite(size.width+size.height)&&size.width>0&&size.height>0?
           {width:Math.min(100000,size.width),height:Math.min(100000,size.height),embedded:size.embedded===true}:null;
