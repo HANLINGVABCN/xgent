@@ -19,7 +19,7 @@ export async function accessSecurityCards({card,dialog,closeDialog,submit}){
   function showClient(c){dialog(c.kind==='ip'?'IP 访问详情':'设备访问详情',el('dl',{class:'wb-access-details'},
     ...[['标识',c.id],['来源 IP',c.last_ip],['首次访问',stamp(c.first_seen)],['最近访问',stamp(c.last_seen)],['访问次数',c.visits],['认证失败次数',c.failures],['连续失败次数',c.streak],['状态',c.blocked?'已封禁':'正常'],['原因',c.reason||'—'],['浏览器信息',c.agent||'未提供']].map(([k,v])=>el('div',{class:'wb-detail-row'},el('dt',{},k),el('dd',{},String(v))))));}
   function deviceDetails(s){dialog('已登录设备详情',el('dl',{class:'wb-access-details'},
-    ...[['设备',s.device],['IP',s.ip],['登录时间',stamp(s.created_at)],['最近活动',stamp(s.last_seen)],['到期时间',stamp(s.expires_at)],['浏览器信息',s.agent||'未提供']].map(([k,v])=>el('div',{class:'wb-detail-row'},el('dt',{},k),el('dd',{},String(v))))));}
+    ...[['设备',s.device],['IP',s.ip],['登录时间',stamp(s.created_at)],['最近活动',stamp(s.last_seen)],['当前到期时间',stamp(s.expires_at)],['自动续期',data.policy.session_auto_renew?'使用中自动延长':'已关闭'],['浏览器信息',s.agent||'未提供']].map(([k,v])=>el('div',{class:'wb-detail-row'},el('dt',{},k),el('dd',{},String(v))))));}
   function draw(){
     const recent=el('div');const filter=select('显示范围','scope',['近期 IP','已封禁 IP','已封禁设备'],'近期 IP');let shown=50;
     function drawVisits(){const choice=filter.querySelector('select').value;const clients=data.clients.filter(c=>choice==='近期 IP'?c.kind==='ip':choice==='已封禁 IP'?c.kind==='ip'&&c.blocked:c.kind==='device'&&c.blocked);
@@ -28,10 +28,24 @@ export async function accessSecurityCards({card,dialog,closeDialog,submit}){
       if(!recent.childElementCount)recent.append(el('p',{class:'wb-note'},'暂无记录'));}
     filter.onchange=()=>{shown=50;drawVisits();};
     visits.replaceChildren(controls(filter,button('刷新访问记录',refresh)),recent);drawVisits();
-    sessions.replaceChildren(el('p',{class:'wb-note'},'已登录 '+data.sessions.length+' 个设备。踢下线后需要重新登录；清除浏览器数据可能创建新的设备记录。'),
+    const days=field('登录有效期（天）','session_days',data.policy.session_days,'number');
+    const daysInput=days.querySelector('input');daysInput.min='1';daysInput.max='365';daysInput.step='1';daysInput.required=true;
+    const renew=check('使用中自动延长登录','session_auto_renew',data.policy.session_auto_renew);
+    const sessionSummary=el('p',{class:'wb-note wb-session-policy-summary',role:'status'});
+    const sessionForm=el('form',{class:'wb-session-policy'},days,renew,sessionSummary,
+      el('button',{type:'submit',class:'wb-btn primary'},'保存登录设置'));
+    function describeSession(){const count=Number(daysInput.value),active=sessionForm.elements.session_auto_renew.checked;
+      sessionSummary.textContent=Number.isInteger(count)&&count>=1&&count<=365?
+        (active?`正常使用会自动续期，连续 ${count} 天未使用才需要重新登录。`:`自动续期已关闭，登录凭据有效期为 ${count} 天。`)+
+        ' 踢出设备、修改密码或两步验证、封禁仍立即撤销登录。修改后保存生效。':'请输入 1–365 的整数天数。';}
+    sessionForm.addEventListener('input',describeSession);sessionForm.addEventListener('change',describeSession);describeSession();
+    sessionForm.onsubmit=e=>{e.preventDefault();submit(sessionForm,async values=>{
+      await change('policy',{session_days:Number(values.session_days),session_auto_renew:values.session_auto_renew});});};
+    sessions.replaceChildren(sessionForm,el('p',{class:'wb-note'},'已登录 '+data.sessions.length+' 个设备。踢下线后需要重新登录；清除浏览器数据可能创建新的设备记录。'),
       controls(button('刷新设备',refresh),safe('revoke_others',{},'踢出其他设备')),
       ...data.sessions.map(s=>el('div',{class:'wb-access-row'},el('div',{},el('strong',{},(s.current?'当前设备 · ':'')+s.device.slice(0,10)),
-        el('p',{class:'wb-note'},s.ip+' · 最近活动 '+stamp(s.last_seen)),el('p',{class:'wb-note'},s.agent||'浏览器信息未提供')),
+        el('p',{class:'wb-note'},s.ip+' · 最近活动 '+stamp(s.last_seen)),
+        el('p',{class:'wb-note'},'当前到期 '+stamp(s.expires_at)),el('p',{class:'wb-note'},s.agent||'浏览器信息未提供')),
         controls(button('详情',()=>deviceDetails(s)),safe('revoke',{id:s.id},s.current?'退出此设备':'踢下线')))));
     rules.replaceChildren(el('p',{class:'wb-note'},'黑名单拒绝访问；白名单仍需密码和两步验证，但不自动累计等待或封禁。已手动封禁的 IP／设备仍需先解除。'),
       controls(button('添加 IP 规则',addRule),button('刷新名单',refresh)),

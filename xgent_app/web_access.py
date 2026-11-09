@@ -10,7 +10,8 @@ import time
 from . import web_auth
 
 POLICY_KEY='web_access_policy'
-DEFAULT_POLICY={'enabled':True,'wait_after':5,'wait_seconds':180,'ban_after':8,'proxy_header':'none'}
+DEFAULT_POLICY={'enabled':True,'wait_after':5,'wait_seconds':180,'ban_after':8,'proxy_header':'none',
+                'session_days':30,'session_auto_renew':True}
 
 
 async def rows(conn,sql,args=()):
@@ -73,7 +74,10 @@ class WebAccess:
 
     async def policy(self):
         db=await self.database();value=await db.get_config_fresh(POLICY_KEY,{})
-        return {**DEFAULT_POLICY,**(value if isinstance(value,dict) else {})}
+        policy={**DEFAULT_POLICY,**(value if isinstance(value,dict) else {})}
+        if type(policy['session_days']) is not int or not 1<=policy['session_days']<=365:policy['session_days']=30
+        if type(policy['session_auto_renew']) is not bool:policy['session_auto_renew']=True
+        return policy
 
     async def _clients(self,conn,ip,device,agent,now):
         for kind,value in [('ip',ip),('device',device)]:
@@ -127,25 +131,43 @@ class WebAccess:
                     import logging;logging.getLogger(__name__).exception('网页访问封禁已生效，告警投递失败')
             return {'blocked':bool(incident),'wait':math.ceil(max([0,*[c['wait_until']-now for c in clients]])) if rule!='white' else 0}
         if action in {'create_session','migrate_session'}:
+            policy=await self.policy();ttl=policy['session_days']*24*3600
+            # The database enforces the exact idle deadline. A short cookie
+            # transport margin covers activity between throttled renewals.
+            cookie_ttl=ttl+min(web_auth.SESSION_RENEW_INTERVAL_SECONDS,ttl/4) if policy['session_auto_renew'] else ttl
             sid=secrets.token_hex(16)
             async with db._transaction() as conn:
                 if action=='migrate_session':
                     found=await rows(conn,'SELECT s.* FROM web_session_migrations m JOIN web_login_sessions s ON s.id=m.session_id WHERE m.token_hash=?',(data['token_hash'],))
                     if found:
                         s=found[0];valid=not s['revoked'] and s['expires_at']>now and s['device']==data['device'] and s['key_version']==data['key_version']
-                        return {'id':s['id'] if valid else ''}
+                        return {'id':s['id'] if valid else '', 'ttl_seconds':int(cookie_ttl)}
                 await conn.execute('UPDATE web_login_sessions SET revoked=1 WHERE device=?',(data['device'],))
                 await conn.execute('UPDATE web_access_clients SET streak=0,wait_until=0 WHERE (kind=? AND id=?) OR (kind=? AND id=?)',('ip',data['ip'],'device',data['device']))
                 await conn.execute('INSERT INTO web_login_sessions VALUES(?,?,?,?,?,?,?,0,?)',
-                    (sid,data['device'],data['ip'],data.get('agent','')[:512],now,now,now+web_auth.SESSION_TTL_SECONDS,data['key_version']))
+                    (sid,data['device'],data['ip'],data.get('agent','')[:512],now,now,now+ttl,data['key_version']))
                 if action=='migrate_session':await conn.execute('INSERT INTO web_session_migrations VALUES(?,?)',(data['token_hash'],sid))
-            return {'id':sid}
+            return {'id':sid,'ttl_seconds':int(cookie_ttl)}
         if action=='session':
+            policy=await self.policy();ttl=policy['session_days']*24*3600
+            renew=False;activity=data.get('activity',True) is True
             async with db._transaction() as conn:
                 found=await rows(conn,'SELECT * FROM web_login_sessions WHERE id=?',(data['id'],))
                 valid=bool(found and not found[0]['revoked'] and found[0]['expires_at']>now and found[0]['device']==data['device'] and found[0]['key_version']==data['key_version'])
-                if valid:await conn.execute('UPDATE web_login_sessions SET last_seen=?,ip=? WHERE id=?',(now,data['ip'],data['id']))
-            return {'valid':valid}
+                if valid:
+                    blocked=await rows(conn,'SELECT 1 FROM web_access_clients WHERE blocked=1 AND ((kind=? AND id=?) OR (kind=? AND id=?))',
+                                       ('device',data['device'],'ip',data['ip']))
+                    valid=not blocked and await self._rule(conn,data['ip'])!='black'
+                if valid and activity:
+                    session=found[0]
+                    interval=min(web_auth.SESSION_RENEW_INTERVAL_SECONDS,ttl/4)
+                    renew=(policy['session_auto_renew'] and data.get('renew',True) is True
+                           and (now-data.get('issued_at',session['last_seen'])>=interval
+                                or session['expires_at']<now+ttl-interval))
+                    await conn.execute('UPDATE web_login_sessions SET last_seen=?,ip=?,expires_at=? WHERE id=?',
+                        (now,data['ip'],now+ttl if policy['session_auto_renew'] else session['expires_at'],data['id']))
+            cookie_ttl=ttl+min(web_auth.SESSION_RENEW_INTERVAL_SECONDS,ttl/4) if policy['session_auto_renew'] else ttl
+            return {'valid':valid,'renew':renew,'ttl_seconds':int(cookie_ttl)}
         if action=='logout':
             async with db._transaction() as conn:await conn.execute('UPDATE web_login_sessions SET revoked=1 WHERE id=?',(data.get('id',''),))
             return {'ok':True}
@@ -193,9 +215,17 @@ class WebAccess:
                         (secrets.token_hex(16),network,data['mode'],str(data.get('note',''))[:200],now))
                 elif action=='delete_rule':await conn.execute('DELETE FROM web_ip_rules WHERE id=?',(data.get('id',''),))
                 elif action=='policy':
-                    policy={**DEFAULT_POLICY,**{k:data[k] for k in DEFAULT_POLICY if k in data}}
+                    stored=await rows(conn,'SELECT value FROM config WHERE key=?',(POLICY_KEY,))
+                    current=json.loads(stored[0]['value']) if stored else {}
+                    policy={**DEFAULT_POLICY,**(current if isinstance(current,dict) else {}),
+                            **{k:data[k] for k in DEFAULT_POLICY if k in data}}
                     if type(policy['enabled']) is not bool or policy['proxy_header'] not in {'none','cloudflare','real-ip'}:raise ValueError('无效的访问策略')
                     if any(type(policy[k]) is not int or not 1<=policy[k]<=3600 for k in ('wait_after','wait_seconds','ban_after')) or policy['ban_after']<=policy['wait_after']:raise ValueError('封禁次数必须大于等待次数，数值须为 1–3600')
+                    if type(policy['session_auto_renew']) is not bool or type(policy['session_days']) is not int or not 1<=policy['session_days']<=365:
+                        raise ValueError('登录有效期须为 1–365 天，自动续期须为开关值')
+                    if policy['session_days']<current.get('session_days',DEFAULT_POLICY['session_days']):
+                        await conn.execute('UPDATE web_login_sessions SET expires_at=MIN(expires_at,?) WHERE revoked=0 AND expires_at>?',
+                                           (now+policy['session_days']*24*3600,now))
                     await conn.execute('INSERT OR REPLACE INTO config VALUES(?,?)',(POLICY_KEY,json.dumps(policy)))
                 elif action=='revoke':await conn.execute('UPDATE web_login_sessions SET revoked=1 WHERE id=?',(data.get('id',''),))
                 elif action=='revoke_others':await conn.execute('UPDATE web_login_sessions SET revoked=1 WHERE id<>?',(data.get('session_id',''),))

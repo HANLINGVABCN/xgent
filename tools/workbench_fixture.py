@@ -13,13 +13,13 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-async def serve(port, count, conversation_count=0, workbench_demo=False, version_demo=False, new_chat_demo=False):
+async def serve(port, count, conversation_count=0, workbench_demo=False, version_demo=False, new_chat_demo=False, access_demo=False):
     os.environ["PYTHON_DOTENV_DISABLED"]="1"
     os.environ["HOME"]=str(Path.cwd())
     os.environ["SHELL"]="/bin/sh" if os.name!="nt" else ""
     os.environ["ENV"]=os.environ["BASH_ENV"]=""
     from xgent_app.bootstrap import load_sections
-    from xgent_app.web_auth import hash_password
+    from xgent_app.web_auth import hash_password, load_session_secret
     from xgent_app.web_server import WebChatConfig, WebChatServer
     from xgent_app.workbench import Workbench
     from xgent_app.agent_presenter import build_run_presentation
@@ -142,6 +142,9 @@ async def serve(port, count, conversation_count=0, workbench_demo=False, version
     password_hash=hash_password('preview-only')
     await db.set_config('web_password_hash',password_hash)
     from xgent_app.web_two_factor import WebTwoFactor
+    from xgent_app.web_access import WebAccess
+    access=WebAccess(lambda: ns['BotMemoryDB'].get_instance()) if access_demo else None
+    if access is not None:await access.initialize()
     config=WebChatConfig(host='127.0.0.1',port=port,password_hash=password_hash,bot_token='',authorized_user_id=1,
         loop=asyncio.get_running_loop(),submit_message=lambda *args,**kwargs:None,read_history=history,
         read_history_message=ns['_web_read_history_message'],read_conversations=ns['get_conversations']().state,
@@ -149,7 +152,9 @@ async def serve(port, count, conversation_count=0, workbench_demo=False, version
         read_settings=ns['_web_read_settings'],read_branding=ns['_web_read_branding'],write_setting=ns['_web_write_setting'],request_stop=lambda:None,is_busy=lambda:False,
         read_health=lambda:{'components':{'web':{'state':'up'},'telegram':{'state':'degraded','error':'演示：连接重试中'},'triggers':{'state':'up'}}},
         media_allowed_roots=[ns['ArtifactManager'].ROOT_DIR],is_terminal_enabled=lambda:True,workbench=service.handle,
-        security_api=WebTwoFactor(lambda: ns['BotMemoryDB'].get_instance()).handle)
+        security_api=WebTwoFactor(lambda: ns['BotMemoryDB'].get_instance()).handle,
+        session_secret=await load_session_secret(db) if access is not None else None,
+        access_api=access.handle if access is not None else None)
     if new_chat_demo:
         config.accept_text=ns['_web_accept_text'];config.queue_api=ns['queue_api'];config.submit_file_batch=ns['_web_submit_file_batch']
     server=WebChatServer(config);server.start()
@@ -164,8 +169,9 @@ if __name__=='__main__':
     parser.add_argument('--conversations',type=int,default=0);parser.add_argument('--workbench-demo',action='store_true')
     parser.add_argument('--version-demo',action='store_true')
     parser.add_argument('--new-chat-demo',action='store_true')
+    parser.add_argument('--access-demo',action='store_true')
     args=parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='xgent-workbench-') as temporary:
         os.chdir(temporary)
-        try:asyncio.run(serve(args.port,args.messages,args.conversations,args.workbench_demo,args.version_demo,args.new_chat_demo))
+        try:asyncio.run(serve(args.port,args.messages,args.conversations,args.workbench_demo,args.version_demo,args.new_chat_demo,args.access_demo))
         except KeyboardInterrupt:pass

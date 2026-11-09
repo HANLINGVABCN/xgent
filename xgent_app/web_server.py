@@ -287,6 +287,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         with contextlib.suppress(ConnectionError):
             self.wfile.write(payload)
 
+    def end_headers(self) -> None:
+        # Every response can carry renewal, including downloads and SSE setup.
+        # Explicit JSON/HTML calls already drain the pending values, so this
+        # also preserves the single-cookie response on login/2FA changes.
+        self._access_cookie_headers()
+        super().end_headers()
+
     def _send_html(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -349,7 +356,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return False
         try:
             key = self._session_signing_key() if getattr(getattr(self, 'config', None), 'security_api', None) is not None else self.server.session_key
-            if not web_auth.verify_session_cookie(key, value):return False
+            managed=getattr(getattr(self,'config',None),'access_api',None) is not None
+            cookie_ttl=(web_auth.LEGACY_SESSION_TTL_SECONDS if value.count('.')==1
+                        else web_auth.SESSION_MAX_TTL_SECONDS) if managed else web_auth.SESSION_TTL_SECONDS
+            # Managed sessions expire in the database; their signed timestamp is
+            # renewed on activity. Never bypass signature, device or revocation.
+            if not web_auth.verify_session_cookie(key, value,
+                    ttl_seconds=cookie_ttl):return False
             if getattr(getattr(self,'config',None),'access_api',None) is not None:
                 if not getattr(self,'_access_context',None):return False
                 parts=value.split('.')
@@ -358,9 +371,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     result=self._access('migrate_session',{'token_hash':hashlib.sha256(value.encode()).hexdigest(),'key_version':hashlib.sha256(key).hexdigest()})
                     if not result['id']:return False
                     self._access_context['session_id']=result['id']
-                    self._pending_access_session=web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=result['id']),secure=web_auth.is_https_request(self._headers_dict()))
+                    self._authenticated_session_id=result['id']
+                    self._pending_access_session=web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=result['id']),
+                        secure=web_auth.is_https_request(self._headers_dict()),ttl_seconds=result['ttl_seconds'])
                     return True
-                return self._access('session',{'id':parts[1],'key_version':hashlib.sha256(key).hexdigest()})['valid']
+                activity=not getattr(self,'_stream_auth_only',False)
+                result=self._access('session',{'id':parts[1],'key_version':hashlib.sha256(key).hexdigest(),
+                                              'activity':activity,'renew':activity,'issued_at':int(parts[0])})
+                if result['valid']:self._authenticated_session_id=parts[1]
+                if result['valid'] and result.get('renew'):
+                    self._pending_access_session=web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=parts[1]),
+                        secure=web_auth.is_https_request(self._headers_dict()),ttl_seconds=result['ttl_seconds'])
+                return result['valid']
+            if value.count('.')==2:
+                self._authenticated_session_id=value.split('.')[1]
+            if value.count('.')==2 and not getattr(self,'_stream_auth_only',False) and time.time()-int(value.split('.')[0])>=web_auth.SESSION_RENEW_INTERVAL_SECONDS:
+                self._pending_access_session=web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=value.split('.')[1]),
+                    secure=web_auth.is_https_request(self._headers_dict()))
             return True
         except TwoFactorError:
             return False
@@ -416,12 +443,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return hmac.new(key, ('web-2fa:' + version).encode(), hashlib.sha256).digest() if version else key
 
     def _login_cookie(self, expected=None):
-        key=self._session_signing_key(expected);sid=''
+        key=self._session_signing_key(expected);sid=os.urandom(16).hex();ttl=web_auth.SESSION_TTL_SECONDS
+        self._pending_access_session=None
         if self.config.access_api is not None:
-            sid=self._access('create_session',{'key_version':hashlib.sha256(key).hexdigest()})['id']
+            result=self._access('create_session',{'key_version':hashlib.sha256(key).hexdigest()})
+            sid=result['id'];ttl=result['ttl_seconds']
             self._access_context['session_id']=sid
         return web_auth.build_set_cookie(web_auth.make_session_cookie_value(key,session_id=sid),
-                                         secure=web_auth.is_https_request(self._headers_dict()))
+                                         secure=web_auth.is_https_request(self._headers_dict()),ttl_seconds=ttl)
 
     def _handle_security(self, method, action='status'):
         if not self._require_auth():
@@ -433,7 +462,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if data is None:
             return
         cookie = web_auth.parse_cookie_header(self.headers.get('Cookie', '')).get(web_auth.SESSION_COOKIE_NAME, '')
-        owner = hashlib.sha256(cookie.encode()).hexdigest()
+        # Renewal changes the signed timestamp, not the authenticated device.
+        # Bind a 2FA setup to the stable session so background renewal cannot
+        # invalidate the pending confirmation or recovery-code request.
+        session_id=getattr(self,'_authenticated_session_id',None)
+        owner = hashlib.sha256(('session:'+session_id if session_id else cookie).encode()).hexdigest()
         try:
             result = self._security(method, action, data, owner)
             headers = {'Cache-Control': 'private, no-store'}
@@ -473,7 +506,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if value:self.send_header('Set-Cookie',value);self._pending_access_session=None
 
     def _prepare_access(self,path):
-        self._access_context=None;self._pending_device_cookie=None;self._pending_access_session=None
+        self._access_context=None;self._pending_device_cookie=None;self._pending_access_session=None;self._stream_auth_only=False;self._authenticated_session_id=None
         if self.config.access_api is None or not (path.startswith('/api/') or path in {'/','/terminal'}):return True
         from .web_access import device_cookie
         cookie=web_auth.parse_cookie_header(self.headers.get('Cookie',''))
@@ -914,6 +947,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send_json({"ok": True}, extra_headers={"Set-Cookie": cookie})
 
     def _handle_logout(self) -> None:
+        self._pending_access_session=None
         if self.config.access_api is not None:self._access('logout',{'id':self._access_context.get('session_id','')})
         self._send_json({"ok": True}, extra_headers={"Set-Cookie": web_auth.build_clear_cookie()})
 
@@ -1422,6 +1456,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Connection", "keep-alive")
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
+                self._stream_auth_only=True
                 ready = json.dumps({'epoch': stream.epoch, 'cursor': stream.cursor})
                 self.wfile.write(f"event: ready\ndata: {ready}\n\n".encode('utf-8'))
                 self.wfile.flush()
@@ -1745,6 +1780,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
+        self._stream_auth_only=True
 
         stop_event = self.server.shutdown_event  # type: ignore[attr-defined]
         try:

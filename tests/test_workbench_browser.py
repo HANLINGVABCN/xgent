@@ -13,8 +13,10 @@ import pytest
 ROOT=Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope='module')
-def workspace_url():
-    process=subprocess.Popen([sys.executable,'-u',str(ROOT/'tools/workbench_fixture.py'),'--messages','10000'],
+def workspace_url(request):
+    args=[sys.executable,'-u',str(ROOT/'tools/workbench_fixture.py'),'--messages','10000']
+    if getattr(request,'param',False) is True:args.append('--access-demo')
+    process=subprocess.Popen(args,
         cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',
         env={**os.environ,'PYTHONIOENCODING':'utf-8'})
     lines=queue.Queue()
