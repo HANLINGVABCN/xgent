@@ -118,6 +118,14 @@ def _compact_decimal(value):
     return f'{value:,.1f}'.rstrip('0').rstrip('.')
 
 
+def _compact_duration(value):
+    if 0 < value < .001:
+        return '<0.001s'
+    if 0 < value < .1:
+        return f'{value:.3f}'.rstrip('0').rstrip('.') + 's'
+    return _compact_decimal(value) + 's'
+
+
 def usage_parts(reply, *, time_at_end=False, timezone='Asia/Shanghai'):
     """One visible format; cache is a subset of input, rate is output/elapsed."""
     usage = reply.get('usage') or {}
@@ -140,7 +148,7 @@ def usage_parts(reply, *, time_at_end=False, timezone='Asia/Shanghai'):
     parts = [
         ('input', f"↑{_number(usage.get('input_tokens'))}（{_number(usage.get('cached_tokens'))}）"),
         ('output', f"↓{_number(output)}"),
-        ('elapsed', _compact_decimal(elapsed) + 's' if valid_elapsed else '耗时未记录'),
+        ('elapsed', _compact_duration(elapsed) if valid_elapsed else '耗时未记录'),
         ('speed', _compact_decimal(output / elapsed) + 'tok/s'
          if valid_elapsed and elapsed > 0 and valid_output else '速率未提供'),
         ('model', provider + '/' + model),

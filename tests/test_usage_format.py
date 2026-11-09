@@ -31,6 +31,8 @@ def test_unknown_usage_is_not_zero_and_rate_is_never_infinite():
     assert '时间未记录' in line and '服务商未记录/模型未记录' in line
     assert '（0）' in usage_line({**FACTS, 'usage': {**FACTS['usage'], 'cached_tokens': 0}})
     assert '耗时未记录 速率未提供' in usage_line({**FACTS, 'elapsed_seconds': float('nan')})
+    assert '0.012s 25,000tok/s' in usage_line({**FACTS, 'elapsed_seconds': .012})
+    assert '<0.001s' in usage_line({**FACTS, 'elapsed_seconds': .0001})
 
 
 def test_saved_reply_uses_actual_provider_model_and_timestamp():

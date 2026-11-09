@@ -16,6 +16,11 @@ from xgent_app.fanout import ChannelWorker
 from xgent_app.presentation import presentation_turn
 
 
+def usage_detail_count(text):
+    return sum('↑' in body and '↓' in body
+               for body in re.findall(r'<blockquote expandable>(.*?)</blockquote>', text, re.S))
+
+
 class TelegramCapture:
     def __init__(self):
         self.serial = 100
@@ -129,7 +134,7 @@ async def display_matrix(bot, root):
                         expected = raw if outcome=='success' else raw[:1]
                         assert [row['content'] for row in ai]==expected,(outcome,calls,[row['content'][:150] for row in ai])
                         all_text = '\n'.join(message['text'] for message in native.messages.values())
-                        assert all_text.count('<blockquote expandable>↑')==1,all_text
+                        assert usage_detail_count(all_text)==1,all_text
                         assert not any('停止回答' in label for message in native.messages.values() for label in buttons(message))
                         assert all(len(message['text'].encode('utf-16-le'))//2 <= (32768 if message.get('rich') else 4096)
                                    for message in native.messages.values())
@@ -139,7 +144,7 @@ async def display_matrix(bot, root):
                         assert '已折叠 11 行 · 存档：' in html.unescape(re.sub(r'<[^>]+>', '', all_text))
                         metadata = json.loads(ai[-1]['metadata']) if isinstance(ai[-1]['metadata'],str) else ai[-1]['metadata']
                         assert metadata['telegram_reply']['record_id']==ai[-1]['id']
-                        shared = [frame for frame in h.drain_frames() if '<blockquote expandable>↑' in str(frame.get('text',''))]
+                        shared = [frame for frame in h.drain_frames() if usage_detail_count(str(frame.get('text','')))]
                         assert not shared
                         context,turn,scope = contexts[-1]
                         ids_before = set(native.messages)
@@ -152,7 +157,7 @@ async def display_matrix(bot, root):
                         assert await channel.wait_idle(5)
                         assert set(native.messages)==ids_before
                         assert not any(buttons(message) for message in native.messages.values())
-                        assert sum(message['text'].count('<blockquote expandable>↑') for message in native.messages.values())==1
+                        assert sum(usage_detail_count(message['text']) for message in native.messages.values())==1
                         cases.append({'style':style,'outcome':outcome,'reply_count':len(ai),'one_details':True,'buttons_clean':True})
             finally:
                 release.set()
@@ -188,13 +193,13 @@ async def single_reply_edges(bot, root):
                         except RuntimeError:assert outcome=='no_reply'
                         assert await channel.wait_idle(5)
                         texts=[message['text'] for message in native.messages.values()]
-                        assert sum(text.count('<blockquote expandable>↑') for text in texts)==(0 if outcome=='no_reply' else 1)
+                        assert sum(usage_detail_count(text) for text in texts)==(0 if outcome=='no_reply' else 1)
                         assert not any(buttons(message) for message in native.messages.values())
                         if outcome=='overflow':
                             assert raw in texts
                             assert any(text.startswith('<blockquote expandable>↑') for text in texts)
                         if outcome=='no_usage':assert any('↑未提供（未提供） ↓未提供' in text for text in texts)
-                        assert not any('<blockquote expandable>↑' in str(frame.get('text','')) for frame in h.drain_frames())
+                        assert not any(usage_detail_count(str(frame.get('text',''))) for frame in h.drain_frames())
                         cases.append({'style':style,'outcome':outcome,'details_once':True})
             finally:await channel.aclose()
     return {'cases':cases}
