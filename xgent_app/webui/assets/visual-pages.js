@@ -30,12 +30,12 @@ function drawingSize(source,format){
 }
 
 function pageRuntime(token,draft){
-  let queued=false,lastSize='',observed=new Set();
+  let queued=false,lastSize='',observed=new Set(),compactRoot=null;
   const observer=new ResizeObserver(schedule);
   function schedule(){if(!queued){queued=true;requestAnimationFrame(report);}}
   function report(){
     queued=false;if(!document.body)return;
-    const body=document.body,children=Array.from(body.children).filter(node=>!['SCRIPT','STYLE','LINK','TEMPLATE'].includes(node.tagName));
+    const body=document.body,children=Array.from(body.children).filter(node=>!['SCRIPT','STYLE','LINK','META','TITLE','BASE','TEMPLATE'].includes(node.tagName));
     // Observe content as well as body: fixed-height pages can have overflowing
     // children, while compact cards need both their width and height measured.
     const next=new Set([body,...children.slice(0,32)]);
@@ -44,9 +44,17 @@ function pageRuntime(token,draft){
     const style=getComputedStyle(body),paddingX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight),paddingY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
     let width=document.documentElement.clientWidth,height=Math.max(body.getBoundingClientRect().height,body.scrollHeight),compact=false,drawing=null;
     if(children.length===1){const child=children[0],rect=child.getBoundingClientRect(),css=getComputedStyle(child);
-      const measured=rect.width+paddingX;
-      if(measured>0&&measured<width-2){width=measured;compact=true;}
-      height=Math.max(height,rect.height+paddingY+parseFloat(css.marginTop||0)+parseFloat(css.marginBottom||0));
+      const px=value=>parseFloat(value)||0;
+      const marginX=px(css.marginLeft)+px(css.marginRight),marginY=px(css.marginTop)+px(css.marginBottom);
+      const measured=rect.width+paddingX+marginX;
+      const bounded=Number.isFinite(parseFloat(css.maxWidth))||/^\s*[\d.]+px\s*$/.test(child.style.width);
+      if(measured>0&&(bounded||Math.abs(measured-width)>2||compactRoot===child)){
+        width=measured;compact=true;compactRoot=child;
+        // A 100vh centered body is viewport filler, not the card's canvas.
+        // Size from the complete card and its real outer spacing instead.
+        height=rect.height+paddingY+marginY;
+      }else compactRoot=null;
+      if(!compact)height=Math.max(height,rect.height+paddingY+marginY);
       const svgs=child.tagName.toLowerCase()==='svg'?[child]:Array.from(child.querySelectorAll('svg'));
       if(svgs.length===1&&child.textContent.trim()===svgs[0].textContent.trim()&&!child.matches('button,a')){
         const svg=svgs[0],box=svg.viewBox?.baseVal;
@@ -140,7 +148,7 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   let controller,token='',revision=0,expanded=false,previousFocus,sourceMode=false;
   let current,owner=recordId,source=null,complete=false,draftReady=false,draftStarted=false,timer,blobUrl,destroyed=false,renderedSource=null,downloadKey;
   let sourcePaint=0,sourceScroll=0,sourceAtEnd=true,autoScrollTop=null,printedSource='',sentDraft=null,draftInFlight=false;
-  let graphic=null,declaredGraphic=null,viewportPage=false,stageMinHeight=0,contentWidth=null,contentHeight=160,layoutWidth=560,layoutHeight=200,layoutQueued=false,lastLayout='';
+  let graphic=null,declaredGraphic=null,viewportPage=false,stageMinHeight=0,contentWidth=null,contentHeight=160,compactPage=false,layoutWidth=560,layoutHeight=200,layoutQueued=false,lastLayout='';
   let manualSize=null,sizeKey='',drag=null;
   const area=card.closest('#log'),host=card.closest('.body')||mount;
   function readSizes(){try{const value=JSON.parse(localStorage.getItem('xgent-visual-sizes')||'{}');return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}catch{return {};}}
@@ -169,6 +177,12 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     const readingHeight=area?.clientHeight||innerHeight;
     const maxHeight=Math.max(96,Math.min(440,readingHeight*.65));
     syncSizeKey();
+    if(manualSize&&!sourceMode&&compactPage&&!graphic&&!viewportPage&&contentWidth&&
+       (Math.abs(manualSize.logicalWidth-contentWidth)>1||Math.abs(manualSize.logicalHeight-contentHeight)>1)){
+      // Old versions remembered an already clipped iframe as its logical size.
+      // Keep the user's displayed width, but fit the complete measured canvas.
+      manualSize={...manualSize,logicalWidth:contentWidth,logicalHeight:contentHeight};saveSize();
+    }
     const heightLimit=expanded?Math.max(1,card.clientHeight-bar.offsetHeight):manualSize&&!sourceMode?Math.max(96,readingHeight-56):maxHeight;
     const widthLimit=expanded?Math.max(1,card.clientWidth-2):Math.max(1,availableWidth-sideSpace-2);
     const preferred=expanded?1:.8;
@@ -184,6 +198,10 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
       displayWidth=layoutWidth*scale;displayHeight=layoutHeight*scale;
     }else if(graphic){
       layoutWidth=graphic.width;layoutHeight=graphic.height;
+      scale=Math.min(preferred,widthLimit/layoutWidth,heightLimit/layoutHeight);
+      displayWidth=layoutWidth*scale;displayHeight=layoutHeight*scale;
+    }else if(compactPage){
+      layoutWidth=contentWidth||layoutWidth;layoutHeight=contentHeight;
       scale=Math.min(preferred,widthLimit/layoutWidth,heightLimit/layoutHeight);
       displayWidth=layoutWidth*scale;displayHeight=layoutHeight*scale;
     }else{
@@ -343,12 +361,13 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
         graphic=size&&Number.isFinite(size.width+size.height)&&size.width>0&&size.height>0?
           {width:Math.min(100000,size.width),height:Math.min(100000,size.height),embedded:size.embedded===true}:null;
         contentHeight=Math.min(100000,data.height);
+        compactPage=data.compact===true;
         viewportPage=data.viewportPage===true;
         stageMinHeight=viewportPage&&Number.isFinite(data.minHeight)?Math.max(0,Math.min(100000,data.minHeight)):0;
         if(viewportPage&&manualSize&&manualSize.logicalHeight<Math.max(stageMinHeight,current?.height||600)){
           manualSize={...manualSize,logicalHeight:Math.max(stageMinHeight,current?.height||600)};saveSize();
         }
-        if(data.compact&&Number.isFinite(data.width)&&data.width>0)contentWidth=data.width;
+        if(data.compact&&Number.isFinite(data.width)&&data.width>0)contentWidth=Math.min(100000,data.width);
         scheduleLayout();
       }
     },
