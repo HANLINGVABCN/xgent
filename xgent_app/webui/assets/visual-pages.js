@@ -3,7 +3,7 @@ const instances=new Set();
 const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const base='<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="'+esc(csp)+'"><style>html,body{margin:0;min-height:0;box-sizing:border-box}body{font-family:system-ui,sans-serif}html[data-xgent-graphic],html[data-xgent-graphic] body{width:100%!important;height:100%!important;min-height:0!important;margin:0!important;padding:0!important;overflow:hidden!important}html[data-xgent-graphic] body>svg{display:block;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important}html[data-xgent-embedded] svg[data-xgent-canvas]{display:block;width:100%!important;height:auto!important;max-width:100%!important}</style>';
-const compactStyle='<style>html[data-xgent-card],html[data-xgent-card] body{overflow:hidden!important;scrollbar-gutter:auto!important}</style>';
+const compactStyle='<style>html[data-xgent-card],html[data-xgent-card] body{height:auto!important;min-height:0!important;max-height:none!important;overflow:hidden!important;scrollbar-gutter:auto!important}</style>';
 const icon=path=>'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+path+'"/></svg>';
 const codeIcon=icon('M8 6 2 12l6 6m8-12 6 6-6 6');
 const expandIcon=icon('M5 19 19 5M5 13v6h6M13 5h6v6');
@@ -51,7 +51,9 @@ function pageRuntime(token,draft){
       const measured=rect.width+paddingX+marginX;
       const bounded=Number.isFinite(parseFloat(css.maxWidth))||/^\s*[\d.]+px\s*$/.test(child.style.width);
       if(measured>0&&(bounded||Math.abs(measured-width)>2||compactRoot===child)){
-        const signature=[css.maxWidth,css.minWidth,child.style.width,paddingX,marginX].join(':');
+        // Computed vw/% sizes change when our own iframe changes. Only source
+        // declarations may invalidate a pinned width, never their pixel result.
+        const signature=[child.style.maxWidth,child.style.minWidth,child.style.width,paddingX,marginX].join(':');
         if(compactRoot!==child||signature!==compactSignature){compactWidth=0;compactSignature=signature;}
         // A scrollbar or reserved gutter is not a smaller design canvas. Pin
         // the first natural width; later height changes must never deduct it.
@@ -68,16 +70,16 @@ function pageRuntime(token,draft){
         const svg=svgs[0],box=svg.viewBox?.baseVal;
         if(box?.width>0&&box.height>0){
           const embedded=child!==svg;
-          const extraX=embedded?parseFloat(css.paddingLeft)+parseFloat(css.paddingRight)+paddingX:0;
-          const extraY=embedded?parseFloat(css.paddingTop)+parseFloat(css.paddingBottom)+paddingY:0;
-          const naturalWidth=embedded&&rect.width<document.documentElement.clientWidth-2?rect.width:box.width+extraX;
+          const extraX=embedded?px(css.paddingLeft)+px(css.paddingRight)+px(css.borderLeftWidth)+px(css.borderRightWidth)+paddingX+marginX:0;
+          const extraY=embedded?px(css.paddingTop)+px(css.paddingBottom)+px(css.borderTopWidth)+px(css.borderBottomWidth)+paddingY+marginY:0;
+          const naturalWidth=embedded?(compactWidth||rect.width+paddingX+marginX):box.width;
           drawing={width:naturalWidth,height:(naturalWidth-extraX)*box.height/box.width+extraY,embedded};
           svg.setAttribute('data-xgent-canvas','');
         }
       }
     }
     const rootStyle=getComputedStyle(document.documentElement);
-    const viewportPage=!drawing&&['hidden','clip'].includes(style.overflowY)&&
+    const viewportPage=!compact&&!drawing&&['hidden','clip'].includes(style.overflowY)&&
       (['hidden','clip'].includes(rootStyle.overflowY)||body.getBoundingClientRect().height>=innerHeight-2)&&
       children.some(node=>node.tagName==='CANVAS'||['absolute','fixed'].includes(getComputedStyle(node).position)&&node.getBoundingClientRect().height>=innerHeight-2);
     let minHeight=0;
@@ -204,7 +206,7 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
     if(!measured&&!graphic&&!viewportPage&&!sourceMode){
       // Measure the source at a stable CSS viewport before applying saved
       // display preferences, including old narrow/corrupted logical sizes.
-      layoutWidth=Math.min(current?.width||560,800);layoutHeight=current?.height||200;
+      layoutWidth=Math.min(current?.width||800,1600);layoutHeight=current?.height||200;
       scale=Math.min(preferred,widthLimit/layoutWidth,heightLimit/layoutHeight);
       displayWidth=layoutWidth*scale;displayHeight=layoutHeight*scale;
     }else if(manualSize&&!sourceMode&&!expanded){

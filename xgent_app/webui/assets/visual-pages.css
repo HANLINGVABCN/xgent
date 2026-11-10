@@ -1,5 +1,5 @@
 .visual-page { position:relative; display:flex; flex-direction:column; width:min(calc(100% - 22px),450px); max-width:calc(100% - 22px); min-width:0; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--text); }
-.visual-page>header { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:32px; box-sizing:border-box; padding:3px 10px; border-bottom:1px solid var(--line); border-radius:9px 9px 0 0; }
+.visual-page>header { position:relative; z-index:2; flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:32px; box-sizing:border-box; padding:3px 10px; border-bottom:1px solid var(--line); border-radius:9px 9px 0 0; }
 .visual-page>header strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; font-weight:550; line-height:18px; }
 .visual-page-identity { display:flex; align-items:center; gap:8px; min-width:0; }
 .visual-page-brand-mark { display:inline-flex; width:22px; height:22px; flex-shrink:0; }
