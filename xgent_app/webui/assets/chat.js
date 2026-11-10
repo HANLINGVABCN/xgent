@@ -699,7 +699,7 @@ import {installViewportFit} from './viewport.js';
     const unifiedUsage=!!entry.footerMeta.querySelector('[data-usage-version="2"]');
     const ts=entry.bubble.querySelector('.ts');if(ts&&!entry.footerMeta.contains(ts))entry.footerMeta.prepend(ts);
     if(entry.aiMeta&&entry.head&&!entry.head.contains(entry.aiMeta))entry.head.append(entry.aiMeta);
-    if(entry.aiMeta&&unifiedUsage&&!entry.modelError)entry.aiMeta.hidden=true;
+    if(entry.aiMeta)entry.aiMeta.hidden=!entry.aiMeta.textContent;
     if(entry.replyTime){
       entry.replyTime.textContent=!unifiedUsage&&entry.durable&&entry.timestamp!=null?
         detailedTime(entry.aiGeneration?.generated_at??entry.timestamp):'';

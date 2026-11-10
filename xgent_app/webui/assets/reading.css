@@ -21,6 +21,7 @@
 .usage-line .usage-time,.usage-line .usage-model { color:var(--text-3); }
 .usage-line .usage-input,.usage-line .usage-output { color:var(--text-2); }
 .usage-line .usage-speed { color:var(--accent); }
+.footer-meta .usage-line .usage-model { display:none; }
 .bubble .footer-meta i { font-style:normal; }
 .bubble .footer-meta pre { margin:0; padding:0; background:none; border:0; color:inherit; font:inherit; }
 .bubble .footer-meta .ts { float:none; margin:0; font-size:var(--font-caption); line-height:17px; }

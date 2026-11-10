@@ -163,8 +163,8 @@ def test_live_model_header_system_menu_and_stop_target(full_output_server,tmp_pa
             page.locator('[data-record-id="2"]').wait_for()
             assert page.locator('[data-record-id="2"] .reply-timestamp').is_hidden()
             assert page.locator('[data-record-id="2"] .usage-time').is_visible()
-            assert 'p/current-model' in page.locator('[data-record-id="2"] .token-hud').inner_text()
-            assert page.locator('.bubble.ai .bubble-header .ai-generation-meta:visible').count()==0
+            assert 'p/current-model' not in page.locator('[data-record-id="2"] .token-hud').inner_text()
+            assert page.locator('.bubble.ai .bubble-header .ai-generation-meta:visible').count()==1
             assert page.locator('#btn-stop').is_visible()
             # Durable system menus keep only their dedicated controls.
             server.outbox.put({'type':'message','conversation_id':cid,'run_id':run_id,'msg_type':'ui_message',
