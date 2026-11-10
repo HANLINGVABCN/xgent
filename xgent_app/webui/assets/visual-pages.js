@@ -36,15 +36,24 @@ function pageRuntime(token,draft){
   function schedule(){if(!queued){queued=true;requestAnimationFrame(report);}}
   function report(){
     queued=false;if(!document.body||!document.body.getClientRects().length)return;
-    const body=document.body,children=Array.from(body.children).filter(node=>!['SCRIPT','STYLE','LINK','META','TITLE','BASE','TEMPLATE'].includes(node.tagName));
+    const body=document.body,children=Array.from(body.children).filter(node=>!['SCRIPT','STYLE','LINK','META','TITLE','BASE','TEMPLATE'].includes(node.tagName)&&node.getClientRects().length);
+    // Floating decorations belong to the scene, not its layout. Confetti and
+    // hearts are frequently appended directly to body after the card is ready.
+    // Keep them running, while measuring only the actual content roots.
+    const content=children.filter(node=>{const css=getComputedStyle(node);
+      if(!['absolute','fixed'].includes(css.position)||css.pointerEvents!=='none')return true;
+      // A pointer-transparent wrapper may still contain interactive controls.
+      return Array.from(node.querySelectorAll('a[href],button,input,select,textarea,[tabindex],[role="button"],[onclick]'))
+        .some(control=>control.getClientRects().length&&getComputedStyle(control).pointerEvents!=='none');
+    });
     // Observe content as well as body: fixed-height pages can have overflowing
     // children, while compact cards need both their width and height measured.
-    const next=new Set([body,...children.slice(0,32)]);
+    const next=new Set([body,...content.slice(0,32)]);
     for(const node of observed)if(!next.has(node))observer.unobserve(node);
     for(const node of next)if(!observed.has(node))observer.observe(node);observed=next;
     const style=getComputedStyle(body),paddingX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight),paddingY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
     let width=document.documentElement.clientWidth,height=Math.max(body.getBoundingClientRect().height,body.scrollHeight),compact=false,drawing=null;
-    if(children.length===1){const child=children[0],rect=child.getBoundingClientRect(),css=getComputedStyle(child);
+    if(content.length===1){const child=content[0],rect=child.getBoundingClientRect(),css=getComputedStyle(child);
       if(!child.getClientRects().length||rect.width<=0)return;
       const px=value=>parseFloat(value)||0;
       const marginX=px(css.marginLeft)+px(css.marginRight),marginY=px(css.marginTop)+px(css.marginBottom);
@@ -100,7 +109,9 @@ function pageRuntime(token,draft){
     document.documentElement.toggleAttribute('data-xgent-graphic',!!data.graphic);
     document.documentElement.toggleAttribute('data-xgent-embedded',!!data.embedded);
     document.documentElement.toggleAttribute('data-xgent-card',!!data.compact);
-    if(data.reset){compactRoot=null;compactWidth=0;compactSignature='';lastSize='';}schedule();
+    // A fitted root can fill its own viewport exactly. Keep its identity during
+    // reset, otherwise it is mistaken for a long page before re-measurement.
+    if(data.reset){compactWidth=0;compactSignature='';lastSize='';}schedule();
   }
   function attrs(target,source){
     for(const attr of Array.from(target.attributes))if(!source.hasAttribute(attr.name))target.removeAttribute(attr.name);
@@ -182,7 +193,9 @@ export function syncVisualPage(entry,descriptor,recordId,mount=entry.body){
   }
   function resetSizing(){
     manualSize=null;saveSize();
-    if(!graphic&&!viewportPage){contentWidth=null;contentHeight=160;compactPage=false;measured=false;resetMeasure=true;lastLayout='';}
+    // Keep the last complete canvas while refreshing its natural size. A new
+    // 160px placeholder would briefly clip a live page during reset/re-measure.
+    if(!graphic&&!viewportPage){resetMeasure=true;lastLayout='';}
     scheduleLayout();
   }
   function scheduleLayout(){if(!layoutQueued){layoutQueued=true;requestAnimationFrame(applyLayout);}}
