@@ -205,7 +205,7 @@ async def failures(bot, root):
                     return await insert(conn, chat_id, user_id, msg_type, *a)
                 h.stack.enter_context(patch.object(h.db, '_insert_global_record', fail_insert))
             if mode == 'commit':
-                conn = await h.db._get_conn()
+                conn = await h.db._get_writer_conn()
                 commit = conn.commit
                 async def fail_commit():
                     cur = await conn.execute('SELECT COUNT(*) FROM context_compressions')

@@ -144,7 +144,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancelling_during_begin_waits_for_rollback_before_next_writer(self):
         from unittest.mock import patch
-        conn = await self.db._get_conn()
+        conn = await self.db._get_writer_conn()
         execute, rollback = conn.execute, conn.rollback
         begun, rolling_back, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
         async def begin(sql, *args, **kwargs):

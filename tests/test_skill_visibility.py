@@ -38,7 +38,7 @@ async def main():
     await asyncio.gather(ns['save_skill_state']('one.md', 'disabled'), ns['save_skill_state']('two.md', 'hidden'))
     assert ns['get_skill_state']('one.md') == 'disabled'
     assert ns['get_skill_state']('two.md') == 'hidden'
-    conn = await db._get_conn()
+    conn = await db._get_writer_conn()
     async def fail_after_first_write(sql, values):
         await conn.execute(sql, values[0])
         raise OSError('fixture write failure')
