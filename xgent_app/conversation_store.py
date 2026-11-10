@@ -612,7 +612,7 @@ class ConversationStore(ChildConversationStore, QueueStore):
                            (cid, name or '新对话', now, now, generation,int(name is None)))
         return cid
 
-    async def _new_web_target(self, conn, token, group_id):
+    async def _new_web_target(self, conn, token, group_id, *, origin='web', name=None):
         """A browser draft gets an identity only inside its first admission transaction."""
         from .archive_conversations import ARCHIVE_GROUP_ID
         from .queue_store import one
@@ -628,19 +628,29 @@ class ConversationStore(ChildConversationStore, QueueStore):
                 raise ConversationError('已发送的新对话发生变化，请从对话列表进入后继续。')
             cid, generation = session['id'], session['generation']
         else:
+            bot_draft = await _config(conn, 'telegram_new_conversation') or {}
+            if bot_draft.get('token') == token:
+                group_id = bot_draft.get('group_id') or group_id
             group_id = str(group_id or 'ungrouped')
             group = await one(conn, 'SELECT id FROM conversation_groups WHERE id=? AND id<>?', (group_id, ARCHIVE_GROUP_ID))
             if group is None:
                 raise ConversationError('所选分组已不存在，请重新选择后发送。')
-            cid = await self._new_conversation(conn)
+            cid = await self._new_conversation(conn, name)
             session = await one(conn, 'SELECT generation FROM chat_sessions WHERE id=?', (cid,))
             generation = session['generation']
             await conn.execute('UPDATE chat_sessions SET group_id=? WHERE id=?', (group_id, cid))
             await conn.execute('INSERT INTO conversation_mutation_requests VALUES(?,?,?,?,?)',
                                (request_id, 'create_web', cid, json.dumps({'generation': generation}), time.time()))
-            await _set_config(conn, 'current_chat_id', cid)
+            if origin != 'cli':
+                await _set_config(conn, 'current_chat_id', cid)
             await self._bump_conversation_revision(conn)
-        return ConversationScope(cid, generation, origin='web', purpose='chat', telegram_delivery=False)
+        draft = await _config(conn, 'telegram_new_conversation')
+        if isinstance(draft, dict) and draft.get('token') == token and draft.get('conversation_id') != cid:
+            await _set_config(conn, 'telegram_conversation_id', cid)
+            await _set_config(conn, 'telegram_new_conversation', {**draft, 'conversation_id': cid})
+            await self._bump_conversation_revision(conn)
+        selected = await _config(conn, 'telegram_conversation_id')
+        return ConversationScope(cid, generation, origin=origin, purpose='chat', telegram_delivery=cid == selected)
 
     async def new_web_target(self, token):
         from .queue_store import one
@@ -649,15 +659,16 @@ class ConversationStore(ChildConversationStore, QueueStore):
                           ('web-new:' + token, 'create_web'))
         return saved['conversation_id'] if saved else None
 
-    async def queue_enqueue_new_web(self, *, token, group_id, instance, request_key, text, chat_id, metadata=None):
+    async def queue_enqueue_new_web(self, *, token, group_id, instance, request_key, text, chat_id, metadata=None, origin='web', name=None):
         async with self._transaction() as conn:
-            scope = await self._new_web_target(conn, token, group_id)
+            scope = await self._new_web_target(conn, token, group_id, origin=origin, name=name)
             if metadata is not None:
                 metadata = {**metadata, 'attachment_generation': scope.generation}
             item = await self._queue_enqueue(conn, scope=scope, instance=instance, request_key=request_key,
                                              text=text, chat_id=chat_id, metadata=metadata)
             item = {**item, 'conversation_revision': int(await _config(conn, 'conversation_revision', 0))}
         self._config_cache.pop('current_chat_id', None)
+        self._config_cache.pop('telegram_conversation_id', None)
         return item
 
     async def accept_new_web_command(self, *, token, group_id, request_key):
@@ -674,17 +685,58 @@ class ConversationStore(ChildConversationStore, QueueStore):
                                    (request_key, scope.conversation_id, scope.generation, 'management'))
             revision = int(await _config(conn, 'conversation_revision', 0))
         self._config_cache.pop('current_chat_id', None)
+        self._config_cache.pop('telegram_conversation_id', None)
         return scope, previous is None, revision
+
+    async def set_bot_new_conversation(self, token, group_id, expected_bot, expected_draft=None):
+        """Select a blank draft without inserting a conversation or chat message."""
+        from .archive_conversations import ARCHIVE_GROUP_ID
+        from .queue_store import one
+        from .conversations import ConversationChanged
+        if not isinstance(token, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', token):
+            raise ConversationError('新对话草稿标识无效。')
+        group_id = str(group_id or 'ungrouped')
+        async with self._transaction() as conn:
+            if not await one(conn, 'SELECT id FROM conversation_groups WHERE id=? AND id<>?', (group_id, ARCHIVE_GROUP_ID)):
+                raise ConversationError('所选分组已不存在，请重新选择。')
+            pending = await _config(conn, 'telegram_new_conversation') or {}
+            selected = await _config(conn, 'telegram_conversation_id')
+            if pending.get('token') == token:
+                return False
+            if selected != expected_bot or pending.get('token') != expected_draft:
+                raise ConversationChanged('Bot 当前对话已被其他端切换，请刷新后确认。')
+            saved = await one(conn, 'SELECT conversation_id FROM conversation_mutation_requests WHERE request_id=? AND operation=?',
+                              ('web-new:' + token, 'create_web'))
+            cid = saved['conversation_id'] if saved else None
+            if cid and not await one(conn, 'SELECT id FROM chat_sessions WHERE id=? AND archived=0 AND deleting=0', (cid,)):
+                raise ConversationChanged('已发送的新对话发生变化，请重新选择。')
+            await _set_config(conn, 'telegram_conversation_id', cid)
+            await _set_config(conn, 'telegram_new_conversation', {'token': token, 'group_id': group_id, 'conversation_id': cid})
+            await self._bump_conversation_revision(conn)
+        self._config_cache.pop('telegram_conversation_id', None)
+        return True
+
+    async def materialize_bot_new_conversation(self, token):
+        """Only a received message/file commits the Bot's selected blank draft."""
+        async with self._transaction() as conn:
+            draft = await _config(conn, 'telegram_new_conversation') or {}
+            if draft.get('token') != token or draft.get('conversation_id') or await _config(conn, 'telegram_conversation_id') is not None:
+                return await _config(conn, 'telegram_conversation_id')
+            scope = await self._new_web_target(conn, token, draft.get('group_id') or 'ungrouped', origin='telegram')
+        self._config_cache.pop('current_chat_id', None)
+        self._config_cache.pop('telegram_conversation_id', None)
+        return scope.conversation_id
 
     async def get_conversation_state(self):
         # One statement gives an atomic selection/revision/run snapshot.
         conn = await self._get_conn()
         cursor = await conn.execute("SELECT key,value FROM config WHERE key IN "
-                                    "('current_chat_id','telegram_conversation_id','conversation_revision','conversation_runs')")
+                                    "('current_chat_id','telegram_conversation_id','telegram_new_conversation','conversation_revision','conversation_runs')")
         config = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
         await cursor.close()
         return {'current_chat_id': config.get('current_chat_id', DEFAULT_CONVERSATION_ID),
                 'telegram_conversation_id': config.get('telegram_conversation_id'),
+                'telegram_new_conversation': config.get('telegram_new_conversation'),
                 'revision': int(config.get('conversation_revision', 0)),
                 'runs': config.get('conversation_runs', {}),
                 'running': config.get('conversation_runs', {}).get(config.get('current_chat_id', DEFAULT_CONVERSATION_ID))}
@@ -730,13 +782,15 @@ class ConversationStore(ChildConversationStore, QueueStore):
                 await conn.execute('UPDATE chat_sessions SET last_active=? WHERE id=?', (time.time(), active))
             if select:
                 await _set_config(conn, selected_key, active)
+                if selected_key == 'telegram_conversation_id' and action in {'create', 'switch'}:
+                    await _set_config(conn, 'telegram_new_conversation', None)
             await _set_config(conn, 'conversation_revision', int(await _config(conn, 'conversation_revision', 0)) + 1)
         self._config_cache.pop('current_chat_id', None)
         self._config_cache.pop('telegram_conversation_id', None)
         tree={'archived_conversation_ids':changed_ids} if action=='archive' else {'restored_conversation_ids':changed_ids} if action=='restore' else {}
         return {'ok': True, 'conversation_id': cid, **tree, **await self.get_conversation_state()}
 
-    async def set_bot_conversation(self, cid, generation, expected_bot):
+    async def set_bot_conversation(self, cid, generation, expected_bot, expected_draft=None):
         """Explicit Web action: CAS only the Bot selector, never the Web/CLI view.
 
         Returns the target session name when the selector actually changed,
@@ -750,10 +804,14 @@ class ConversationStore(ChildConversationStore, QueueStore):
             if not session or session['deleting'] or session['archived'] or session['generation'] != generation:
                 raise ConversationChanged('目标会话已改变或已归档，请刷新后再设置 Bot。')
             selected = await _config(conn, 'telegram_conversation_id')
+            pending = await _config(conn, 'telegram_new_conversation') or {}
+            if pending.get('token') != expected_draft and selected != cid:
+                raise ConversationChanged('Bot 当前新对话已被其他端切换，请刷新后确认。')
             if selected != expected_bot and selected != cid:
                 raise ConversationChanged('Bot 当前对话已被其他端切换，请刷新后确认。')
             if selected != cid:
                 await _set_config(conn, 'telegram_conversation_id', cid)
+                await _set_config(conn, 'telegram_new_conversation', None)
                 await self._bump_conversation_revision(conn)
                 changed = str(session['name'] or cid)
         self._config_cache.pop('telegram_conversation_id', None)

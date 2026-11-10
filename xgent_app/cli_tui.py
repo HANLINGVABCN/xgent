@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import copy
 import html
+import json
 import re
 import sys
 import time
@@ -146,6 +147,7 @@ class TuiMessage:
     rows_key: Any = field(default=None, repr=False, compare=False)
     rows_cache: List[Tuple[str, ToggleTarget]] = field(default_factory=list, repr=False, compare=False)
     fold_counts: Tuple[int, int] = field(default=(0, 0), repr=False, compare=False)
+    created_at: float = field(default_factory=lambda: time.time(), repr=False, compare=False)
 
 
 def segment_lines(lines: Sequence[str]) -> List[Block]:
@@ -538,6 +540,8 @@ class PtScreen:
             from xgent_app.conversations import current_scope
             scope = current_scope(required=False)
             cid = scope.conversation_id if scope is not None else self.conversation_id
+            if self.conversation_id is None and scope is not None and scope.origin == 'cli' and scope.purpose == 'management':
+                cid = None
         else:
             cid = self.conversation_id
         return cid, self._models.setdefault(cid, MessageModel(self.palette, preview_lines=0))
@@ -567,6 +571,21 @@ class PtScreen:
                         _register_menu(mid, buttons)
         self.on_change()
 
+    def adopt_draft(self, cid):
+        """Keep the just-submitted home input in place when its identity is saved."""
+        draft = self._models.pop(None, None)
+        if draft is not None:
+            self._models[cid] = draft
+            self._models[None] = MessageModel(self.palette, preview_lines=0)
+
+    def clear_draft(self):
+        self._models[None] = MessageModel(self.palette, preview_lines=0)
+        for values in (self._menus, self._forms, self._history, self._live_runs):
+            values.pop(None, None)
+        if self.conversation_id is None:
+            self.model = self._models[None]
+        self.on_change()
+
     def drop_conversations(self, existing):
         for cid in list(self._models):
             if cid is not None and cid not in existing:
@@ -586,9 +605,17 @@ class PtScreen:
             keys.append(key)
             if known.get(key) != fingerprint or not model.has(key):
                 model.upsert(key, lines)
+                try:
+                    value = json.loads(fingerprint)
+                    timestamp = value.get('timestamp') if isinstance(value, dict) else None
+                except (TypeError, ValueError):
+                    timestamp = None
+                # Older callers without saved timestamps retain history order.
+                model._keyed[key].created_at = timestamp if isinstance(timestamp, (int, float)) else float('-inf')
             known[key] = fingerprint
         local = [m.key for m in model.messages if m.key not in known]
-        model.retain(keys + local)
+        ordered = sorted(keys + local, key=lambda key: model._keyed[key].created_at)
+        model.retain(ordered)
         self._history[cid] = {key: known[key] for key in keys}
         self.on_change()
 
@@ -1122,9 +1149,21 @@ async def run_tui(screen: "PtScreen", hooks: TuiHooks) -> None:
         return out
 
     def _rows():
-        key = (id(model), model.revision, state["sel"])
+        new_conversation = bool(hooks.conversation().get('new_conversation'))
+        key = (id(model), model.revision, state["sel"], new_conversation)
         if frag_cache["key"] != key:
-            frag_cache.update(key=key, rows=model.render_rows(state["sel"]))
+            rows = model.render_rows(state["sel"])
+            if not rows and screen.conversation_id is None and new_conversation:
+                rows = [(text, None) for text in (
+                    '', '  XGent', '', '  新对话', '',
+                    '  直接输入消息开始，发送后才保存到对话列表。', '',
+                    '  /start 设置菜单   /chats 或 F4 选择已有对话',
+                    '  /update 更新   /help 帮助',
+                )]
+            elif not rows and screen.conversation_id is None:
+                rows = [(text, None) for text in ('', '  当前没有选定对话', '',
+                    '  /new 开始新对话   /chats 或 F4 选择已有对话')]
+            frag_cache.update(key=key, rows=rows)
         return frag_cache
 
     class _OutputControl(UIControl):

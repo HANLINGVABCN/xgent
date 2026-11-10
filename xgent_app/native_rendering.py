@@ -56,6 +56,29 @@ def segments(text, calls, operations=()):
     return values
 
 
+def cli_html(text, calls, prose_renderer, operations=()):
+    """Render saved/native decisions for CLI without inventing reply prose."""
+    from .presentation import LABELS
+    parts = [prose_renderer(str(text))] if text else []
+    for call in calls:
+        try:
+            block = tool_calls.display_operation(call)
+            if block['type'] == 'over':
+                continue
+            body = str(block.get('body') or '')
+            label = {'run': '执行命令', 'read': '读取文件'}.get(block['type'], LABELS.get(block['type'], ('', call.get('name', '工具调用')))[1])
+        except (KeyError, TypeError, ValueError):
+            body = json.dumps(call.get('arguments') or {}, ensure_ascii=False, indent=2)
+            label = str(call.get('name') or '工具调用')
+        matched = next((op for op in operations if op.get('native_call_id') == call.get('id')), None)
+        state = {'pending': '准备执行', 'running': '执行中', 'success': '已完成',
+                 'failed': '失败', 'stopped': '已停止'}.get((matched or {}).get('state'), '')
+        title = label + (' · ' + state if state else '')
+        parts.append('<blockquote expandable><b>' + html.escape(title) + '</b> · '
+            + str(body.count('\n') + 1) + ' 行\n<pre>' + html.escape(body) + '</pre></blockquote>')
+    return '\n'.join(parts)
+
+
 async def finish(ns, context, chat_id, msg, reply, text, usage_sink, started, token_sink, *, renderer=None):
     capture = tool_calls.current_response()
     capture.finalize()

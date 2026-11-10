@@ -70,7 +70,8 @@ class TerminalWorkspace:
     def snapshot(self):
         item = next((c for c in self.items if c['id'] == self.selected), {})
         return {'conversation_id': self.selected, 'generation': item.get('generation'),
-                'name': item.get('name') or '选择对话',
+                'name': item.get('name') or (self.frame.get('terminal_draft_name') or '新对话' if self.frame.get('terminal_draft_active') else '选择对话'),
+                'new_conversation': bool(self.frame.get('terminal_draft_active')),
                 'revision': self.frame.get('terminal_revision', 0)}
 
     def on_state(self, frame):

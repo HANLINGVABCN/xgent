@@ -1,9 +1,8 @@
 """数据库写入串行化的回归测试。
 
-背景：全进程共用一条 aiosqlite 连接且是自动提交模式。显式事务期间的每个
-await 都会让出控制权，别的协程此时发出的写会落进这个未关闭的事务里，跟着
-一起提交或回滚。这个仓库确实存在并发写（后台触发器、消息记录、空闲任务），
-所以这不是理论问题。
+写操作在独立连接上串行化；事务内部的读取使用同一个写连接，其他任务仍读
+已提交数据。历史读取与另一进程写入并发时，不能把旧快照升级为写事务；
+事务回滚也不能连带抹掉其他任务的写入。
 """
 
 import asyncio
@@ -166,7 +165,7 @@ class WriteSerializationTests(unittest.TestCase):
             await db.set_config('good', 1)
 
             # 关掉底层连接，让后续写必然失败。
-            conn = await db._get_conn()
+            conn = await db._get_writer_conn()
             await conn.close()
 
             failed = False
@@ -183,6 +182,60 @@ class WriteSerializationTests(unittest.TestCase):
         self.assertTrue(failed, '预期写入失败，测试前提不成立')
         self.assertEqual('<absent>', cached,
                          '写库失败后仍把值写进了缓存')
+
+    def test_history_snapshot_does_not_block_next_transaction_after_foreign_commit(self):
+        import sqlite3
+        async def scenario():
+            db = BotMemoryDB(self.db_path)
+            reader = await db._get_conn()
+            await reader.execute('CREATE TABLE proof(value TEXT)')
+            await reader.executemany('INSERT INTO proof VALUES(?)', [('one',), ('two',), ('three',)])
+            cursor = await reader.execute('SELECT value FROM proof ORDER BY rowid')
+            await cursor.fetchone()
+            other = sqlite3.connect(self.db_path)
+            try:
+                other.execute('INSERT INTO proof VALUES(?)', ('foreign-commit',))
+                other.commit()
+            finally:
+                other.close()
+            try:
+                async with db._transaction() as writer:
+                    await writer.execute('INSERT INTO proof VALUES(?)', ('agent-operation',))
+                    inside = await db._get_conn()
+                    self.assertIs(inside, writer)
+                    result = await inside.execute("SELECT COUNT(*) FROM proof WHERE value='agent-operation'")
+                    self.assertEqual(1, (await result.fetchone())[0])
+                    await result.close()
+                remaining = [row[0] for row in await cursor.fetchall()]
+                self.assertEqual(['two', 'three'], remaining)
+                await cursor.close()
+                fresh = await reader.execute('SELECT value FROM proof ORDER BY rowid')
+                self.assertIn('agent-operation', [row[0] for row in await fresh.fetchall()])
+                await fresh.close()
+            finally:
+                await cursor.close()
+                await db.close()
+        asyncio.run(scenario())
+
+    def test_other_task_does_not_inherit_uncommitted_writer_reads(self):
+        async def scenario():
+            db = BotMemoryDB(self.db_path)
+            reader = await db._get_conn()
+            await reader.execute('CREATE TABLE proof(value TEXT)')
+            async def count():
+                conn = await db._get_conn()
+                cursor = await conn.execute('SELECT COUNT(*) FROM proof')
+                try:return (await cursor.fetchone())[0]
+                finally:await cursor.close()
+            try:
+                async with db._transaction() as writer:
+                    await writer.execute("INSERT INTO proof VALUES('uncommitted')")
+                    self.assertEqual(1, await count())
+                    self.assertEqual(0, await asyncio.create_task(count()))
+                self.assertEqual(1, await count())
+            finally:
+                await db.close()
+        asyncio.run(scenario())
 
 
 if __name__ == '__main__':

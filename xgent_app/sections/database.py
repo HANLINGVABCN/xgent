@@ -2,6 +2,7 @@
 # Keep cross-section names available through the loader until the next decoupling phase.
 
 import inspect
+from contextvars import ContextVar
 from xgent_app.conversation_store import ConversationStore
 from xgent_app.conversations import current_scope, advance_generation, ConversationError, ConversationScope, bind_conversation
 from xgent_app.ui_history import UiHistoryError, UiHistorySnapshot, hide_audit_record, ui_record, EXPIRED, CHANGED
@@ -17,11 +18,11 @@ class BotMemoryDB(ConversationStore):
         self.db_path = db_path
         self._fresh_database = not os.path.exists(db_path)
         self._connection: Optional[aiosqlite.Connection] = None
+        self._writer_connection: Optional[aiosqlite.Connection] = None
+        self._active_writer = ContextVar('xgent_database_writer', default=None)
         self._connection_lock = asyncio.Lock()
-        # 全进程共用一条连接，且是自动提交模式。显式事务期间的每个 await 都会
-        # 让出控制权，别的协程此时发出的写会落进这个未关闭的事务里，跟着一起
-        # 提交或回滚（后台触发器、消息记录都是并发写，可真实触发）。所有写操作
-        # 都必须持这把锁，才能保证事务的原子性。
+        # 写连接由这把锁串行化；普通历史读取使用独立连接。
+        # 事务内部的读取保留写连接绑定，其他任务不会读到未提交的变化。
         self._write_lock = asyncio.Lock()
         self._initialized = False
         self._data_lease = None
@@ -34,7 +35,8 @@ class BotMemoryDB(ConversationStore):
     async def _transaction(self):
         """持写锁的显式事务：整段串行化，保证不会混入其他协程的写。"""
         async with self._write_lock:
-            conn = await self._get_conn()
+            conn = await self._get_writer_conn()
+            token = self._active_writer.set((asyncio.current_task(), conn))
             try:
                 # Cancellation can arrive after SQLite starts BEGIN but before
                 # aiosqlite delivers its result; that path must also roll back.
@@ -53,12 +55,19 @@ class BotMemoryDB(ConversationStore):
                 except Exception as rollback_err:
                     logger.error(f"事务回滚失败: {rollback_err}")
                 raise
+            finally:
+                self._active_writer.reset(token)
 
     @contextlib.asynccontextmanager
     async def _write(self):
         """单语句写：持锁即可，自动提交模式下每条语句自成事务。"""
         async with self._write_lock:
-            yield await self._get_conn()
+            conn = await self._get_writer_conn()
+            token = self._active_writer.set((asyncio.current_task(), conn))
+            try:
+                yield conn
+            finally:
+                self._active_writer.reset(token)
     
     @classmethod
     async def get_instance(cls) -> 'BotMemoryDB':
@@ -76,6 +85,9 @@ class BotMemoryDB(ConversationStore):
             return cls._instance
     
     async def _get_conn(self) -> aiosqlite.Connection:
+        active = self._active_writer.get()
+        if active is not None and active[0] is asyncio.current_task():
+            return active[1]
         # 热路径直接复用连接，避免每次真实 SQL 前额外执行 SELECT 1。
         connection = self._connection
         if connection is not None:
@@ -114,6 +126,27 @@ class BotMemoryDB(ConversationStore):
 
             self._connection = connection
             return connection
+
+    async def _get_writer_conn(self) -> aiosqlite.Connection:
+        # A history cursor may hold an old WAL snapshot while another process
+        # commits. It must never be upgraded to a write transaction (SQLITE_BUSY_SNAPSHOT).
+        # Transaction-local reads still use this writer through _active_writer.
+        reader = await self._get_conn()
+        if self.db_path == ':memory:':
+            return reader
+        if self._writer_connection is not None:
+            return self._writer_connection
+        connection = await aiosqlite.connect(self.db_path, isolation_level=None)
+        try:
+            connection.row_factory = aiosqlite.Row
+            await connection.execute('PRAGMA busy_timeout=5000')
+            await connection.execute('PRAGMA synchronous=NORMAL')
+            await connection.execute('PRAGMA cache_size=10000')
+        except BaseException:
+            await connection.close()
+            raise
+        self._writer_connection = connection
+        return connection
     
     async def _init_db(self):
         """初始化数据库表结构"""
@@ -2188,12 +2221,16 @@ class BotMemoryDB(ConversationStore):
         """关闭连接"""
         async with self._connection_lock:
             connection = self._connection
+            writer = self._writer_connection
             self._connection = None
+            self._writer_connection = None
             # 复位初始化标记：否则关闭后任何迟到的调用都会静默新建一条
             # 永远不会被关闭的连接。
             self._initialized = False
             self._config_cache = {}
             self._providers_cache = None
+            if writer is not None and writer is not connection:
+                await writer.close()
             if connection is not None:
                 await connection.close()
             if self._data_lease is not None:

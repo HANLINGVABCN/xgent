@@ -224,11 +224,16 @@ class Workbench:
                 raise WorkbenchError('请使用设置操作', 405)
             if not self.ns['BotConfig'].TOKEN:
                 raise WorkbenchError('此部署未配置 Telegram Bot', 409)
-            if (not isinstance(data.get('id'), str) or not data['id'] or type(data.get('generation')) is not int
-                    or 'expected_bot' not in data or data['expected_bot'] is not None and not isinstance(data['expected_bot'], str)):
+            draft = data.get('new_conversation')
+            if ('expected_bot' not in data or data['expected_bot'] is not None and not isinstance(data['expected_bot'], str)
+                    or data.get('expected_draft') is not None and not isinstance(data['expected_draft'], str)
+                    or draft is None and (not isinstance(data.get('id'), str) or not data['id'] or type(data.get('generation')) is not int)):
                 raise WorkbenchError('缺少有效的目标会话或 Bot 选择版本', 400)
             db = await self.db()
-            changed = await db.set_bot_conversation(data['id'], data['generation'], data['expected_bot'])
+            if draft is not None:
+                changed = '新对话' if await db.set_bot_new_conversation(draft, data.get('group_id'), data['expected_bot'], data.get('expected_draft')) else None
+            else:
+                changed = await db.set_bot_conversation(data['id'], data['generation'], data['expected_bot'], data.get('expected_draft'))
             await get_conversations().poll_once()
             notify = self.ns.get('_notify_owner_soon')
             if changed and callable(notify):

@@ -59,7 +59,7 @@ from collections import OrderedDict, deque
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from openai import AsyncOpenAI
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, Update, constants, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, WebAppInfo
 from telegram.error import BadRequest, InvalidToken, RetryAfter, TelegramError
@@ -86,6 +86,11 @@ if os.path.isfile(_legacy_env) and os.path.abspath(_legacy_env) != str(DATA_PATH
     load_dotenv(_legacy_env, override=False)
 for _key, _value in _explicit_environment.items():
     os.environ[_key] = _value
+from xgent_app.network_environment import apply_instance_network_environment
+if os.environ.get('PYTHON_DOTENV_DISABLED', '').casefold() not in {'1', 'true', 't', 'yes', 'y'}:
+    for _network_env_path in (_legacy_env, str(DATA_PATHS.env)):
+        if os.path.isfile(_network_env_path):
+            apply_instance_network_environment(dotenv_values(_network_env_path))
 # Old environment keys cannot switch this instance or its child tools elsewhere.
 os.environ.pop('XGENT_DATA_DIR', None)
 

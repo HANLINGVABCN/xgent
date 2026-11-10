@@ -31,7 +31,8 @@ async def actual_tui(cli, scenario='routing'):
     work = cli._terminal_workspace
     try:
         with interaction('cli'):
-            a = (await manager.state())['terminal_conversation_id']
+            a = (await manager.state())['current_chat_id']
+            await manager.manage('switch', a, selector='terminal')
             await manager.manage('rename', a, '终端 A', selector='terminal')
             b = (await manager.manage('create', name='终端 B', selector='terminal'))['conversation_id']
             await manager.manage('switch', a, selector='terminal')

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import html
 import json
 import logging
 import os
@@ -272,6 +273,7 @@ class _CliRelay:
     # -- 消费端（后台线程） --
 
     def _connect(self) -> Optional[sqlite3.Connection]:
+        conn = None
         try:
             conn = sqlite3.connect(self._db_path, timeout=30.0)
             # 服务端主进程用的是同一个库文件；WAL 让读写互不阻塞，
@@ -288,6 +290,9 @@ class _CliRelay:
             conn.commit()
             return conn
         except Exception:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
             logger.warning("CLI 跨端中继无法打开数据库，本次会话不同步", exc_info=True)
             return None
 
@@ -338,6 +343,8 @@ class _CliRelay:
             )
             conn.commit()
         except Exception:
+            with contextlib.suppress(Exception):
+                conn.rollback()
             # 中继失败绝不能影响本地对话——终端上该显示的都已经显示过了。
             logger.debug("CLI 跨端中继写入失败", exc_info=True)
 
@@ -530,11 +537,12 @@ def set_screen(screen: Optional[TerminalScreen]) -> None:
 class CliMessage:
     """假的 telegram Message：对应 web_bridge.WebMessage。"""
 
-    def __init__(self, bot: "CliBot", message_id: int, chat_id: int, text: str = ""):
+    def __init__(self, bot: "CliBot", message_id: int, chat_id: int, text: str = "", reply_markup: Any = None):
         self.bot = bot
         self.message_id = message_id
         self.chat_id = chat_id
         self.text = text
+        self.reply_markup = reply_markup
         self.caption: Optional[str] = None
         self.chat = type("CliChat", (), {"id": chat_id})()
 
@@ -542,9 +550,11 @@ class CliMessage:
         return await self.bot.send_message(chat_id=self.chat_id, text=text, **kwargs)
 
     async def edit_text(self, text: str, **kwargs: Any) -> "CliMessage":
-        return await self.bot.edit_message_text(
+        result = await self.bot.edit_message_text(
             chat_id=self.chat_id, message_id=self.message_id, text=text, **kwargs
         )
+        self.text, self.reply_markup = result.text, result.reply_markup
+        return result
 
     async def edit_reply_markup(self, reply_markup: Any = None, **kwargs: Any) -> bool:
         """只换按钮不动正文。
@@ -553,10 +563,12 @@ class CliMessage:
         warning——早先 CliMessage 没有这个方法，CLI 上点"下一页"是**静默**没
         反应，连报错都看不到。
         """
-        return await self.bot.edit_message_reply_markup(
+        result = await self.bot.edit_message_reply_markup(
             chat_id=self.chat_id, message_id=self.message_id,
             reply_markup=reply_markup, **kwargs
         )
+        self.reply_markup = reply_markup
+        return result
 
     async def reply_document(self, document: Any = None, caption: Optional[str] = None,
                              **kwargs: Any) -> "CliMessage":
@@ -638,8 +650,17 @@ class CliBot:
             return [], kind
         from .web_display import current_web_display
         display = current_web_display() or {}
+        if hint.get('kind') == 'ai_reply' and hint.get('native_calls'):
+            from .native_rendering import cli_html
+            from .web_history import _section_ns
+            namespace = _section_ns() or {}
+            text = cli_html((hint.get('telegram_content') or {}).get('raw',
+                (hint.get('telegram_display') or {}).get('raw_markdown', '')),
+                hint['native_calls'], namespace.get('markdown_to_telegram_html', html.escape),
+                getattr(turn, 'operations', ()) if turn else ())
+            text += '\n' + '\n'.join(s['text'] for s in display.get('segments', []) if s.get('footer') or s.get('terminal_notice'))
+            parse_mode = 'HTML'
         if display.get('usage_details') and display.get('presentation_mode') == 'folded':
-            import html
             details = display['usage_details']
             text += ('\n<blockquote expandable data-compact="1"><b>📊 用量详情</b> · '
                      + str(details.count('\n') + 1) + ' 行\n<pre>' + html.escape(details) + '</pre></blockquote>')
@@ -690,7 +711,7 @@ class CliBot:
             parse_mode=str(parse_mode) if parse_mode else None,
             reply_markup=_markup_to_frame(reply_markup),
         )
-        return CliMessage(self, message_id, chat_id, str(text))
+        return CliMessage(self, message_id, chat_id, str(text), reply_markup)
 
     async def edit_message_text(self, text: str, chat_id: Optional[int] = None,
                                 message_id: Optional[int] = None, reply_markup: Any = None,
@@ -724,7 +745,7 @@ class CliBot:
             parse_mode=str(parse_mode) if parse_mode else None,
             reply_markup=_markup_to_frame(reply_markup),
         )
-        return CliMessage(self, target_id, int(chat_id or self.chat_id), str(text))
+        return CliMessage(self, target_id, int(chat_id or self.chat_id), str(text), reply_markup)
 
     async def edit_message_reply_markup(self, chat_id: Optional[int] = None,
                                         message_id: Optional[int] = None,

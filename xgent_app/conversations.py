@@ -275,6 +275,9 @@ class ConversationManager:
         self.job_admission_enabled = False
         self._terminal_id = None
         self._terminal_revision = 0
+        self._terminal_draft_token = 'cli-' + uuid.uuid4().hex
+        self._terminal_draft_name = None
+        self._terminal_draft_active = False
         self.code_root = Path(code_root).resolve() if code_root else None
         data_root = Path(database_path).resolve().parent if database_path != ':memory:' else None
         self.object_root = data_root / 'xgent_storage' / 'conversation_objects' if data_root else None
@@ -322,15 +325,29 @@ class ConversationManager:
         return any(lock.busy() for lock in tuple(self._execution_locks.values())) or any(
             self.execution_lock(cid).busy() for cid in tuple(self._observed_runs))
 
-    async def enable_terminal(self):
+    async def enable_terminal(self, *, start_new=False):
         """One selection per CLI process; never persisted as a shared global pointer."""
         if not self.terminal_enabled:
             db = await self.factory()
             state = await db.get_conversation_state()
             if not self.terminal_enabled:
-                self._terminal_id = state['current_chat_id']
+                self._terminal_id = None if start_new else state['current_chat_id']
+                self._terminal_draft_active = start_new
                 self.terminal_enabled = True
         return await self.state()
+
+    async def new_terminal_draft(self, name=None):
+        if name is not None:
+            name = str(name).strip()
+            if not name or len(name) > 80:
+                raise ConversationError('会话名称需要 1–80 个字符。')
+        await self.enable_terminal(start_new=True)
+        self._terminal_id = None
+        self._terminal_revision += 1
+        self._terminal_draft_token = 'cli-' + uuid.uuid4().hex
+        self._terminal_draft_name = name
+        self._terminal_draft_active = True
+        return await self.poll_once()
 
     async def _terminal_state(self, state):
         if self.terminal_enabled:
@@ -340,9 +357,11 @@ class ConversationManager:
                 session = await db.get_session(checked_id)
                 if checked_id == self._terminal_id and (session is None or session.get('deleting')):
                     self._terminal_id = None
+                    self._terminal_draft_active = False
                     self._terminal_revision += 1
             state = {**state, 'running': state.get('runs', {}).get(self._terminal_id), 'terminal_conversation_id': self._terminal_id,
-                     'terminal_revision': self._terminal_revision}
+                     'terminal_revision': self._terminal_revision, 'terminal_draft_name': self._terminal_draft_name,
+                     'terminal_draft_active': self._terminal_draft_active}
         return state
 
     async def state(self):
@@ -599,12 +618,14 @@ class ConversationManager:
             if action == 'switch':
                 await self.resolve(cid, selector='terminal')
                 self._terminal_id = cid
+                self._terminal_draft_active = False
                 self._terminal_revision += 1
                 result = {'ok': True, 'conversation_id': cid}
             else:
                 result = await db.manage_conversation(action, cid, name, select=False)
                 if action == 'create':
                     self._terminal_id = result['conversation_id']
+                    self._terminal_draft_active = False
                     self._terminal_revision += 1
             result = {**result, **await self.state()}
         else:

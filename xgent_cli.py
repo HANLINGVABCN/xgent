@@ -145,7 +145,7 @@ def _cli_conversation_notifier(frame):
     _terminal_frame = frame
     cid = frame.get('terminal_conversation_id', frame.get('current_chat_id'))
     selected = next((item for item in frame.get('items', []) if item['id'] == cid), {})
-    name = selected.get('name') or '选择对话'
+    name = selected.get('name') or (frame.get('terminal_draft_name') or '新对话' if frame.get('terminal_draft_active') else '选择对话')
     changed = bool(_conversation_name and _conversation_name != name)
     _conversation_name = name
     set_visible_conversation(cid)
@@ -164,7 +164,8 @@ def _terminal_snapshot():
     cid = _terminal_frame.get('terminal_conversation_id')
     selected = next((c for c in _terminal_frame.get('items', []) if c['id'] == cid), {})
     return {'conversation_id': cid, 'generation': selected.get('generation'),
-            'name': selected.get('name') or '选择对话'}
+            'name': selected.get('name') or (_terminal_frame.get('terminal_draft_name') or '新对话' if _terminal_frame.get('terminal_draft_active') else '选择对话'),
+            'new_conversation': bool(_terminal_frame.get('terminal_draft_active'))}
 
 
 _ns['_cli_conversation_notifier'] = _cli_conversation_notifier
@@ -204,17 +205,19 @@ def _cli_operation(*, execution=False):
                     name = text.strip().split(' ', 1)[0].lower()
                     if function.__name__ == '_run_command' and name == '/new':
                         parts = text.split(maxsplit=1)
-                        await get_conversations().manage('create', name=parts[1] if len(parts) > 1 else None, selector='terminal')
+                        await get_conversations().new_terminal_draft(parts[1] if len(parts) > 1 else None)
+                        UserDataManager.clear_ui_state('terminal')
+                        dismiss_menu()
+                        if isinstance(SCREEN, cli_tui.PtScreen):
+                            SCREEN.clear_draft()
                         if receipt is not None:
                             receipt.admit()
                         if _terminal_workspace is not None:
                             await _terminal_workspace.refresh_state()
                             await _terminal_workspace.refresh_history(force=True)
-                            SCREEN.flash('已新建空白对话')
+                            SCREEN.flash('新对话，发送第一条消息后保存')
                         else:
-                            update, context, _ = build_cli_command_objects(BotConfig.AUTHORIZED_USER_ID, text)
-                            with bind_conversation(await get_conversations().resolve(selector='terminal')):
-                                await _ns['show_conversation_menu'](update, context)
+                            SCREEN.notice('新对话，输入消息开始；/start 设置，/chats 选择已有对话。', 'info')
                         return
                     if function.__name__ == '_run_command' and name == '/chats' and not (await get_conversations().state()).get('terminal_conversation_id'):
                         update, context, _ = build_cli_command_objects(BotConfig.AUTHORIZED_USER_ID, text)
@@ -232,7 +235,20 @@ def _cli_operation(*, execution=False):
                             if receipt is not None:
                                 receipt.admit()
                             return
-                    async with conversation_operation(cid, expected=cid is not None, fresh=True, selector='terminal') as scope:
+                    home = not (await get_conversations().state()).get('terminal_conversation_id')
+                    if home:
+                        ordinary = function.__name__ == '_run_conversation' and UserDataManager.get('state') == BotState.IDLE
+                        unknown = function.__name__ == '_run_command' and _resolve_command(name.lstrip('/')) is None
+                        if ordinary or unknown:
+                            if not get_conversations()._terminal_draft_active:
+                                raise ConversationChanged('当前对话已关闭或删除，草稿保留；请用 /new 新建或 /chats 选择对话。')
+                            await _submit_terminal_draft(text, receipt)
+                            return
+                        if function.__name__ == '_run_command' and name in {'/clear','/clear_memory','/compress','/export','/stop','/status','/show_chat_info','/queue'}:
+                            raise ConversationChanged('当前是新对话草稿；先发送消息或通过 /chats 选择对话。')
+                        from xgent_app.conversations import DEFAULT_CONVERSATION_ID
+                        cid = DEFAULT_CONVERSATION_ID  # Global settings remain usable before the first chat message.
+                    async with conversation_operation(cid, expected=cid is not None and not home, fresh=True, selector='terminal') as scope:
                         if not navigation and snapshot.get('generation') is not None and snapshot['generation'] != scope.generation:
                             raise ConversationChanged('上下文已重置或压缩，草稿仍保留；确认后再次发送。')
                         expired = UserDataManager.bind_ui_state()
@@ -250,8 +266,8 @@ def _cli_operation(*, execution=False):
                                    (function.__name__ != '_run_command' or _resolve_command(command_name) is None)
                                    else 'management')
                         with interaction('cli', purpose):
-                            admitted = await get_conversations().resolve(scope.conversation_id, expected=cid is not None, selector='terminal')
-                            async with conversation_operation(admitted, execution=execute, expected=cid is not None) as running:
+                            admitted = await get_conversations().resolve(scope.conversation_id, expected=cid is not None and not home, selector='terminal')
+                            async with conversation_operation(admitted, execution=execute, expected=cid is not None and not home) as running:
                                 if execute:
                                     await _refresh_terminal_model_config()
                                 if receipt is not None and purpose != 'chat':
@@ -897,6 +913,14 @@ def _history_row_lines(row):
     renderer = SCREEN.renderer()
     kind, role = item.get('msg_type'), item.get('role')
     content = item.get('content') or ''
+    metadata = _ns['metadata_dict'](row.get('metadata'))
+    if kind == 'ai_reply' and metadata.get('native_calls'):
+        from xgent_app.native_rendering import cli_html
+        raw = (metadata.get('stopped_reply') or {}).get('partial', row.get('content') or '')
+        content = cli_html(raw, metadata['native_calls'], _ns['markdown_to_telegram_html'],
+            (metadata.get('presentation') or {}).get('operations', ()))
+        content += '\n' + '\n'.join(s['text'] for s in (item.get('web_display') or {}).get('segments', [])
+            if s.get('footer') or s.get('terminal_notice'))
     details = (item.get('web_display') or {}).get('usage_details')
     if details and item.get('presentation_mode') == 'folded':
         import html
@@ -1008,6 +1032,29 @@ async def _record_terminal_user(text):
     return row_id
 
 
+async def _submit_terminal_draft(text, receipt):
+    manager = get_conversations()
+    queue = _ns['get_text_queue']()
+    request_id = receipt.snapshot.setdefault('queue_request_id', uuid.uuid4().hex) if receipt else uuid.uuid4().hex
+    with interaction('cli', 'chat'), bind_conversation(None):
+        item = await queue.submit_new_web(text, token=manager._terminal_draft_token, origin='cli',
+            name=manager._terminal_draft_name, chat_id=BotConfig.AUTHORIZED_USER_ID,
+            request_key='cli:' + request_id)
+    if isinstance(SCREEN, cli_tui.PtScreen):
+        SCREEN.adopt_draft(item['conversation_id'])
+    await manager.manage('switch', item['conversation_id'], selector='terminal')
+    if _terminal_workspace is not None:
+        await _terminal_workspace.refresh_state()
+    if receipt is not None:
+        receipt.snapshot.update(conversation_id=item['conversation_id'], generation=item['generation'])
+        receipt.admit()
+    manager.start()
+    try:
+        await queue.poll()
+    except Exception:
+        logger.exception('终端新对话已保存，后台队列将继续处理')
+
+
 @_cli_operation(execution=lambda: UserDataManager.get('state') == BotState.IDLE)
 async def _run_conversation(text: str) -> None:
     """跑一轮完整对话。对照 idle.py 的 _web_run_conversation，但没有
@@ -1082,8 +1129,9 @@ async def _run_callback(callback_data: str) -> None:
     """按编号触发的按钮点击等价操作。对照 idle.py 的 _web_handle_callback。"""
     # 菜单点击产生的回复（进一层菜单/执行动作的结果）按命令返回呈现。
     set_turn_kind("cmd")
+    from xgent_app.cli_bridge import active_menu_message_id
     update, context, _bot = build_cli_callback_objects(
-        BotConfig.AUTHORIZED_USER_ID, callback_data, 0,
+        BotConfig.AUTHORIZED_USER_ID, callback_data, active_menu_message_id() or 0,
     )
     try:
         async with _ns['ui_operation'](capture_text=True):
@@ -1674,7 +1722,7 @@ async def _init_runtime() -> None:
     await UserDataManager.init()
     await BotMemoryDB.get_instance()
     global _terminal_workspace
-    await get_conversations().enable_terminal()
+    await get_conversations().enable_terminal(start_new=True)
     await get_conversations().poll_once()
     get_conversations().start()
     _ns['_cli_queue_dispatch'] = _cli_queue_dispatch

@@ -81,12 +81,12 @@ class MessageQueue:
         await self.start()
         return public_snapshot(await (await self.manager.factory()).queue_snapshot(cid))
 
-    async def submit_new_web(self, text, *, token, group_id='ungrouped', chat_id, request_key, metadata=None):
+    async def submit_new_web(self, text, *, token, group_id='ungrouped', chat_id, request_key, metadata=None, origin='web', name=None):
         await self.start()
         try:
             return await (await self.manager.factory()).queue_enqueue_new_web(
                 token=token, group_id=group_id, instance=self.instance, request_key=request_key,
-                text=text, chat_id=chat_id, metadata=metadata)
+                text=text, chat_id=chat_id, metadata=metadata, origin=origin, name=name)
         except ConversationError:
             raise
         except Exception as exc:

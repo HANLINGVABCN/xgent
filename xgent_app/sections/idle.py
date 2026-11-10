@@ -2051,6 +2051,12 @@ def telegram_entry(handler):
                 state = await manager.state()
                 query = getattr(update, 'callback_query', None)
                 text = str(getattr(getattr(update, 'message', None), 'text', '') or '')
+                pending_new = state.get('telegram_new_conversation') or {}
+                if (query is None and state.get('telegram_conversation_id') is None and pending_new.get('token') and not pending_new.get('conversation_id')
+                        and not text.startswith('/') and (text.strip() or any(getattr(message, key, None) for key in
+                        ('document', 'photo', 'video', 'audio', 'voice', 'animation', 'sticker', 'video_note')))):
+                    await (await BotMemoryDB.get_instance()).materialize_bot_new_conversation(pending_new['token'])
+                    state = await manager.state()
                 action = str(getattr(query, 'data', '') or '')
                 if action.startswith('q:'):
                     return await handle_queue_callback(update, context, action)

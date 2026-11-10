@@ -42,6 +42,8 @@ const locationParams = () => new URLSearchParams(location.hash.split('?')[1] || 
 const chatLocation = () => !location.hash || (location.hash.replace(/^#\/?/, '').split('?')[0] || 'chat') === 'chat';
 let localCurrent = locationParams().has('message') ? null : locationParams().get('conversation');
 let listReady = false, draftToken = null;
+let draftVisible = false, draftGroup = 'ungrouped', draftEntry = null;
+const draftMenuTarget = '@new';
 try{if(!chatLocation())localCurrent=sessionStorage.getItem('xgent-selected-conversation');draftToken=sessionStorage.getItem('xgent-new-conversation-token');}catch{}
 function newToken(){
   if(!draftToken){draftToken=globalThis.crypto?.randomUUID?.()||('new'+Date.now().toString(36)+Math.random().toString(36).slice(2));try{sessionStorage.setItem('xgent-new-conversation-token',draftToken);}catch{}}
@@ -187,6 +189,14 @@ function accept(next) {
   const previous = state.current_chat_id;
   itemIndex = new Map(next.items.map(item => [item.id, item]));
   listReady = true;
+  const linked = next.telegram_new_conversation;
+  const adopted = !localCurrent && draftToken && linked?.token === draftToken && itemById(linked.conversation_id);
+  if(adopted){
+    const token=draftToken;
+    localCurrent=linked.conversation_id;draftToken=null;draftVisible=false;
+    try{sessionStorage.removeItem('xgent-new-conversation-token');}catch{}
+    window.dispatchEvent(new CustomEvent('xgent-conversation-materialized',{detail:{conversation_id:localCurrent,generation:adopted.generation,token,adopted:true}}));
+  }
   const missing = localCurrent && !itemById(localCurrent) || chatLocation() && locationParams().get('conversation') && !itemById(locationParams().get('conversation'));
   if(missing){localCurrent=null;newToken();if(chatLocation())history.replaceState(null,'','#/chat');}
   const combined = {...state, ...next, server_current_chat_id:next.current_chat_id, current_chat_id: localCurrent};
@@ -201,7 +211,7 @@ function accept(next) {
   window.dispatchEvent(new CustomEvent('xgent-conversation-state', {detail: state}));
   if (previous !== state.current_chat_id || missing) {
     window.dispatchEvent(new CustomEvent('xgent-conversation-changed', {
-      detail: {previous, conversation_id: state.current_chat_id},
+      detail: {previous, conversation_id: state.current_chat_id, ...(adopted?{materialized:true,generation:adopted.generation}: {})},
     }));
   }
   if(missing)window.dispatchEvent(new Event('xgent-new-conversation'));
@@ -262,6 +272,7 @@ async function createConversation() {
   if (mutation || !await prepareChat()) return;
   try {
     search.value = '';
+    draftVisible = true;draftGroup = groupView === 'all' ? 'ungrouped' : groupView;
     selectLocal(null);
     scroll.scrollTop = 0;
     closeMenu(false); setDrawer(false, false);
@@ -354,6 +365,33 @@ function createRow(item) {
   row.append(open, restore, toggle, more);
   return {row, open, branch, childBadge, name, more, dot, restore, bot, toggle};
 }
+function renderDraftRow(){
+  if(!draftEntry){
+    const name=node('span',{class:'conv-row-title'},'新对话');
+    const bot=node('span',{class:'conv-bot-badge',hidden:'',title:'发送第一条消息后创建 Bot 当前对话'},'Bot 当前');
+    const open=node('a',{href:conversationHref(null),draggable:'true',class:'conv-open','data-focus':'open:new','aria-label':'打开对话：新对话'},name,bot);
+    open.addEventListener('click',async event=>{if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;event.preventDefault();if(!mutation&&await prepareChat()){selectLocal(null);setDrawer(false);$('input')?.focus();}});
+    const more=button(icon('more'),event=>openDraftMenu(event.currentTarget),{class:'conv-more conv-icon-button','aria-label':'更多操作：新对话','aria-haspopup':'menu','aria-expanded':'false','data-focus':'more:new'});
+    more.addEventListener('keydown',event=>{if(event.key==='ArrowDown'){event.preventDefault();openDraftMenu(more);}});
+    const row=node('div',{class:'conv-row conv-draft-row','data-conversation-draft':''},open,more);
+    draftEntry={row,open,more,bot};
+  }
+  draftEntry.row.classList.toggle('is-current',!localCurrent);
+  draftEntry.open.setAttribute('aria-current',String(!localCurrent));
+  draftEntry.bot.hidden=state.telegram_new_conversation?.token!==draftToken;
+  draftEntry.more.disabled=!!mutation;
+  draftEntry.more.setAttribute('aria-expanded',String(menuTarget===draftMenuTarget));
+  return draftEntry.row;
+}
+function openDraftMenu(trigger){
+  if(mutation||!draftVisible)return;
+  if(menuTarget===draftMenuTarget){closeMenu();return;}
+  closeMenu(false);menuTarget=draftMenuTarget;menuTrigger=trigger;trigger.setAttribute('aria-expanded','true');
+  const current=state.telegram_new_conversation?.token===draftToken;
+  const select=button(current?'🤖 Bot 当前对话':'🤖 设为 Bot 当前对话',setBotNewConversation,{role:'menuitem'});
+  select.disabled=current;
+  menu.replaceChildren(select);menu.hidden=false;positionMenu();select.focus({preventScroll:true});
+}
 function renderList() {
   if (search.value.trim()) {
     listSignature = '';
@@ -369,7 +407,8 @@ function renderList() {
       const pinned = !query ? Number(b.pinned || 0) - Number(a.pinned || 0) : 0;
       return pinned || timestamp(b) - timestamp(a) || a.id.localeCompare(b.id);
     });
-  const signature = JSON.stringify([groupView, query, groups().map(group=>[group.id,group.name]), state.current_chat_id, state.telegram_conversation_id, activeRuns(), mutation,
+  const showDraft=authenticated&&draftVisible&&(groupView==='all'||groupView===draftGroup);
+  const signature = JSON.stringify([groupView, query, showDraft, draftToken, state.telegram_new_conversation, groups().map(group=>[group.id,group.name]), state.current_chat_id, state.telegram_conversation_id, activeRuns(), mutation,
     [...expandedChildren], visible.map(item => [item.id, title(item), groupFor(item), item.group_id, item.pinned,
       item.parent_conversation_id, item.branch_mode, item.owner_conversation_id])]);
   if (signature === listSignature) return;
@@ -387,6 +426,7 @@ function renderList() {
   }
   const visited = new Set();
   let group = '';
+  if(showDraft){group='今天';children.push(node('h3',{class:'conv-date-group'},group),renderDraftRow());}
   function renderTree(item, depth = 0) {
     if (visited.has(item.id)) return null;
     visited.add(item.id);
@@ -444,7 +484,7 @@ function renderList() {
     if (next !== group) { group = next; children.push(node('h3', {class: 'conv-date-group'}, group)); }
     children.push(renderTree(item));
   }
-  if (!visible.length) {
+  if (!visible.length && !showDraft) {
     children.push(node('div', {class: 'conv-list-empty'},
       node('strong', {}, query ? '没有找到对话' : '从一段新对话开始'),
       node('p', {}, query ? '换个关键词，或清除搜索。' : '你的对话会保留在这里，随时回来继续。'),
@@ -455,7 +495,7 @@ function renderList() {
   scroll.scrollTop = oldScroll;
   for (const [id] of rows) if (!itemById(id)) rows.delete(id);
   if (focused) Array.from(list.querySelectorAll('[data-focus]')).find(element => element.dataset.focus === focused)?.focus({preventScroll: true});
-  if (menuTarget) { if (!itemById(menuTarget)) closeMenu(false); else positionMenu(); }
+  if (menuTarget) { if (menuTarget===draftMenuTarget? !showDraft : !itemById(menuTarget)) closeMenu(false); else positionMenu(); }
 }
 function renderRunning() {
   $('conversation-current-status').hidden = !runningFor(state.current_chat_id);
@@ -601,7 +641,17 @@ async function setBotConversation(item){
   const expected=state.telegram_conversation_id;
   closeMenu(false);
   try{
-    if(await mutate('set_bot',{id:item.id,generation:item.generation,expected_bot:expected}))notify('Bot 当前对话已设为「'+title(item)+'」，网页选择不变。');
+    if(await mutate('set_bot',{id:item.id,generation:item.generation,expected_bot:expected,expected_draft:state.telegram_new_conversation?.token||null}))notify('Bot 当前对话已设为「'+title(item)+'」，网页选择不变。');
+  }catch(error){if(error.name!=='AbortError'){notify('设置失败：'+error.message,{error:true,retry:refresh});await refresh();}}
+}
+async function setBotNewConversation(){
+  if(mutation||!draftVisible||!authenticated)return;
+  const token=newToken();
+  closeMenu(false);
+  try{
+    const result=await mutate('set_bot',{new_conversation:token,group_id:draftGroup,
+      expected_bot:state.telegram_conversation_id,expected_draft:state.telegram_new_conversation?.token||null});
+    if(result)notify('新对话已设为 Bot 当前；网页或 Telegram 发送第一条消息后保存。');
   }catch(error){if(error.name!=='AbortError'){notify('设置失败：'+error.message,{error:true,retry:refresh});await refresh();}}
 }
 async function confirmConversationAction(action,id) {
@@ -764,14 +814,14 @@ window.XGentConversations = {
     if(Number.isSafeInteger(result.conversation_revision))state.revision=Math.max(state.revision,result.conversation_revision);
     if(!itemById(id)){const item={id,name:'新对话',generation:result.generation,archived:0,group_id:groupId,created_at:Date.now()/1000};state.items=[item,...state.items];itemIndex.set(id,item);listSignature='';}
     window.dispatchEvent(new CustomEvent('xgent-conversation-materialized',{detail:{conversation_id:id,generation:result.generation,token,adopted}}));
-    if(draftToken===token){draftToken=null;try{sessionStorage.removeItem('xgent-new-conversation-token');}catch{}}
+    if(draftToken===token){draftToken=null;draftVisible=false;try{sessionStorage.removeItem('xgent-new-conversation-token');}catch{}}
     if(adopted){if(groupId!=='all')groupView=groupId;selectLocal(id,'replace',{materialized:true,token,generation:result.generation});}
     else render();
     request=null;refresh();return adopted;
   },
   get isNew(){return !localCurrent;},
   get newToken(){return newToken();},
-  get newGroup(){return groupView==='all'?'ungrouped':groupView;},
+  get newGroup(){const linked=state.telegram_new_conversation;return linked?.token===draftToken?linked.group_id||'ungrouped':draftVisible?draftGroup:groupView==='all'?'ungrouped':groupView;},
   restore:id=>restoreConversation(id),
   enter:async(id,message)=>{if(isArchived(itemById(id))){enteredArchives.add(id);try{sessionStorage.setItem('xgent-entered-archives',JSON.stringify([...enteredArchives]));}catch{}}if(!await selectConversation(id))return false;if(message)location.hash=conversationHref(id)+'&message='+encodeURIComponent(message);return true;},
   enteredArchive:id=>enteredArchives.has(id),
