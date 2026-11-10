@@ -149,6 +149,7 @@ def test_live_model_header_system_menu_and_stop_target(full_output_server,tmp_pa
                 'reply_markup':[[{'text':'停止回答','callback_data':'act_stop_generation:'+run_id}]]})
             page.get_by_text(modes[index],exact=True).wait_for()
             assert page.locator('.bubble.ai .bubble-header .ai-generation-meta').inner_text()=='p / current-model'
+            assert page.locator('.bubble.ai .bubble-header').evaluate('head=>Math.abs(head.querySelector(".ai-generation-meta").getBoundingClientRect().bottom-head.querySelector(".bubble-author-icon").getBoundingClientRect().bottom)<1')
             assert page.locator('.bubble.ai .reply-timestamp').is_hidden()
             assert page.locator('.footer-meta .ai-generation-meta').count()==0
             assert '历史记录未记录模型' not in page.locator('#log').inner_text()
@@ -165,6 +166,7 @@ def test_live_model_header_system_menu_and_stop_target(full_output_server,tmp_pa
             assert page.locator('[data-record-id="2"] .usage-time').is_visible()
             assert 'p/current-model' not in page.locator('[data-record-id="2"] .token-hud').inner_text()
             assert page.locator('.bubble.ai .bubble-header .ai-generation-meta:visible').count()==1
+            assert page.locator('[data-record-id="2"] .bubble-header').evaluate('head=>Math.abs(head.querySelector(".ai-generation-meta").getBoundingClientRect().bottom-head.querySelector(".bubble-author-icon").getBoundingClientRect().bottom)<1')
             assert page.locator('#btn-stop').is_visible()
             # Durable system menus keep only their dedicated controls.
             server.outbox.put({'type':'message','conversation_id':cid,'run_id':run_id,'msg_type':'ui_message',
