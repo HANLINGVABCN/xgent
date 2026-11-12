@@ -52,6 +52,19 @@ async def exercise(cli, scenario):
                     assert work.selected!=cid
                     assert (await db.get_session(work.selected))['name']=='测试新对话'
                     assert len(await db.get_all_sessions())==count+2
+            elif scenario=='mode_sync':
+                await cli.UserDataManager.save_config('response_mode','nonstream')
+                await cli._dispatch_submitted('/stream')
+                assert cli.UserDataManager.get('stream_mode') is True
+                assert cli.UserDataManager.get('web_response_mode')=='foreground'
+                assert cli.UserDataManager.get('stream_style')=='background'
+                await cli._dispatch_submitted('/start')
+                options=get_last_menu_options()
+                resolved=[cli._ns['CallbackDataStore']._store.get(value,value) for value in options]
+                resolved=[value.split(':',2)[2] if value.startswith('cv:') else value for value in resolved]
+                await cli._dispatch_submitted(str(resolved.index('toggle_stream_mode')+1))
+                assert cli.UserDataManager.get('stream_mode') is False
+                assert cli.UserDataManager.get('web_response_mode')=='nonstream'
             elif scenario=='native':
                 from xgent_app.presentation import message_presentation
                 from xgent_app.web_display import web_display_scope

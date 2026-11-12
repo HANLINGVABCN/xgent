@@ -1122,15 +1122,15 @@ def normalize_text_stitch_mode(value: Any) -> str:
     return mode
 
 
-# 流式风格：仅当 stream_mode=True 时有意义
-STREAM_STYLE_FOREGROUND = "foreground"   # 前台流式：实时推送到 Telegram（draft / edit）
-STREAM_STYLE_BACKGROUND = "background"   # 后台流式：累积后一次性发送，避开限流
+# 保留旧配置名称；现在三端共用开关，Bot 正文按批次限频刷新。
+STREAM_STYLE_FOREGROUND = "foreground"
+STREAM_STYLE_BACKGROUND = "background"
 STREAM_STYLES = {STREAM_STYLE_FOREGROUND, STREAM_STYLE_BACKGROUND}
-DEFAULT_STREAM_STYLE = STREAM_STYLE_FOREGROUND
+DEFAULT_STREAM_STYLE = STREAM_STYLE_BACKGROUND
 
 
 def normalize_stream_style(value: Any) -> str:
-    """归一化流式风格字段。任何无法识别的值都回退到默认（前台流式）。"""
+    """兼容旧流式风格值；当前 Bot 流式固定使用后台分批显示。"""
     style = str(value or DEFAULT_STREAM_STYLE).strip().lower()
     if style in {"bg", "back", "后台", "后台流式"}:
         return STREAM_STYLE_BACKGROUND
@@ -1142,10 +1142,10 @@ def normalize_stream_style(value: Any) -> str:
 
 
 def get_stream_style_label(style: Optional[str] = None) -> str:
-    style = normalize_stream_style(style if style is not None else UserDataManager.get('stream_style'))
-    if style == STREAM_STYLE_BACKGROUND:
-        return "后台流式"
-    return "前台流式"
+    if not normalize_bool(UserDataManager.get('stream_mode', True), True):
+        return '非流式'
+    scope = current_scope(required=False)
+    return '流式' if scope is not None and scope.origin in {'web', 'cli'} else '后台流式'
 
 
 def get_text_stitch_mode_label(mode: Optional[str] = None) -> str:

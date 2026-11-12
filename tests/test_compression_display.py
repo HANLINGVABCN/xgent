@@ -1,4 +1,4 @@
-"""Real compression handler, transient previews and Telegram routing, with fake models."""
+"""Real compression with shared modes, paced Bot previews and isolated fake models."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +11,7 @@ from tests.test_web_presentation import browser_session
 
 
 async def display_probe(bot, root, web_mode='foreground', telegram_mode='foreground',
-                        outcome='success', callback=False, routed=True, pure_web=False, return_case=False):
+                        outcome='success', callback=False, routed=True, pure_web=False, return_case=False, long_summary=False):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -23,12 +23,13 @@ async def display_probe(bot, root, web_mode='foreground', telegram_mode='foregro
 
     partial = 'COMPRESS_PARTIAL_OUTPUT: 真实收到的第一段。'
     final = partial + '\nCOMPRESS_COMPLETE_OUTPUT'
+    if long_summary:
+        final = (final + '\n' + ('完整摘要的普通文本行，用于测试拆分与排序。\n' * 340)).rstrip()
     async with CompressionHarness(bot, root) as h:
         await bot.GlobalRecorder.record_user_message('KEEP_ORIGINAL_CONTEXT')
         await h.db.set_config('telegram_conversation_id', 'global_memory' if routed else None)
-        for key, value in [('web_response_mode', web_mode), ('stream_mode', telegram_mode != 'nonstream'),
-                           ('stream_style', 'background' if telegram_mode == 'background' else 'foreground')]:
-            await bot.UserDataManager.save_config(key, value)
+        await bot.UserDataManager.save_config('response_mode', web_mode)
+        telegram_mode = 'background' if web_mode == 'foreground' else 'nonstream'
         before = await h.db.get_compression_snapshot()
         telegram = TelegramProbe(h.db)
         entered, release = asyncio.Event(), asyncio.Event()
@@ -55,7 +56,7 @@ async def display_probe(bot, root, web_mode='foreground', telegram_mode='foregro
                 yield partial
                 await release.wait()
                 fail()
-                yield '\nCOMPRESS_COMPLETE_OUTPUT'
+                yield final[len(partial):]
             finally:
                 entered.set()
 
@@ -90,9 +91,8 @@ async def display_probe(bot, root, web_mode='foreground', telegram_mode='foregro
             assert not any(r['msg_type'] == 'ai_reply' for r in await h.db.get_global_messages(1000))
             sent_before = str(telegram.sent)
             if routed and not pure_web:
-                assert ('后台流式输出中...' if telegram_mode == 'background' else
-                        '非流式输出中...' if telegram_mode == 'nonstream' else '前台流式输出中...') in sent_before
-                assert (partial in sent_before) == (web_mode == telegram_mode == 'foreground')
+                assert ('后台流式输出中' if telegram_mode == 'background' else '非流式输出中') in sent_before
+                assert (partial in sent_before) == (web_mode == 'foreground')
             else:
                 assert not telegram.sent
             release.set()
@@ -104,10 +104,17 @@ async def display_probe(bot, root, web_mode='foreground', telegram_mode='foregro
             if outcome == 'success':
                 assert entry['status'] == 'completed' and entry['summary'] == final
                 if routed and not pure_web:
-                    assert any('COMPRESS_COMPLETE_OUTPUT' in item['text'] and partial in item['text']
-                               for item in telegram.sent)
+                    delivered = '\n'.join(item['text'] for item in telegram.sent)
+                    assert 'COMPRESS_COMPLETE_OUTPUT' in delivered and partial in delivered, [
+                        (item.get('operation'), len(item['text']), item['text'][:80]) for item in telegram.sent]
                 history = await h.db.get_display_history(1000)
                 row = next(r for r in history if r['id'] == entry['response_row_id'])
+                archive = next(r for r in history if r['id'] == entry['archive_row_id'])
+                notice = next(r for r in history if r['id'] == entry['notice_row_id'])
+                assert archive['timestamp'] < row['timestamp'] <= notice['timestamp']
+                assert archive['id'] < row['id'] < notice['id']
+                assert 'compression_archive' in str(archive['metadata'])
+                assert 'display_media' not in str(notice['metadata'])
                 message = build_history_message(row, bot.ArtifactManager.ROOT_DIR, root)
                 snapshots = [f for f in frames if f.get('record_id') == row['id'] and f['type'] == 'record_snapshot']
                 assert snapshots and snapshots[-1]['text'] == message['content']
@@ -125,6 +132,7 @@ async def display_probe(bot, root, web_mode='foreground', telegram_mode='foregro
                       'completed': outcome == 'success'}
             if return_case:
                 result['browser_case'] = {'frames': frames, 'partial': partial, 'response': message,
+                    'archive_record_id': entry.get('archive_row_id'), 'notice_record_id': entry.get('notice_row_id'),
                     'history': [build_history_message(r, bot.ArtifactManager.ROOT_DIR, root)
                                 for r in await h.db.get_display_history(1000)]}
             return result
@@ -136,11 +144,10 @@ class CompressionDisplayTests(unittest.TestCase):
             return run_in_app('import asyncio\nfrom tests.test_compression_display import display_probe\n'
                 f'print(json.dumps(asyncio.run(display_probe(bot, {root!r}, **{options!r}))))')
 
-    def test_web_and_telegram_reply_modes_are_independent(self):
+    def test_web_and_bot_share_modes_and_bot_streams_paced_body(self):
         for web in ('foreground', 'nonstream'):
-            for telegram in ('foreground', 'background', 'nonstream'):
-                with self.subTest(web=web, telegram=telegram):
-                    assert all(self.probe(web_mode=web, telegram_mode=telegram).values())
+            with self.subTest(web=web):
+                assert all(self.probe(web_mode=web).values())
 
     def test_web_button_mirrors_compression_without_mirroring_other_menus(self):
         assert all(self.probe(callback=True).values())

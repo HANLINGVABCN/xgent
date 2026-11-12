@@ -510,6 +510,7 @@ class BotMemoryDB(ConversationStore):
             logger.warning(f"token 用量统计历史迁移失败（下次启动重试）: {e}")
 
         await self.migrate_conversations()
+        await self.repair_compression_archive_presentations()
         from xgent_app.text_stitch import ensure as ensure_text_stitch
         await ensure_text_stitch(conn)
         from xgent_app.conversation_branching import repair_restored_workspaces
@@ -959,7 +960,66 @@ class BotMemoryDB(ConversationStore):
             }
             await conn.execute('INSERT INTO context_compression_jobs (job_id, payload, session_id, context_epoch) VALUES (?, ?, ?, ?)',
                                (entry['job_id'], json.dumps(entry, ensure_ascii=False), self._conversation_id(), entry['context_epoch']))
+            metadata = self._compression_archive_metadata(entry)
+            entry['archive_row_id'] = await self._insert_global_record(
+                conn, chat_id, 0, MessageType.SYSTEM_OP, 'system', '导出完成。',
+                entry['created_at'], self._conversation_id(), metadata)
+            await self._save_compression_job(conn, entry)
         return entry
+
+    @staticmethod
+    def _compression_archive_metadata(entry):
+        from xgent_app.web_history import display_media_reference
+        return {'src': entry.get('src'), 'compression_auxiliary': True,
+            'compression_archive': {'id': entry['job_id'], 'sequence': entry['sequence']},
+            'display_media': [display_media_reference(entry['archive_path'], '系统记忆.zip')]}
+
+    async def repair_compression_archive_presentations(self):
+        """Separate old archive media from its completion notice without changing summaries."""
+        async with self._transaction() as conn:
+            cursor = await conn.execute('SELECT j.job_id,j.payload,j.session_id FROM context_compression_jobs j '
+                'JOIN chat_sessions s ON s.id=j.session_id WHERE s.deleting=0')
+            jobs = await cursor.fetchall()
+            await cursor.close()
+            repaired = 0
+            for saved in jobs:
+                try:
+                    entry = json.loads(saved['payload'])
+                except (ValueError, TypeError):
+                    continue
+                if (not isinstance(entry, dict) or entry.get('status') != 'completed' or entry.get('archive_row_id')
+                        or entry.get('conversation_id') != saved['session_id'] or type(entry.get('sequence')) is not int
+                        or not entry.get('notice_row_id') or not entry.get('archive_path')):
+                    continue
+                cursor = await conn.execute('SELECT metadata,timestamp FROM global_messages WHERE id=? AND session_id=? AND withdrawn=0',
+                    (entry['notice_row_id'], saved['session_id']))
+                notice = await cursor.fetchone()
+                await cursor.close()
+                if notice is None:
+                    continue
+                try:
+                    metadata = json.loads(notice['metadata'] or '{}')
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(metadata, dict) or not metadata.get('display_media'):
+                    continue
+                timestamp = entry.get('created_at')
+                if not isinstance(timestamp, (int, float)) or not 0 < timestamp <= notice['timestamp']:
+                    continue
+                archive_metadata = self._compression_archive_metadata(entry)
+                archive_metadata['display_media'] = metadata.pop('display_media')
+                from xgent_app.message_policy import new_policy, record_policy
+                origin = record_policy({'metadata': metadata}).origin
+                archive_metadata['message_policy'] = new_policy('system_op', 'system', metadata=archive_metadata, origin=origin).to_dict()
+                entry['archive_row_id'] = await self._insert_global_record(conn, entry.get('chat_id') or 0, 0,
+                    'system_op', 'system', '导出完成。', timestamp, saved['session_id'], archive_metadata)
+                await conn.execute('UPDATE global_messages SET metadata=? WHERE id=? AND session_id=?',
+                    (json.dumps(metadata, ensure_ascii=False), entry['notice_row_id'], saved['session_id']))
+                await self._save_compression_job(conn, entry)
+                await conn.execute('UPDATE context_compressions SET payload=? WHERE session_id=? AND sequence=? AND context_epoch=?',
+                    (json.dumps(entry, ensure_ascii=False), saved['session_id'], entry['sequence'], entry.get('context_epoch', 0)))
+                repaired += 1
+        return repaired
 
     async def commit_compression(self, entry, summary, stop_event):
         from xgent_app.compression import CompressionError, validate_summary
@@ -1033,8 +1093,9 @@ class BotMemoryDB(ConversationStore):
         metadata = {
             'src': entry.get('src'), 'compression_auxiliary': entry['status'] not in {'failed', 'stopped'},
             'compression_task': {'id': entry['job_id'], 'status': entry['status'], 'sequence': entry['sequence']},
-            'display_media': [display_media_reference(entry['archive_path'], '系统记忆.zip')],
         }
+        if not entry.get('archive_row_id'):
+            metadata['display_media'] = [display_media_reference(entry['archive_path'], '系统记忆.zip')]
         from xgent_app.message_policy import stamp_record_metadata
         return text, stamp_record_metadata('system_op', 'system', metadata)
 
@@ -1708,6 +1769,18 @@ class BotMemoryDB(ConversationStore):
     
     async def set_config(self, key: str, value: Any):
         """设置配置"""
+        from xgent_app.response_modes import RESPONSE_KEYS
+        if key in RESPONSE_KEYS:
+            if key == 'stream_mode':
+                from xgent_app.response_modes import stream_enabled
+                mode = 'foreground' if stream_enabled({'stream_mode': value}) else 'nonstream'
+            elif key == 'stream_style':
+                await self.ensure_response_modes()
+                return  # A retired style field cannot overwrite a concurrent switch change.
+            else:
+                mode = value
+            await self.set_response_mode(mode)
+            return
         # 先落库再更新缓存：反过来的话写库失败会让缓存与 DB 一直不一致，
         # 直到进程重启为止。
         json_value = json.dumps(value)
@@ -1730,36 +1803,53 @@ class BotMemoryDB(ConversationStore):
         return await self.get_config_fresh('presentation_mode', 'folded')
 
     async def set_response_mode(self, mode):
-        """Commit stream enablement and style together for the three UI choices."""
-        modes = {'foreground': (True, 'foreground'), 'background': (True, 'background'),
-                 'nonstream': (False, 'foreground')}
-        if mode not in modes:
-            raise ValueError('回复方式只能是前台流式、后台流式或非流式')
-        enabled, style = modes[mode]
-        values = {'stream_mode': enabled, 'stream_style': style}
+        """All entrypoints commit the same stream switch and compatibility fields."""
+        from xgent_app.response_modes import normalize_web_mode, shared_values
+        selected = normalize_web_mode(mode)
+        values = shared_values({'stream_mode': selected != 'nonstream'})
         async with self._transaction() as conn:
             await conn.executemany('INSERT OR REPLACE INTO config(key,value) VALUES (?,?)',
                 [(key, json.dumps(value)) for key, value in values.items()])
+            await self._bump_response_revision(conn)
+        self._config_cache.update(values)
+        return values
+
+    @staticmethod
+    async def _bump_response_revision(conn):
+        from xgent_app.conversation_store import _config, _set_config
+        await _set_config(conn, 'web_settings_revision', int(await _config(conn, 'web_settings_revision', 0)) + 1)
+
+    async def read_response_modes(self):
+        from xgent_app.response_modes import shared_values
+        conn = await self._get_conn()
+        cursor = await conn.execute("SELECT key,value FROM config WHERE key IN ('stream_mode','stream_style','web_response_mode')")
+        try:
+            config = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
+        finally:
+            await cursor.close()
+        values = shared_values(config)
+        self._config_cache.update(values)
+        return values
+
+    async def ensure_response_modes(self):
+        from xgent_app.response_modes import shared_values
+        async with self._transaction() as conn:
+            cursor = await conn.execute("SELECT key,value FROM config WHERE key IN ('stream_mode','stream_style','web_response_mode')")
+            config = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
+            await cursor.close()
+            values = shared_values(config)
+            if any(config.get(key) != value for key, value in values.items()):
+                await conn.executemany('INSERT OR REPLACE INTO config(key,value) VALUES (?,?)',
+                    [(key, json.dumps(value)) for key, value in values.items()])
+                await self._bump_response_revision(conn)
         self._config_cache.update(values)
         return values
 
     async def ensure_web_response_mode(self):
-        from xgent_app.response_modes import web_mode
-        async with self._write() as conn:
-            cursor = await conn.execute("SELECT key,value FROM config WHERE key IN ('web_response_mode','stream_mode','stream_style')")
-            config = {row['key']: json.loads(row['value']) for row in await cursor.fetchall()}
-            await cursor.close()
-            selected = web_mode(config)
-            await conn.execute('INSERT OR IGNORE INTO config(key,value) VALUES (?,?)',
-                               ('web_response_mode', json.dumps(selected)))
-        self._config_cache['web_response_mode'] = selected
-        return selected
+        return (await self.ensure_response_modes())['web_response_mode']
 
     async def set_web_response_mode(self, mode):
-        from xgent_app.response_modes import normalize_web_mode
-        selected = normalize_web_mode(mode)
-        await self.set_config('web_response_mode', selected)
-        return selected
+        return (await self.set_response_mode(mode))['web_response_mode']
 
     async def set_skill_state(self, path: str, state: str) -> Dict[str, List[str]]:
         if state not in {'enabled', 'disabled', 'hidden'}:
@@ -2280,6 +2370,7 @@ class UserDataManager:
         """从数据库加载数据到内存"""
         from xgent_app.presentation import normalize_mode
         mode = normalize_mode(await cls._require_db().ensure_presentation_mode())
+        response_values = await cls._require_db().ensure_response_modes()
         fetch_status_raw = await cls._require_db().get_config('model_fetch_status', {})
         cls._data = {
             'state': BotState.IDLE,
@@ -2300,13 +2391,7 @@ class UserDataManager:
             'agent_mode': await cls._require_db().get_config('agent_mode', False),
             'agent_call_mode': await cls._require_db().get_config('agent_call_mode', 'fence'),
             'agent_confirm': await cls._require_db().get_config('agent_confirm', False),
-            'stream_mode': normalize_bool(await cls._require_db().get_config('stream_mode', True), True),
-            'web_response_mode': await cls._require_db().ensure_web_response_mode(),
-            # 流式风格：'foreground'（前台流式，实时推送）/ 'background'（后台流式，累积后一次发）
-            # 仅当 stream_mode=True 时有意义；默认 'foreground' 保持与旧版行为一致。
-            'stream_style': normalize_stream_style(
-                await cls._require_db().get_config('stream_style', 'foreground')
-            ),
+            **response_values,
             'text_stitch_mode': normalize_text_stitch_mode(
                 await cls._require_db().get_config('text_stitch_mode', DEFAULT_TEXT_STITCH_MODE)
             ),
@@ -2430,7 +2515,22 @@ class UserDataManager:
             cls._data['presentation_mode'] = 'folded'
             cls._data['hide_protocol_blocks'] = True
             return
+        from xgent_app.response_modes import RESPONSE_KEYS, normalize_web_mode, shared_values
+        if key in RESPONSE_KEYS:
+            if key == 'stream_style':
+                values = shared_values(cls._data)
+            else:
+                values = shared_values({'stream_mode': value} if key == 'stream_mode' else
+                    {'stream_mode': normalize_web_mode(value) != 'nonstream'})
+            cls._data.update(values)
+            return
         data[key] = value
+
+    @classmethod
+    async def refresh_response_modes(cls):
+        values = await cls._require_db().read_response_modes()
+        cls._data.update(values)
+        return values
 
     @classmethod
     async def save_config(cls, key: str, value: Any):
@@ -2442,6 +2542,12 @@ class UserDataManager:
             from xgent_app.presentation import normalize_mode
             value = normalize_mode(value)
         await cls._require_db().set_config(key, value)
+        from xgent_app.response_modes import RESPONSE_KEYS
+        if key in RESPONSE_KEYS:
+            await cls.refresh_response_modes()
+            if '_sync_web_appearance' in globals():
+                await _sync_web_appearance(cls._require_db(), force=True)
+            return
         cls.set(key, value)
         if key == 'presentation_mode':
             outbox = get_web_outbox() or globals().get('_web_external_outbox') or getattr(globals().get('_web_chat_server'), 'outbox', None)

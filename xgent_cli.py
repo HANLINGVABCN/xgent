@@ -177,7 +177,7 @@ async def _refresh_terminal_model_config():
     conn = await db._get_conn()
     keys = {'active_provider':'active_provider_key', 'default_model':'default_model',
             'default_media_provider':'default_media_provider_key', 'default_media_model':'default_media_model',
-            'agent_mode':'agent_mode', 'stream_mode':'stream_mode', 'stream_style':'stream_style',
+            'agent_mode':'agent_mode', 'stream_mode':'stream_mode', 'stream_style':'stream_style', 'web_response_mode':'web_response_mode',
             'thinking_level':'thinking_level', 'global_depth':'global_depth',
             'disabled_skills':'disabled_skills', 'hidden_skills':'hidden_skills'}
     cursor = await conn.execute('SELECT key,value FROM config WHERE key IN (' + ','.join('?' for _ in keys) + ')', tuple(keys))
@@ -187,6 +187,7 @@ async def _refresh_terminal_model_config():
         UserDataManager.set(keys[row['key']], json.loads(row['value']))
     db._providers_cache = None
     await UserDataManager.reload_providers()
+    await UserDataManager.refresh_response_modes()
 
 
 def _cli_operation(*, execution=False):

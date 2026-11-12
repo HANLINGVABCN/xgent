@@ -38,10 +38,12 @@ async def create_conversation_export(snapshot: Optional[Dict] = None) -> Tuple[D
     return snapshot, bundle
 
 
-async def deliver_conversation_export(context, chat_id: int, bundle: Dict, *, record_failure: bool = True) -> Optional[str]:
+async def deliver_conversation_export(context, chat_id: int, bundle: Dict, *, record_failure: bool = True, archive_record_id=None) -> Optional[str]:
     try:
-        with open(bundle['archive_path'], 'rb') as archive:
-            await context.bot.send_document(chat_id=chat_id, document=archive,
+        from xgent_app.presentation import message_presentation
+        with open(bundle['archive_path'], 'rb') as archive, message_presentation(
+                {'kind': 'system_op', 'record_id': archive_record_id, 'model_context': False} if archive_record_id else {'kind': 'system_op'}):
+            sent = await context.bot.send_document(chat_id=chat_id, document=archive,
                                             filename='系统记忆.zip', caption='导出完成。')
     except Exception as exc:
         logger.warning('Conversation export delivery failed: %s', exc)
@@ -50,6 +52,21 @@ async def deliver_conversation_export(context, chat_id: int, bundle: Dict, *, re
         if not record_failure:
             return detail  # Compression records this after its frozen snapshot commit.
         return await GlobalRecorder.record_error(exc, chat_id, source='export_delivery', detail=detail)
+    if archive_record_id:
+        # The persisted archive keeps its original place after a compression
+        # reset/refresh. Link it to the existing media bubble before generation.
+        with contextlib.suppress(Exception):
+            ids = [sent.message_id] if type(getattr(sent, 'message_id', None)) is int else []
+            db = await BotMemoryDB.get_instance()
+            row = await db.get_display_message(archive_record_id)
+            if row:
+                from xgent_app.telegram_records import bind_record
+                await bind_record(db, row, ids)
+            outbox = getattr(context.bot, 'outbox', None) or get_web_outbox()
+            if outbox is not None:
+                await db.patch_display_metadata(archive_record_id, {'web_live': {
+                    'epoch': outbox.snapshot()['epoch'], 'message_ids': ids}})
+            await publish_saved_reply(context, archive_record_id)
     return None
 
 
@@ -207,7 +224,8 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
             _, bundle = await create_conversation_export(snapshot)
             entry = await db.begin_compression(snapshot, bundle, update.effective_chat.id,
                                                provider, model, _RECORDER_SOURCE_ID, stop_event)
-            warning = await deliver_conversation_export(context, update.effective_chat.id, bundle, record_failure=False)
+            warning = await deliver_conversation_export(context, update.effective_chat.id, bundle, record_failure=False,
+                archive_record_id=entry.get('archive_row_id'))
             if warning:
                 with contextlib.suppress(Exception):
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=warning)
@@ -233,6 +251,7 @@ async def run_context_compression(update: Update, context: ContextTypes.DEFAULT_
                 notice, _ = db._compression_notice(entry)
                 with message_presentation({'kind': 'system_op', 'record_id': entry.get('notice_row_id')}):
                     await context.bot.send_message(chat_id=update.effective_chat.id, text=notice)
+                await publish_saved_reply(context, entry.get('notice_row_id'))
         except asyncio.CancelledError:
             if entry is not None and not changed:
                 with contextlib.suppress(Exception):

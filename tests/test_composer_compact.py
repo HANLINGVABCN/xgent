@@ -105,13 +105,12 @@ def test_failed_change_stays_in_composer_and_preserves_value(browser_context,wor
 
 
 @pytest.mark.parametrize('width',[1440,390,320])
-def test_web_generation_choices_preserve_independent_bot_setting(browser_context,workspace_url,width):
+def test_web_generation_choices_sync_the_bot_stream_switch(browser_context,workspace_url,width):
     page=browser_context.new_page();page.set_viewport_size({'width':width,'height':844});ready(page,workspace_url['url'])
     page.wait_for_function('!document.getElementById("composer-model").disabled')
     page.locator('#input').fill('保留草稿')
-    bot_mode=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']['telegram_response_mode']
-    for value,label,enabled,style in [('nonstream','非流式',False,'foreground'),
-                                      ('foreground','前台流式',True,'foreground')]:
+    for value,label,enabled,style in [('nonstream','非流式',False,'background'),
+                                      ('foreground','流式',True,'background')]:
         page.get_by_role('button',name='生成选项',exact=True).click()
         assert page.get_by_role('switch',name='Agent 模式',exact=True).is_visible()
         assert page.get_by_role('switch',name='Agent 自动执行',exact=True).count()==0
@@ -121,7 +120,7 @@ def test_web_generation_choices_preserve_independent_bot_setting(browser_context
         page.locator('#composer-options-popover').wait_for(state='hidden')
         data=browser_context.request.get(workspace_url['url']+'/api/workbench/bootstrap').json()['settings']['values']
         assert (data['response_mode'],data['stream_mode'],data['stream_style'])==(value,enabled,style)
-        assert data['telegram_response_mode']==bot_mode
+        assert data['telegram_response_mode']==('background' if enabled else 'nonstream')
         assert page.locator('#input').input_value()=='保留草稿'
         page.get_by_role('button',name='生成选项',exact=True).click()
         page.get_by_role('button',name='回复方式',exact=True).click()

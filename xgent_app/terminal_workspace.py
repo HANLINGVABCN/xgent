@@ -131,6 +131,9 @@ class TerminalWorkspace:
         if self.config is not None and self.config.get('_cli_queue_notifier'):
             await self.config['_cli_queue_notifier']()
         if self.config is not None:
+            data = self.config.get('UserDataManager')
+            if data is not None:
+                await data.refresh_response_modes()
             model = str(await db.get_config_fresh('default_model', '') or '')
             if model != self.model_name:
                 self.model_name = model

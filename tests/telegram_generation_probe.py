@@ -15,12 +15,10 @@ from xgent_app.web_bridge import build_telegram_conversation_objects, deliver_op
 
 async def generation_modes(bot,root):
     cases=[]
-    for mode,label in [('foreground','前台流式'),('background','后台流式'),('nonstream','非流式')]:
+    for mode,label in [('foreground','后台流式'),('background','后台流式'),('nonstream','非流式')]:
         async with Harness(bot,Path(root)/mode) as h:
             bot.UserDataManager.set('agent_mode',False)
-            bot.UserDataManager.set('stream_mode',mode!='nonstream')
-            bot.UserDataManager.set('stream_style','background' if mode=='background' else 'foreground')
-            bot.UserDataManager.set('web_response_mode','foreground')
+            await bot.UserDataManager.save_config('response_mode',mode)
             native=RichCapture()
             async def deliver(op,mid):
                 return await deliver_op_to_bot(native,op,mid,markup_builder=bot._relay_markup_to_telegram)
@@ -60,7 +58,7 @@ async def generation_modes(bot,root):
                                         await asyncio.sleep(.05)
                                 await asyncio.wait_for(progress(),8)
                                 assert native.messages[control_id]['text'].startswith(label+'输出中…')
-                                assert raw not in native.messages[control_id]['text']
+                                assert raw in native.messages[control_id]['text']
                             finish.set()
                             await asyncio.wait_for(task,12)
                             assert await channel.wait_idle(5)
@@ -68,7 +66,7 @@ async def generation_modes(bot,root):
                             assert [row['content'] for row in history if row['msg_type']=='ai_reply']==[raw+tail]
                             assert len(requests)==1 and requests[0]['history'][-1]['content']=='状态验收消息'
                             assert all(label+'输出中' not in str(request) for request in requests)
-                            assert control_id not in native.messages
+                            assert not any(item['text'].startswith(label+'输出中') for item in native.messages.values())
                             assert not any(item.get('reply_markup') for item in native.messages.values())
                             frames=h.drain_frames()
                             assert not any('等待首段内容' in str(frame.get('text','')) or '等待完整回复' in str(frame.get('text','')) for frame in frames)

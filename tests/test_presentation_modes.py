@@ -25,8 +25,8 @@ async def main():
           async with Harness(bot,folder) as h:
             await bot.UserDataManager.save_config('presentation_mode',mode)
             bot.UserDataManager.set('agent_mode',True)
-            bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
-            bot.UserDataManager.set('stream_style',style)
+            await bot.UserDataManager.save_config('stream_mode',stream);await bot.UserDataManager.save_config('web_response_mode', 'foreground' if stream else 'nonstream')
+            await bot.UserDataManager.save_config('stream_style',style)
             replies=['好的，主人，\n```run-x\n<<BEGIN_PRESENT123456\nuptime\n<<END_PRESENT123456\n```\n主人稍等马上。',
                      '主人，当前负载为 0.15、0.20、0.18。']
             raw=list(replies)

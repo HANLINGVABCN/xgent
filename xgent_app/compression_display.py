@@ -24,9 +24,7 @@ class CompressionBot(PresentationBot):
         preview = hint.get('telegram_content') or {}
         if kind == 'ai_reply' and (hint.get('purpose') == 'generation' or preview.get('complete') is False):
             text = _LABELS[mode]
-            if mode == 'background' and preview:
-                text += f" 已生成 {len(str(preview.get('raw') or ''))} 字"
-            if mode != 'foreground' or not preview:
+            if not preview:
                 hint['telegram_display'] = {**hint.get('telegram_display', {}), 'text': text, 'parse_mode': None}
         return super()._telegram_hint(hint, kind, previous)
 
@@ -66,8 +64,7 @@ class CompressionOutput:
             bot = MirrorBot(getattr(bot, 'outbox', None), self.chat_id,
                 real_bot=self.ns['get_web_real_bot'](), channel=self.ns['telegram_channel']())
         data = self.ns['UserDataManager']
-        self.policy = response_policy({key: data.get(key) for key in
-            ('stream_mode', 'stream_style', 'web_response_mode')}, origin)
+        self.policy = response_policy(await data.refresh_response_modes(), origin)
         self.turn = PresentationTurn('folded')
         self.turn.response_policy = self.policy
         self.stack.enter_context(presentation_turn(self.turn))

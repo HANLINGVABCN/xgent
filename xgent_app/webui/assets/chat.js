@@ -1766,7 +1766,7 @@ import {installViewportFit} from './viewport.js';
     }
     if(frame.type==='queue_state'){refreshQueue();return;}
     if(frame.queue_id)refreshQueue();
-    if(frame.type==='settings_state'){window.XGentAppearance?.accept(frame);return;}
+    if(frame.type==='settings_state'){window.XGentAppearance?.accept(frame);if(typeof frame.values?.stream_mode==='boolean')window.dispatchEvent(new CustomEvent('xgent-response-mode-state',{detail:frame}));return;}
     if(frame.type==='knowledge_state'){window.dispatchEvent(new CustomEvent('xgent-workbench-change',{detail:{pages:['models','settings']}}));return;}
     if(frame.type==='conversation_deleted'){window.dispatchEvent(new CustomEvent('xgent-conversation-deleted',{detail:frame}));window.XGentConversations?.refresh();return;}
     if(frame.interaction_id&&['callback_done','turn_error'].includes(frame.type))finishCardRequest(frame.interaction_id);

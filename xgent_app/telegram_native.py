@@ -78,7 +78,7 @@ def native_offer_kind(kind, payload, bot):
         return kind
     if spec.get('form_receipt') and kind in {OP_SEND, OP_EDIT}:
         return OP_NATIVE_RENDER
-    if not request_capable(bot):
+    if not request_capable(bot) and spec.get('mode') != 'background':
         return kind
     if spec.get('auxiliary'):
         return None
@@ -200,6 +200,42 @@ async def _generation_control(bot, op, state, entry, keyboard, delivery, extra, 
     entry['control_signature'] = signature
 
 
+async def _background_body(bot, op, state, entry, keyboard, delivery, extra):
+    """Keep received parts in order; the last message owns the Stop button."""
+    from .protocols import _telegram_units
+    spec = op.payload['telegram_native']
+    bodies = [ProtocolParser.to_telegram_html(str(value)) for value in
+              (spec.get('fallback') or [op.payload.get('text') or ''])]
+    ids = [*entry.get('preview_ids', []), *([entry['control_id']] if entry['control_id'] else [])]
+    previous = entry.get('preview_html', [])
+    for index, body in enumerate(bodies[:-1]):
+        data = {'chat_id': op.chat_id, 'text': body, 'parse_mode': 'HTML', 'reply_markup': None, **delivery}
+        if index < len(ids):
+            if index >= len(previous) or previous[index] != body or ids[index] == entry['control_id']:
+                await _ignore_same_edit(bot, 'editMessageText', {**data, 'message_id': ids[index]}, extra)
+        else:
+            sent = await _post(bot, 'sendMessage', data, extra)
+            ids.append(sent['message_id'])
+    last = len(bodies) - 1
+    entry['preview_ids'] = ids[:last]
+    entry['preview_body'] = True
+    active = ids[last] if last < len(ids) else None
+    if active != entry['control_id']:
+        entry['control_id'] = active
+        entry.pop('control_signature', None)
+    body = bodies[-1]
+    text = _generation_status(spec) + ('\n\n' + body if body.strip() else '')
+    if _telegram_units(text) > 3900:
+        text = body
+    await _generation_control(bot, op, state, entry, keyboard, delivery, extra,
+                              paced=False, text=text, parse_mode='HTML')
+    for mid in ids[len(bodies):]:
+        await _post(bot, 'deleteMessage', {'chat_id': op.chat_id, 'message_id': mid}, extra)
+    entry['preview_ids'] = ids[:last]
+    entry['preview_html'] = bodies[:-1]
+    entry['preview_body'] = True
+
+
 async def deliver_native(bot, op, native_id, markup, extra):
     state = _state(bot)
     if op.kind == OP_NATIVE_MEDIA:
@@ -221,6 +257,8 @@ async def deliver_native(bot, op, native_id, markup, extra):
         await _stored_parts(bot, op, op.payload.get('_native_parts', []))
         return result
     spec = op.payload['telegram_native']
+    if spec.get('mode') == 'background' and not request_capable(bot):
+        state['rich'] = False
     if spec.get('form_receipt') and not request_capable(bot):
         state['rich'] = False
     context = op.conversation_context or {}
@@ -255,13 +293,20 @@ async def deliver_native(bot, op, native_id, markup, extra):
         return None
     if op.kind == OP_NATIVE_DELETE:
         await _delete_control(bot, op.chat_id, entry, extra)
-        for mid in entry['ids'] or ([native_id] if native_id else []):
+        for mid in list(dict.fromkeys([*(entry['ids'] or ([native_id] if native_id else [])), *entry.get('preview_ids', [])])):
             await _post(bot, 'deleteMessage', {'chat_id': op.chat_id, 'message_id': mid}, extra)
         state['messages'].pop(key, None)
         return None
     rich_html = list(spec.get('html') or [' '])
     if op.kind == OP_NATIVE_DRAFT:
-        if not await _preview_ready(state, op, PREVIEW_INTERVAL_SECONDS):
+        if spec.get('mode') == 'background' and 'preview_raw' in entry and entry['preview_raw'] == spec.get('raw'):
+            return None
+        interval = PROGRESS_INTERVAL_SECONDS if spec.get('mode') == 'background' else PREVIEW_INTERVAL_SECONDS
+        if not await _preview_ready(state, op, interval):
+            return None
+        if spec.get('mode') == 'background':
+            await _background_body(bot, op, state, entry, keyboard, delivery, extra)
+            entry['preview_raw'] = spec.get('raw')
             return None
         if state['rich'] is not False and state['draft'] is not False:
             await _generation_control(bot, op, state, entry, keyboard, delivery, extra, paced=False)
@@ -285,7 +330,12 @@ async def deliver_native(bot, op, native_id, markup, extra):
                                   paced=False, text=status, parse_mode=op.payload.get('parse_mode'))
         return None
     if not entry['ids']:
-        entry['ids'] = list(op.payload.get('_native_parts') or await _stored_parts(bot, op) or ([native_id] if native_id else []))
+        preview = [*entry.get('preview_ids', []), *([entry['control_id']] if entry.get('preview_body') and entry['control_id'] else [])]
+        entry['ids'] = list(op.payload.get('_native_parts') or await _stored_parts(bot, op) or preview or ([native_id] if native_id else []))
+        if preview and entry['ids'] == preview:
+            entry['control_id'] = None
+            entry.pop('preview_ids', None)
+            entry.pop('control_signature', None)
     if spec.get('empty'):
         # No generated AI body: keep only the actual terminal status.
         if entry['control_id']:

@@ -53,6 +53,21 @@ function pageRuntime(token,draft){
     for(const node of next)if(!observed.has(node))observer.observe(node);observed=next;
     const style=getComputedStyle(body),paddingX=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight),paddingY=parseFloat(style.paddingTop)+parseFloat(style.paddingBottom);
     let width=document.documentElement.clientWidth,height=Math.max(body.getBoundingClientRect().height,body.scrollHeight),compact=false,drawing=null;
+    if(content.length>1&&content.length<=8&&style.display==='flex'&&style.flexDirection==='column'){
+      const roots=content.map(node=>({node,css:getComputedStyle(node),rect:node.getBoundingClientRect()}));
+      const bounded=roots.every(({css})=>Number.isFinite(parseFloat(css.maxWidth))&&!['absolute','fixed'].includes(css.position));
+      const picture=roots.some(({node,css})=>node.matches('svg,canvas,img')||node.querySelector('svg,canvas,img')||css.aspectRatio!=='auto');
+      if(bounded&&picture){
+        const px=value=>parseFloat(value)||0;
+        const measured=Math.max(...roots.map(({css,rect})=>rect.width+px(css.marginLeft)+px(css.marginRight)))+paddingX;
+        const signature=roots.map(({node})=>[node.style.maxWidth,node.style.minWidth,node.style.width].join(':')).join('|')+':'+paddingX;
+        if(compactRoot!==body||signature!==compactSignature){compactWidth=0;compactSignature=signature;}
+        if(!compactWidth)compactWidth=measured;
+        width=compactWidth;compact=true;compactRoot=body;
+        height=roots.reduce((total,{node,css,rect})=>total+(node.offsetHeight||rect.height)+px(css.marginTop)+px(css.marginBottom),paddingY)
+          +px(style.rowGap)*(roots.length-1);
+      }
+    }
     if(content.length===1){const child=content[0],rect=child.getBoundingClientRect(),css=getComputedStyle(child);
       if(!child.getClientRects().length||rect.width<=0)return;
       const px=value=>parseFloat(value)||0;

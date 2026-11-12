@@ -927,9 +927,9 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # --- 请求模式切换 ---
         elif data == "toggle_stream_mode":
+            await UserDataManager.refresh_response_modes()
             current = normalize_bool(UserDataManager.get('stream_mode', True), True)
             new_mode = not current
-            UserDataManager.set('stream_mode', new_mode)
             await UserDataManager.save_config('stream_mode', new_mode)
 
             await GlobalRecorder.record_system_op(
@@ -939,16 +939,14 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             await show_start_card(query.message, edit=True)
 
-        # --- 流式风格切换（前台流式 / 后台流式）---
+        # Older saved buttons now toggle the same shared stream switch.
         elif data == "toggle_stream_style":
-            current = normalize_stream_style(UserDataManager.get('stream_style', DEFAULT_STREAM_STYLE))
-            new_style = STREAM_STYLE_BACKGROUND if current == STREAM_STYLE_FOREGROUND else STREAM_STYLE_FOREGROUND
-            UserDataManager.set('stream_style', new_style)
-            await UserDataManager.save_config('stream_style', new_style)
+            values = await UserDataManager.refresh_response_modes()
+            await UserDataManager.save_config('stream_mode', not values['stream_mode'])
 
             await GlobalRecorder.record_system_op(
-                f"流式风格切换为: {get_stream_style_label(new_style)}",
-                {"stream_style": new_style}
+                f"回复方式切换为: {get_stream_style_label()}",
+                {"stream_mode": UserDataManager.get('stream_mode')}
             )
 
             await query.message.edit_text(

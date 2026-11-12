@@ -138,8 +138,8 @@ async def provider_matrix(bot, root):
                 memory_dir.mkdir()
                 (memory_dir / 'fixture.txt').write_text('EXCLUDED-LONG-TERM-MEMORY', encoding='utf-8')
                 h.stack.enter_context(patch.object(bot, 'MEMORY_DIR', str(memory_dir)))
-                bot.UserDataManager.set('stream_mode', style != 'nonstream');bot.UserDataManager.set('web_response_mode', 'foreground' if style != 'nonstream' else 'nonstream')
-                bot.UserDataManager.set('stream_style', style if style != 'nonstream' else 'foreground')
+                await bot.UserDataManager.save_config('stream_mode', style != 'nonstream');await bot.UserDataManager.save_config('web_response_mode', 'foreground' if style != 'nonstream' else 'nonstream')
+                await bot.UserDataManager.save_config('stream_style', style if style != 'nonstream' else 'foreground')
                 before = await h.db.get_compression_snapshot()
                 async def observe(provider, data, model, history, stop_event, usages):
                     live = await h.db.get_compression_snapshot()
@@ -384,7 +384,7 @@ async def live_stop(bot, root):
         async with CompressionHarness(bot, Path(root) / mode) as h:
             await bot.GlobalRecorder.record_user_message('LIVE-ORIGINAL')
             before = await h.db.get_compression_snapshot()
-            bot.UserDataManager.set('stream_mode', True);bot.UserDataManager.set('web_response_mode', 'foreground')
+            await bot.UserDataManager.save_config('stream_mode', True);await bot.UserDataManager.save_config('web_response_mode', 'foreground')
             closed = asyncio.Event()
             async def stream(*a, **k):
                 try:

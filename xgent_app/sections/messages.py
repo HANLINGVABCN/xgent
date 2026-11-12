@@ -2043,10 +2043,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
     from xgent_app.response_modes import response_policy
     from xgent_app.conversations import current_scope
     if native_session.response_policy is None:
-        native_session.response_policy = response_policy({
-            'stream_mode': UserDataManager.get('stream_mode', True),
-            'stream_style': UserDataManager.get('stream_style', 'foreground'),
-            'web_response_mode': UserDataManager.get('web_response_mode')},
+        native_session.response_policy = response_policy(await UserDataManager.refresh_response_modes(),
             current_scope().origin if current_scope().origin != 'legacy' else getattr(update, 'xgent_origin', 'legacy'))
     policy = native_session.response_policy
     stream_mode = policy.generation_mode != 'nonstream'
@@ -2132,7 +2129,7 @@ async def _process_conversation_inner(update: Update, context: ContextTypes.DEFA
         response = native_tools.ModelReply('', native_session.reply)
         generated_reply.recorded = True
     elif stream_mode:
-        # Stream once to the Web; Telegram selects its independent projection.
+        # One streaming request: Web/CLI are immediate, Bot previews are paced.
         response = await send_streaming_response(
             update, context,
             prov_name, prov_data, model,

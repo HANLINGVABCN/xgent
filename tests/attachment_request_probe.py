@@ -336,14 +336,14 @@ async def check_runtime_paths(bot, root):
     async with Harness(bot, root) as h:
         await h.seed()
         for stream, style in ((False, "foreground"), (True, "foreground"), (True, "background")):
-            bot.UserDataManager.set("stream_mode", stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
-            bot.UserDataManager.set("stream_style", style)
+            await bot.UserDataManager.save_config("stream_mode", stream);await bot.UserDataManager.save_config('web_response_mode', 'foreground' if stream else 'nonstream')
+            await bot.UserDataManager.save_config("stream_style", style)
             before = len(h.requests)
             await h.turn(f"renderer {stream}/{style}")
             assert len(h.requests) == before + 1
             assert_complete(h.requests[-1], f"renderer {stream}/{style}")
         result["all_renderers"] = True
-        bot.UserDataManager.set("stream_mode", False);bot.UserDataManager.set('web_response_mode', 'nonstream')
+        await bot.UserDataManager.save_config("stream_mode", False);await bot.UserDataManager.save_config('web_response_mode', 'nonstream')
         bot.UserDataManager.set("agent_mode", True)
         h.replies = [
             "```run-x\n<<BEGIN_attachment_probe\nmock-operation\n<<END_attachment_probe\n```",
@@ -462,8 +462,8 @@ async def check_failures(bot, root):
         before = len(h.requests)
         history_before = await h.db.get_global_messages(1000)
         for stream, style in ((False, "foreground"), (True, "foreground"), (True, "background")):
-            bot.UserDataManager.set("stream_mode", stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
-            bot.UserDataManager.set("stream_style", style)
+            await bot.UserDataManager.save_config("stream_mode", stream);await bot.UserDataManager.save_config('web_response_mode', 'foreground' if stream else 'nonstream')
+            await bot.UserDataManager.save_config("stream_style", style)
             await h.turn("preflight failure must not be recorded as an AI answer")
         history_after = await h.db.get_global_messages(1000)
         assert len(h.requests) == before
@@ -884,8 +884,8 @@ async def check_upstream_failures(bot, root):
             providers = bot.UserDataManager.get("providers")
             providers["p"]["api_format"] = fmt
             for stream, style in ((False, "foreground"), (True, "foreground"), (True, "background")):
-                bot.UserDataManager.set("stream_mode", stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream')
-                bot.UserDataManager.set("stream_style", style)
+                await bot.UserDataManager.save_config("stream_mode", stream);await bot.UserDataManager.save_config('web_response_mode', 'foreground' if stream else 'nonstream')
+                await bot.UserDataManager.save_config("stream_style", style)
                 h.error = (413, "CAPACITY-ERROR complete request is too large")
                 h.drain_frames()
                 before = len(h.requests)

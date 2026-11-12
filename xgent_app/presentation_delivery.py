@@ -100,7 +100,8 @@ class PresentationBot:
             'raw': '', 'owner_id': None}
 
     def _native_spec(self, hint, kind, previous, legacy_chunks=None):
-        if not self._native_enabled():
+        policy = getattr(self.turn, 'response_policy', None)
+        if not self._native_enabled() and not (policy and policy.telegram_mode == 'background'):
             return None
         from .telegram_rich import render_rich, legacy_chunks as fallback, output_rich
         content = hint.get('telegram_content')
@@ -148,7 +149,7 @@ class PresentationBot:
             if complete:
                 from .stop_targets import end_phase
                 end_phase(generation['run_id'], generation['ref'])
-        phase = 'reply' if complete else 'draft' if (generation or {}).get('mode') == 'foreground' else 'control'
+        phase = 'reply' if complete else 'draft' if (generation or {}).get('mode') in {'foreground', 'background'} else 'control'
         record_id = hint.get('record_id') or (self.turn.active_reply or {}).get('record_id')
         from .tool_calls import current_session
         native_prose = current_session() is not None and current_session().mode == 'toolcall'

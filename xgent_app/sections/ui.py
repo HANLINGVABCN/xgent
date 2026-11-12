@@ -116,7 +116,6 @@ def _fmt_thinking_level(val=None):
 
 def get_main_menu():
     agent_on = UserDataManager.get('agent_mode', False)
-    stream_on = normalize_bool(UserDataManager.get('stream_mode', True), True)
     stitch_label = get_text_stitch_mode_label()
     web_on = normalize_bool(UserDataManager.get('web_enabled', False), False)
 
@@ -124,7 +123,7 @@ def get_main_menu():
         [InlineKeyboardButton("🔌 提供商", callback_data="menu_providers"),
          InlineKeyboardButton("🎯 模型", callback_data="menu_default_models")],
         [InlineKeyboardButton(f"🤖 Agent:{'开' if agent_on else '关'}", callback_data="toggle_agent_mode"),
-         InlineKeyboardButton(f"🌊 流式:{'开' if stream_on else '关'}", callback_data="toggle_stream_mode")],
+         InlineKeyboardButton('🌊 ' + get_stream_style_label(), callback_data="toggle_stream_mode")],
         [InlineKeyboardButton('工具调用：' + ('Tool call' if UserDataManager.get('agent_call_mode', 'fence') == 'toolcall' else '正则围栏'),
                               callback_data='menu_agent_call_mode')],
         [InlineKeyboardButton(f"🧩{stitch_label}", callback_data="menu_text_stitch_mode"),
@@ -319,7 +318,7 @@ def get_more_settings_menu(page=1):
     rows = [
         [InlineKeyboardButton("🎚️ 参数", callback_data="menu_timeout_settings"),
          InlineKeyboardButton(f"🧠 思考:{_fmt_thinking_level()}", callback_data="menu_thinking_level")],
-        [InlineKeyboardButton(f"🌊 流式:{stream_style_label}", callback_data="toggle_stream_style"),
+        [InlineKeyboardButton('🌊 ' + stream_style_label, callback_data="toggle_stream_mode"),
          InlineKeyboardButton("🚫 Agent黑名单", callback_data="menu_command_blacklist")],
         [InlineKeyboardButton("🔐 凭据" + _credentials_badge(), callback_data="menu_credentials"),
          InlineKeyboardButton("🧹 重置上下文", callback_data="cmd_delete")],

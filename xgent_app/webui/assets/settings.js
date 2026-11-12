@@ -4,6 +4,12 @@ import {readPreference,writePreference} from './ui.js';
 import {themePicker} from './theme-settings.js';
 import {allowCredentialAutofill} from './input-policy.js';
 
+window.addEventListener('xgent-response-mode-state',event=>{
+  const select=document.querySelector('#wb-page select[name="response_mode"]');
+  if(!select||select.value!==select.dataset.savedMode||!event.detail?.values?.response_mode)return;
+  select.value=event.detail.values.response_mode;select.dataset.savedMode=select.value;
+});
+
 export async function settingsView({logout,boot,health,state,render,dialog,closeDialog,submit,dirtyForm,confirmAction,refreshBootstrap,setTheme,filter,heading,card,actions,read,localFilters,detail,closeDetail,toolbar,managementModule,sideNav}) {
   const settings=boot.settings;
   const active=filter('section')||'appearance';
@@ -42,17 +48,19 @@ export async function settingsView({logout,boot,health,state,render,dialog,close
     grid.append(visual,appearance,card('快捷操作',el('dl',{},...[['Ctrl / ⌘ K','搜索命令'],['Ctrl / ⌘ F','搜索全部历史'],['Enter','桌面发送消息'],['Shift / Alt + Enter','换行'],['Esc','关闭详情或弹窗']].map(([k,v])=>el('div',{class:'wb-detail-row'},el('dt',{},k),el('dd',{},v)))),el('p',{class:'wb-note'},'触屏 Enter 始终换行。正在生成时仍可编辑草稿。')));
   }
   if(active==='conversation'||active==='agent'){
-    const conversation=[['response_mode','网页回复方式','select'],['telegram_response_mode','Bot 回复方式','select'],['thinking_level','思考深度','select'],['text_stitch_mode','文本拼接方式','select'],['global_depth','记忆深度','number'],['stream_timeout','流式超时（秒，0 为自动）','number']];
+    const conversation=[['response_mode','回复方式','select'],['thinking_level','思考深度','select'],['text_stitch_mode','文本拼接方式','select'],['global_depth','记忆深度','number'],['stream_timeout','流式超时（秒，0 为自动）','number']];
     const agent=[['agent_mode','Agent 模式','bool'],['agent_call_mode','工具调用方式','select'],['agent_max_iterations','最大迭代次数','number'],['agent_command_timeout','命令等待时间（秒）','number'],['smart_match_threshold','智能匹配阈值','number'],['idle_message_interval','空闲提示间隔（秒）','number']];
     const fields=active==='agent'?agent:conversation;const form=el('form');
-    const notes={"response_mode":"网页选择前台流式或非流式，不改变 Bot 设置。","telegram_response_mode":"Bot 独立控制预览；前台限制刷新频率，后台只显示生成进度。限流不拖慢网页。","thinking_level":"选择模型思考深度；不同模型支持范围不同。","text_stitch_mode":"控制连续回复的拼接方式。","global_depth":"参与后续请求的历史深度，不会删除聊天记录。","stream_timeout":"等待模型回复的超时；0 使用自动策略。","agent_mode":"允许 Agent 按现有权限执行工具。","agent_call_mode":"Tool call／正则围栏；切换影响下一次新请求，运行中的回合保持原模式。","agent_max_iterations":"本轮请求允许的最多 Agent 迭代次数。","agent_command_timeout":"命令等待时间，单位为秒。","smart_match_threshold":"命令智能匹配阈值，范围 0–100%。","idle_message_interval":"空闲状态提示的间隔，单位为秒。"};
+    const notes={"response_mode":"三端共用流式开关。网页和 CLI 实时显示，Bot 每约 3 秒更新一批正文；非流式等待完整结果。","thinking_level":"选择模型思考深度；不同模型支持范围不同。","text_stitch_mode":"控制连续回复的拼接方式。","global_depth":"参与后续请求的历史深度，不会删除聊天记录。","stream_timeout":"等待模型回复的超时；0 使用自动策略。","agent_mode":"允许 Agent 按现有权限执行工具。","agent_call_mode":"Tool call／正则围栏；切换影响下一次新请求，运行中的回合保持原模式。","agent_max_iterations":"本轮请求允许的最多 Agent 迭代次数。","agent_command_timeout":"命令等待时间，单位为秒。","smart_match_threshold":"命令智能匹配阈值，范围 0–100%。","idle_message_interval":"空闲状态提示的间隔，单位为秒。"};
     const rows=el('div',{class:'wb-setting-rows'});
     for(const [key,label,type] of fields){const control=type==='bool'?check(label,key,settings.values[key]):type==='select'?select(label,key,settings.options[key],settings.values[key]):field(label,key,settings.values[key],type);const row=el('div',{class:'wb-setting-row'},control,el('p',{class:'wb-setting-note'},notes[key]));if(type==='number'){const input=control.querySelector('input');input.min=key==='global_depth'?'1':'0';input.step='1';if(key==='smart_match_threshold')input.max='100';}rows.append(row);}
     form.append(rows);
+    const responseSelect=form.querySelector('select[name="response_mode"]');if(responseSelect){responseSelect.dataset.savedMode=responseSelect.value;responseSelect.setAttribute('aria-label','回复方式');}
     const feedback=el('div');form.append(el('p',{class:'wb-note'},'保存后生效。执行中的命令不会因为修改参数而重新启动。'),feedback,el('button',{type:'submit',class:'wb-btn primary'},'保存设置'));dirtyForm(form);
     form.onsubmit=e=>{e.preventDefault();submit(form,async d=>{
       const saved=await wb('settings',{data:{items:fields.map(([key,,type])=>({key,value:type==='number'?Number(d[key]):d[key]}))}});
       if(state.boot&&saved?.values)state.boot={...state.boot,settings:saved};
+      if(responseSelect&&saved?.values?.response_mode){responseSelect.value=saved.values.response_mode;responseSelect.dataset.savedMode=responseSelect.value;}
       feedback.replaceChildren(message('设置已保存','success'));
     });};
     grid.append(card(active==='agent'?'执行行为':'对话行为',form));

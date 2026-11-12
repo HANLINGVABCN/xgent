@@ -6,6 +6,10 @@ from tests.test_cli_input import CliProbeMixin
 
 
 class CliManagementRegressionTests(CliProbeMixin,unittest.TestCase):
+    def test_stream_command_and_numbered_button_update_the_shared_switch(self):
+        result=self.run_probe('import asyncio\nfrom tests.cli_management_regression_probe import exercise\nprint(json.dumps(asyncio.run(exercise(xgent_cli,"mode_sync"))))')
+        self.assertTrue(result['passed'])
+
     def test_native_calls_with_empty_prose_remain_visible_live_and_in_history(self):
         result=self.run_probe('import asyncio\nfrom tests.cli_management_regression_probe import exercise\nprint(json.dumps(asyncio.run(exercise(xgent_cli,"native"))))')
         self.assertTrue(result['passed'])

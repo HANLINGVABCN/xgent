@@ -638,12 +638,8 @@ class CliBot:
         turn = current_turn()
         response = getattr(turn, 'response_policy', None)
         hint = current_message_presentation() or {}
-        preview = hint.get('telegram_content') or {}
-        if response is not None and response.telegram_mode == 'background' and hint.get('kind') == 'ai_reply':
-            if preview and preview.get('complete') is False:
-                text, parse_mode = f"后台流式 · 已生成 {len(str(preview.get('raw') or ''))} 字…", None
-            elif hint.get('purpose') == 'generation':
-                text, parse_mode = '后台流式输出中…', None
+        if hint.get('kind') == 'ai_reply' and hint.get('purpose') == 'generation':
+            text, parse_mode = ('非流式输出中…' if response is not None and response.generation_mode == 'nonstream' else '流式输出中…'), None
         from .message_policy import current_policy
         policy = current_policy()
         if policy is not None and not policy.allows('cli'):

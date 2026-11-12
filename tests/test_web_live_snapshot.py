@@ -179,7 +179,7 @@ async def main():
         async with Harness(bot,folder) as h:
             for stream,style in ((False,'foreground'),(True,'foreground'),(True,'background')):
                 await h.db.clear_all_conversation_memory()
-                bot.UserDataManager.set('stream_mode',stream);bot.UserDataManager.set('web_response_mode', 'foreground' if stream else 'nonstream');bot.UserDataManager.set('stream_style',style)
+                await bot.UserDataManager.save_config('stream_mode',stream);await bot.UserDataManager.save_config('web_response_mode', 'foreground' if stream else 'nonstream');await bot.UserDataManager.save_config('stream_style',style)
                 started=asyncio.Event();release=asyncio.Event()
                 async def complete(*args,**kwargs):
                     started.set();await release.wait();return 'final body',None

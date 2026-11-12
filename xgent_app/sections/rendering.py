@@ -1025,6 +1025,7 @@ class TelegramStreamRenderer:
         self.message_ids = [getattr(msg, 'message_id', None)]
         self._web_messages = [msg]
         self._web_chunks = []
+        self._web_final = False
         self._web_page_key = None
         self.reply_markup = reply_markup
         self.limit = limit
@@ -1120,13 +1121,16 @@ class TelegramStreamRenderer:
                     )
                 self._web_messages.append(message)
                 self.message_ids.append(message.message_id)
-            elif index >= len(self._web_chunks) or self._web_chunks[index] != (chunk, active) or pages_changed and index==0:
+            elif final and not self._web_final or index >= len(self._web_chunks) or self._web_chunks[index] != (chunk, active) or pages_changed and index==0:
+                # Earlier fragments can be unchanged on Web while Telegram still
+                # shows background-generation placeholders. Finalize every part.
                 await safe_edit_text(self._web_messages[index], chunk, reply_markup=markup,
                                      parse_mode=constants.ParseMode.HTML)
         for message in self._web_messages[len(chunks):]:
             await message.delete()
         del self._web_messages[len(chunks):]
         self._web_chunks = [(chunk, not final and i == len(chunks) - 1) for i, chunk in enumerate(chunks)]
+        self._web_final = final
         self._web_page_key = page_key
         self.current_msg = self._web_messages[-1]
 

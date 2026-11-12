@@ -10,7 +10,7 @@ const options=el('button',{id:'composer-generation-options',type:'button',class:
 host.replaceChildren(thinking,model,options);
 const labels={off:'关闭',none:'关闭',auto:'自动',low:'简短',medium:'标准',high:'深入',xhigh:'很高',ultra:'超高',max:'最高'};
 function values(){return settings?.values||{};}
-const responseModes=[{value:'foreground',label:'前台流式'},{value:'nonstream',label:'非流式'}];
+const responseModes=[{value:'foreground',label:'流式'},{value:'nonstream',label:'非流式'}];
 const callModes=[{value:'toolcall',label:'Tool call'},{value:'fence',label:'正则围栏'}];
 const numericSettings={agent_max_iterations:{label:'Agent 轮数',default:10},global_depth:{label:'记忆深度',default:30}};
 function responseMode(){return values().web_response_mode||values().response_mode||(!values().stream_mode?'nonstream':'foreground');}
@@ -71,3 +71,10 @@ if(window.ResizeObserver)new ResizeObserver(position).observe($('composer'));
 window.addEventListener('xgent-auth-expired',()=>{close(false);settings=null;error.hidden=true;refresh();});
 refresh();
 export function updateComposerControls(data,change){settings=data;onChange=change;refresh();if(active&&!saving){const focus=popover.contains(document.activeElement);if(!focus)render();}}
+window.addEventListener('xgent-response-mode-state',event=>{
+  if(!settings||typeof event.detail?.values?.stream_mode!=='boolean')return;
+  if(Number.isSafeInteger(settings.revision)&&event.detail.revision<settings.revision)return;
+  settings.revision=event.detail.revision;
+  settings.values={...settings.values,...event.detail.values};refresh();
+  if(active&&!saving&&['generation','response_mode'].includes(active.kind))render();
+});
