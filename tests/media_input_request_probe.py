@@ -225,7 +225,7 @@ async def check_agent_flow(bot, root):
             for stream, style in RENDERERS:
                 await h.db.clear_all_conversation_memory()
                 await h.add_upload(originals()[4], "existing-upload.jpg")
-                h.configure(fmt, stream=stream, style=style, agent=True)
+                await h.configure(fmt, stream=stream, style=style, agent=True)
                 configure_media(h, fmt)
                 h.replies = [protocol(paths), native_reply(generated_images), "editing complete"]
                 before = len(h.requests)
@@ -242,14 +242,14 @@ async def check_agent_flow(bot, root):
                 assert len(metadata["attachments"]) == 2
                 assert "data:image/" not in json.dumps(rows)
                 assert len(await refs(h)) == 3
-                h.configure(fmt, agent=False)
+                await h.configure(fmt, agent=False)
                 h.replies = ["second user answer"]
                 await h.turn("inspect the generated images again")
                 assert_images(h.requests[-1], [originals()[4], *generated_images])
                 result[f"{fmt}/{stream}/{style}"] = True
 
         await h.db.clear_all_conversation_memory()
-        h.configure(agent=True)
+        await h.configure(agent=True)
         configure_media(h, "openai")
         missing = str(h.root / "missing.png")
         h.replies = [protocol([source, missing]), "reference input failed"]
@@ -309,7 +309,7 @@ async def check_file_loading_races(bot, root):
 
         for mode in ("complete_stop", "delivery_failure"):
             await h.db.clear_all_conversation_memory()
-            h.configure(agent=True)
+            await h.configure(agent=True)
             configure_media(h, "openai")
             h.replies = [protocol([path]), native_reply(originals()[2:4]), "completed"]
             generate = bot.run_default_media_generation
@@ -334,7 +334,7 @@ async def check_file_loading_races(bot, root):
             rows = await h.db.get_global_messages(1000, active_context=True)
             assert len([row for row in rows if row["msg_type"] == "media_reply"]) == 1
             h.replies.clear()
-            h.configure(agent=False)
+            await h.configure(agent=False)
             bot.get_or_create_stop_event().clear()
             await h.call()
             assert_images(h.requests[-1], originals()[2:4])
