@@ -99,9 +99,13 @@ class PresentationBot:
             'run_id': run_id, 'mode': mode, 'draft_id': secrets.randbits(63) or 1,
             'raw': '', 'owner_id': None}
 
-    def _native_spec(self, hint, kind, previous, legacy_chunks=None):
+    def _native_delivery_enabled(self):
         policy = getattr(self.turn, 'response_policy', None)
-        if not self._native_enabled() and not (policy and policy.telegram_mode == 'background'):
+        # 普通 Bot 接口的后台流式也复用分段投递，定稿和清理必须走同一条路径。
+        return self._native_enabled() or bool(policy and policy.telegram_mode == 'background')
+
+    def _native_spec(self, hint, kind, previous, legacy_chunks=None):
+        if not self._native_delivery_enabled():
             return None
         from .telegram_rich import render_rich, legacy_chunks as fallback, output_rich
         content = hint.get('telegram_content')
@@ -238,12 +242,13 @@ class PresentationBot:
         generation = self._telegram_generation
         if generation:
             end_phase(generation['run_id'], generation['ref'])
-        if not self._native_enabled():
+        if not self._native_delivery_enabled():
             return
         owners = {message.telegram_owner_id or message.message_id: message for message in self.messages.values()
                   if message.telegram_native and message.telegram_native.get('ref')}
         for owner_id, message in owners.items():
-            await self._telegram_only('edit_message_reply_markup', native={'phase': 'cleanup'},
+            await self._telegram_only('edit_message_reply_markup', native={'phase': 'cleanup',
+                'mode': message.telegram_native.get('mode')},
                 chat_id=message.chat_id, message_id=owner_id, reply_markup=None)
 
     async def _telegram_only(self, method, *, kind='ai_reply', native=None, record_id=None, **kwargs):
@@ -278,7 +283,7 @@ class PresentationBot:
         import html
 
         details = reply_details(row, facts, summary)
-        if self._native_enabled():
+        if self._native_delivery_enabled():
             for mid in reversed(facts.get('message_ids') or []):
                 media = self.messages.get(mid)
                 if media is not None and getattr(media, 'media', False) and media.record_id == row['id']:
@@ -293,6 +298,7 @@ class PresentationBot:
             message = self.messages.get(owner_id)
             if message is not None and not getattr(message, 'media', False):
                 native = {'phase': 'reply', 'owner_id': owner_id, 'record_id': row['id'],
+                          'mode': (message.telegram_native or {}).get('mode'),
                           'html': render_rich(row['content'], details=''.join(details), native_prose=facts.get('agent_call_mode') == 'toolcall'),
                           'fallback': []}
                 if facts.get('native_calls'):

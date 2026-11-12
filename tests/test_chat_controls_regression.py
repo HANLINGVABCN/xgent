@@ -23,22 +23,24 @@ async def main():
     with tempfile.TemporaryDirectory() as root:
         async with Harness(bot,root) as h:
             await bot._web_write_setting('telegram_response_mode','nonstream')
+            revision=await h.db.get_config_fresh('web_settings_revision')
             async with h.db._write() as conn:
                 await conn.execute("CREATE TRIGGER reject_style BEFORE INSERT ON config WHEN NEW.key='stream_style' AND NEW.value='\"background\"' BEGIN SELECT RAISE(ABORT,'fixture write failure'); END")
             failed=False
             try:await bot._web_write_setting('telegram_response_mode','background')
             except Exception:failed=True
             values=(await bot._web_read_settings())['values']
-            saved=[await h.db.get_config_fresh(key) for key in ('stream_mode','stream_style')]
+            saved=[await h.db.get_config_fresh(key) for key in ('stream_mode','stream_style','web_response_mode')]
             invalid=False
             try:await bot._web_write_setting('response_mode','invalid')
             except ValueError:invalid=True
-            print(json.dumps({'failed':failed,'saved':saved,'memory':[bot.UserDataManager.get('stream_mode'),bot.UserDataManager.get('stream_style')],
-                'response_mode':values['telegram_response_mode'],'invalid':invalid}))
+            print(json.dumps({'failed':failed,'saved':saved,'memory':[bot.UserDataManager.get(key) for key in ('stream_mode','stream_style','web_response_mode')],
+                'response_mode':values['telegram_response_mode'],'invalid':invalid,
+                'revision_unchanged':revision==await h.db.get_config_fresh('web_settings_revision')}))
 asyncio.run(main())
 ''')
-    assert result=={'failed':True,'saved':[False,'foreground'],'memory':[False,'foreground'],
-                    'response_mode':'nonstream','invalid':True}
+    assert result=={'failed':True,'saved':[False,'background','nonstream'],'memory':[False,'background','nonstream'],
+                    'response_mode':'nonstream','invalid':True,'revision_unchanged':True}
 
 
 @pytest.fixture(scope='module')

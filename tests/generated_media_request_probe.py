@@ -128,14 +128,14 @@ class GeneratedHarness(Harness):
             )
         return httpx.Response(200, json=payload)
 
-    def configure(self, fmt="openai", stream=False, style="foreground", agent=False):
+    async def configure(self, fmt="openai", stream=False, style="foreground", agent=False):
         self.bot.UserDataManager.get("providers")["p"]["api_format"] = fmt
         for name, value in (
             ('web_response_mode', 'foreground' if stream else 'nonstream'),
             ("stream_mode", stream), ("stream_style", style), ("agent_mode", agent),
             ("default_media_provider_key", "p"), ("default_media_model", MODEL),
         ):
-            self.bot.UserDataManager.set(name, value)
+            await self.bot.UserDataManager.save_config(name, value)
 
     async def generated_turn(self, images, **kwargs):
         self.replies = [native_reply(images, **kwargs)]
@@ -150,7 +150,7 @@ async def seed_generated_and_check(bot, root):
         await h.generated_turn(images[1:3], echo_first=True)
         assert len(await h.db.get_attachment_records()) == 3
 
-        h.configure(agent=True)
+        await h.configure(agent=True)
         h.replies = [MEDIA_BLOCK, native_reply(images[3:]), "media continuation"]
         before = len(h.requests)
         await h.turn("generate with media model")
@@ -161,7 +161,7 @@ async def seed_generated_and_check(bot, root):
         assert_images(h.requests[before + 2], images)
         result = {"media_input_unchanged": True, "agent_continuation": True}
 
-        h.configure(agent=False)
+        await h.configure(agent=False)
         h.replies = ["second user turn"]
         await h.turn("what is in the old images?")
         assert_images(h.requests[-1], images)
@@ -231,7 +231,7 @@ async def check_native_renderers(bot, root):
             for stream, style in RENDERERS:
                 bot.advance_generation(await h.db.get_attachment_generation())
                 await h.db.clear_all_conversation_memory()
-                h.configure(fmt, stream, style)
+                await h.configure(fmt, stream, style)
                 delivered = []
 
                 async def deliver(context, chat_id, artifacts, **kwargs):
@@ -262,12 +262,12 @@ async def check_large_original_and_many_images(bot, root):
         large = image_bytes(size=(1800, 1800), compress_level=0)
         assert len(large) > 8 * 1024 * 1024
         small = [image_bytes(color=(i, 50, 100)) for i in range(12)]
-        h.configure(agent=True)
+        await h.configure(agent=True)
         h.replies = [MEDIA_BLOCK, native_reply([large, *small]), "all original bytes"]
         await h.turn("large media output")
         assert len(await refs(h)) == 13
         assert_images(h.requests[-1], [large, *small])
-        h.configure(agent=False)
+        await h.configure(agent=False)
         for fmt in FORMATS:
             h.requests.clear()
             h.request_bytes.clear()
@@ -284,7 +284,7 @@ async def check_separate_native_image_events(bot, root):
             for style in ("foreground", "background"):
                 bot.advance_generation(await h.db.get_attachment_generation())
                 await h.db.clear_all_conversation_memory()
-                h.configure(fmt, stream=True, style=style)
+                await h.configure(fmt, stream=True, style=style)
                 await h.generated_turn(images, split_events=True, echo_first=True)
                 assert len(await refs(h)) == 2, (fmt, style)
                 assert "data:image/" not in json.dumps(await h.db.get_global_messages(1000))
@@ -303,7 +303,7 @@ async def check_media_stop_races(bot, root):
             for phase in ("pending", "complete_stop", "complete_cancel"):
                 bot.advance_generation(await h.db.get_attachment_generation())
                 await h.db.clear_all_conversation_memory()
-                h.configure(stream=stream, style=style, agent=True)
+                await h.configure(stream=stream, style=style, agent=True)
                 h.replies = [MEDIA_BLOCK, native_reply(images), "must not continue"]
                 started, closed = asyncio.Event(), asyncio.Event()
                 owner = None
@@ -344,7 +344,7 @@ async def check_media_stop_races(bot, root):
                     assert closed.is_set()
                 assert "data:image/" not in json.dumps(await h.db.get_global_messages(1000))
                 h.replies.clear()
-                h.configure(agent=False)
+                await h.configure(agent=False)
                 await h.call()
                 assert_images(h.requests[-1], images if completed else [])
                 result[f"{stream}/{style}/{phase}"] = True
@@ -406,7 +406,7 @@ async def check_delivery_and_persistence_failures(bot, root):
         for stream, style in RENDERERS:
             bot.advance_generation(await h.db.get_attachment_generation())
             await h.db.clear_all_conversation_memory()
-            h.configure(stream=stream, style=style)
+            await h.configure(stream=stream, style=style)
             with patch.object(
                 bot, "send_generated_media_artifacts", AsyncMock(side_effect=OSError("delivery failed")),
             ) as delivery:
@@ -419,7 +419,7 @@ async def check_delivery_and_persistence_failures(bot, root):
         result["native_delivery_failure_keeps_originals_once"] = True
         bot.advance_generation(await h.db.get_attachment_generation())
         await h.db.clear_all_conversation_memory()
-        h.configure(agent=True)
+        await h.configure(agent=True)
         h.replies = [MEDIA_BLOCK, native_reply(images), "continue with originals"]
         h.drain_frames()
         with patch.object(
@@ -433,7 +433,7 @@ async def check_delivery_and_persistence_failures(bot, root):
         for media in (False, True):
             bot.advance_generation(await h.db.get_attachment_generation())
             await h.db.clear_all_conversation_memory()
-            h.configure(agent=media)
+            await h.configure(agent=media)
             h.replies = ([MEDIA_BLOCK, native_reply(images), "must not continue"] if media
                          else [native_reply(images)])
             record = h.db.record_global_message
@@ -549,7 +549,7 @@ async def check_stop_and_cancel(bot, root):
             for completed in (False, True):
                 bot.advance_generation(await h.db.get_attachment_generation())
                 await h.db.clear_all_conversation_memory()
-                h.configure(stream=stream, style=style, agent=True)
+                await h.configure(stream=stream, style=style, agent=True)
                 started = asyncio.Event()
                 closed = asyncio.Event()
 
@@ -593,7 +593,7 @@ async def check_stop_and_cancel(bot, root):
         for stream, style in RENDERERS:
             bot.advance_generation(await h.db.get_attachment_generation())
             await h.db.clear_all_conversation_memory()
-            h.configure(stream=stream, style=style)
+            await h.configure(stream=stream, style=style)
             waiting = asyncio.Event()
             closed = asyncio.Event()
             owner = None
@@ -633,7 +633,7 @@ async def check_stop_and_cancel(bot, root):
             for has_complete in (False, True):
                 bot.advance_generation(await h.db.get_attachment_generation())
                 await h.db.clear_all_conversation_memory()
-                h.configure(stream=True, style=style)
+                await h.configure(stream=True, style=style)
                 complete = data_url(images[1]) if has_complete else ""
                 incomplete = data_url(images[0][:-40])
 
@@ -678,7 +678,7 @@ async def check_generated_clear_races(bot, root):
             for phase in ("generation", "primary_save", "mirror_save"):
                 bot.advance_generation(await h.db.get_attachment_generation())
                 await h.db.clear_all_conversation_memory()
-                h.configure(agent=media)
+                await h.configure(agent=media)
                 h.replies = ([MEDIA_BLOCK, native_reply(images), "must not continue"]
                              if media else [native_reply(images)])
                 original_think = bot.ModelClient.think_and_reply
@@ -725,7 +725,7 @@ async def check_generated_clear_races(bot, root):
                 assert_images(h.requests[-1], [])
                 result[f"{media}/{phase}"] = True
 
-        h.configure()
+        await h.configure()
         await h.generated_turn(images)
         before = len(h.requests)
         started, release = asyncio.Event(), threading.Event()
@@ -822,7 +822,7 @@ async def check_read_behavior_unchanged(bot, root):
         await h.add_upload(LONG_TEXT.encode(), "persistent-upload.txt")
         await h.generated_turn(originals()[1:3])
         bot.UserDataManager.set("global_depth", 30)
-        h.configure(agent=True)
+        await h.configure(agent=True)
         read_path = h.root / "read-only.txt"
         read_path.write_text("READ-BODY-ONLY-IN-CURRENT-AGENT-LOOP\n", encoding="utf-8")
         block = f"```read-x\n<<BEGIN_read_probe\n{read_path}\n<<END_read_probe\n```"
