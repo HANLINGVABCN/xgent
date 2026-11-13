@@ -14,6 +14,7 @@ export async function updateCard({card,confirmAction}){
     busy=true;paintControls();result.replaceChildren(message('正在检查所选仓库的最新版本…','loading'));
     try{
       plan=await wb('system/update/check',{data:{source:source.querySelector('select').value,token:token.querySelector('input').value}});
+      if(plan.current_version)version.textContent='当前版本：'+plan.current_version;
       token.querySelector('input').value='';retryId=requestId();
       result.replaceChildren(el('p',{},plan.up_to_date?'当前已是所选仓库的最新版本。':'发现可更新版本。'),el('code',{},plan.revision.slice(0,10)),el('p',{class:'wb-note'},plan.message||'最新提交'));
     }catch(error){plan=null;result.replaceChildren(message(error.message));}finally{busy=false;paintControls();}
@@ -22,18 +23,32 @@ export async function updateCard({card,confirmAction}){
     const checked=plan,replace=overwrite.querySelector('input').checked;
     confirmAction('更新 XGent',`将更新到 ${checked.revision.slice(0,10)}，${replace?'备份后覆盖':'保留'}本地提示词与公共技能，并重启服务。请先等待正在进行的对话结束。`,async()=>{
       const receipt=await wb('system/update/start',{data:{plan_id:checked.plan_id,request_id:retryId,overwrite_local_custom_files:replace,confirm:true}});
+      if(receipt.up_to_date){
+        plan={...checked,up_to_date:true};busy=false;version.textContent='当前版本：'+receipt.current_version;
+        result.replaceChildren(message('当前已是所选仓库的最新版本，无需重复更新。','success'));paintControls();return;
+      }
       identifier=receipt.id;busy=true;paintProgress(receipt.job);paintControls();setTimeout(poll,1000);
     },null,()=>{});
   },'primary');
   panel.append(actions(checkButton,updateButton));
-  function paintControls(){checkButton.disabled=busy;updateButton.disabled=busy||!plan;source.querySelector('select').disabled=busy;overwrite.querySelector('input').disabled=busy;}
-  function paintProgress(job){
+  function paintControls(){checkButton.disabled=busy;updateButton.disabled=busy||!plan||(plan.up_to_date&&!overwrite.querySelector('input').checked);source.querySelector('select').disabled=busy;overwrite.querySelector('input').disabled=busy;}
+  function paintProgress(job,historical=false){
     if(!job){progress.replaceChildren();return;}
     const label={pending:'准备更新…',downloading:'正在下载并保存代码…',saved:'代码已保存，准备重启…',restarting:'服务正在重启，稍后自动确认…',complete:'更新完成，服务已重新启动。',failed:'更新未完成。'}[job.phase]||job.phase;
+    if(historical&&['complete','failed'].includes(job.state)){
+      const record=el('details',{class:'wb-update-history'},el('summary',{},(job.state==='complete'?'上次更新已完成':'上次更新未完成')+' · '+String(job.revision||'').slice(0,10)));
+      record.append(message(label,job.state==='failed'?'error':'success'));if(job.error)record.append(message(job.error));
+      if(job.backup_path)record.append(el('p',{class:'wb-note'},'本地文件备份：'+job.backup_path));progress.replaceChildren(record);
+      busy=false;paintControls();return;
+    }
     progress.replaceChildren(message(label,job.state==='failed'?'error':job.state==='complete'?'success':'loading'));
     if(job.error)progress.append(message(job.error));
     if(job.backup_path)progress.append(el('p',{class:'wb-note'},'本地文件备份：'+job.backup_path));
-    if(['complete','failed'].includes(job.state)){busy=false;plan=null;paintControls();}
+    if(['complete','failed'].includes(job.state)){
+      busy=false;plan=null;
+      if(job.state==='complete')result.replaceChildren(message('已更新至 '+job.revision.slice(0,10)+'。','success'));
+      paintControls();
+    }
   }
   async function poll(){
     clearTimeout(timer);
@@ -46,7 +61,8 @@ export async function updateCard({card,confirmAction}){
   }
   source.onchange=()=>{plan=null;result.replaceChildren();paintControls();};
   token.oninput=()=>{plan=null;paintControls();};
-  paintControls();paintProgress(status.job);
+  overwrite.onchange=paintControls;
+  paintControls();paintProgress(status.job,!!status.job?.historical);
   if(status.job&&!['complete','failed'].includes(status.job.state)){busy=true;paintControls();timer=setTimeout(poll,2000);}
   return panel;
 }

@@ -51,6 +51,7 @@ class ProjectUpdates:
                 job.update(state='failed',phase='failed',error='更新进程已退出，请重新检查版本后重试。')
                 write_json(path,job)
             result['job']=job
+            result['job']['historical']=job['state'] in {'complete','failed'}
         return result
 
     async def check(self,data):
@@ -97,6 +98,8 @@ class ProjectUpdates:
             if self.active:raise ValueError('更新正在进行，请等待完成。')
             plan=self.plans.get(data.get('plan_id'))
             if not plan or time.time()-plan['created_at']>600:raise ValueError('版本检查已过期，请重新检查更新。')
+            if not data['overwrite_local_custom_files'] and plan['sha'].startswith(self.version()):
+                return {'ok':True,'up_to_date':True,'id':None,'job':None,'current_version':self.version()}
             job={'id':uuid.uuid4().hex,'request_id':request,'plan_id':data['plan_id'],'revision':plan['sha'],'source':plan['source'],
                  'overwrite_local_custom_files':data['overwrite_local_custom_files'],'state':'running','phase':'pending',
                  'pid':os.getpid(),'created_at':time.time()}

@@ -119,6 +119,8 @@ def test_update_settings_uses_checked_version_and_in_place_progress(browser_cont
     assert page.url.endswith('#/settings')
     job.update(state='complete',phase='complete')
     card.get_by_text('更新完成，服务已重新启动。',exact=True).wait_for(timeout=7000)
+    assert card.get_by_text('发现可更新版本。',exact=True).count()==0
+    assert card.get_by_text('已更新至 '+'b'*10+'。',exact=True).is_visible()
     assert card.get_by_role('button',name='检查更新',exact=True).is_enabled()
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     page.screenshot(path=str(tmp_path/f'update-settings-{width}.png'))

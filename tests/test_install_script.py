@@ -256,6 +256,69 @@ class InstallScriptLibraryMixin:
 
 
 @requires_bash_harness
+@unittest.skipUnless(shutil.which('git'), '需要 Git 构造旧检出与归档覆盖场景')
+class DeploymentVersionTests(InstallScriptLibraryMixin, unittest.TestCase):
+    def checkout(self, directory):
+        root=self.sandbox(directory)
+        write_lf(root/'install.sh',INSTALL_SCRIPT)
+        (root/'xgent_app').mkdir()
+        write_lf(root/'xgent_app/example.py','old code\n')
+        for args in (['init','-q'],['config','user.name','fixture'],['config','user.email','fixture@example.invalid'],
+                     ['config','core.autocrlf','false'],['add','install.sh','bin/xgent','xgent_app/example.py'],
+                     ['commit','-q','-m','初始化版本测试文件']):
+            subprocess.run(['git',*args],cwd=root,check=True,capture_output=True)
+        revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
+        return root,revision
+
+    def test_archive_overlay_survives_repeated_restart_preparation(self):
+        with self.temp_dir() as directory:
+            root,old=self.checkout(directory)
+            write_lf(root/'.xgent-version','b'*40)
+            write_lf(root/'xgent_app/example.py','downloaded new code\n')
+            for _ in range(3):
+                result=self.run_lib('fix_line_endings\n',root)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual((root/'.xgent-version').read_text().strip(),'b'*40)
+            self.assertEqual(subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),old)
+
+    def test_clean_git_pull_updates_the_stamp(self):
+        with self.temp_dir() as directory:
+            root,old=self.checkout(directory)
+            write_lf(root/'.xgent-version',old)
+            write_lf(root/'xgent_app/example.py','new committed code\n')
+            subprocess.run(['git','add','xgent_app/example.py'],cwd=root,check=True,capture_output=True)
+            subprocess.run(['git','commit','-q','-m','提交新的版本测试代码'],cwd=root,check=True,capture_output=True)
+            current=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
+            result=self.run_lib('fix_line_endings\n',root)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual((root/'.xgent-version').read_text().strip(),current)
+
+    def test_untracked_downloaded_module_does_not_restore_old_git_version(self):
+        with self.temp_dir() as directory:
+            root,_=self.checkout(directory)
+            write_lf(root/'.xgent-version','b'*40)
+            write_lf(root/'xgent_app/new_module.py','new downloaded module\n')
+            result=self.run_lib('fix_line_endings\n',root)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual((root/'.xgent-version').read_text().strip(),'b'*40)
+
+    def test_archive_without_git_keeps_its_recorded_revision(self):
+        with self.temp_dir() as directory:
+            root=self.sandbox(directory)
+            write_lf(root/'.xgent-version','b'*40)
+            result=self.run_lib('fix_line_endings\n',root)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual((root/'.xgent-version').read_text().strip(),'b'*40)
+
+    def test_missing_stamp_uses_full_git_revision(self):
+        with self.temp_dir() as directory:
+            root,revision=self.checkout(directory)
+            result=self.run_lib('fix_line_endings\n',root)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual((root/'.xgent-version').read_text().strip(),revision)
+
+
+@requires_bash_harness
 class PythonDiscoveryTests(InstallScriptLibraryMixin, unittest.TestCase):
     """选解释器不能被 venv 抢走。
 

@@ -2,6 +2,24 @@
 from tests.test_thinking_params import run_in_app
 
 
+def test_runtime_version_matches_settings_stamp_after_archive_over_old_git():
+    result=run_in_app(r'''
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+from types import SimpleNamespace
+with tempfile.TemporaryDirectory() as root:
+    stamp=Path(root)/'.xgent-version';stamp.write_text('b'*40)
+    with patch.object(bot,'PROJECT_ROOT',root),patch('subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='a'*40)) as git:
+        assert bot.runtime_code_version()=='b'*40
+        git.assert_not_called()
+        stamp.write_bytes(b'\xff')
+        assert bot.runtime_code_version()=='a'*10
+print(json.dumps({'stamp_matches_settings':True,'invalid_stamp_falls_back':True}))
+''')
+    assert all(result.values())
+
+
 def test_settings_update_plan_jobs_token_privacy_duplicate_and_failure():
     result=run_in_app(r'''
 import asyncio,io,tempfile
@@ -45,6 +63,13 @@ async def main():
                 state=await workbench.handle('GET','system/update',{'id':first['id']});assert state['job']['state']=='restarting'
                 state['job']['pid']=-1;workbench._project_updates.save(state['job'])
                 state=await workbench.handle('GET','system/update',{'id':first['id']});assert state['job']['state']=='complete'
+                plan=await workbench.handle('POST','system/update/check',{'source':'normal'})
+                assert plan['up_to_date']
+                unchanged=await workbench.handle('POST','system/update/start',{**data,'request_id':'already_current_12345','plan_id':plan['plan_id']})
+                assert unchanged['up_to_date'] and unchanged['id'] is None and unchanged['job'] is None
+                assert len(calls)==1
+                namespace['restart_current_process'].assert_awaited_once()
+                release['sha']='b'*40
                 plan=await workbench.handle('POST','system/update/check',{'source':'normal'})
                 namespace['download_and_apply_project_update']=lambda *a,**k:(_ for _ in ()).throw(OSError('disk fixture failure'))
                 failed=await workbench.handle('POST','system/update/start',{**data,'request_id':'request2234567890','plan_id':plan['plan_id']})

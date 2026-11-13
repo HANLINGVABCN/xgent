@@ -496,14 +496,24 @@ fix_line_endings() {
             sed -i 's/\r$//' "$file" 2>/dev/null || true
         fi
     done
-    # 版本标记：部署目录不是 git 检出（zip 解压）时 CLI banner 拿不到哈希，
-    # 这里写一份到 .xgent-version 兜底。CLI 读它显示 vXxx。
-    local code_revision
-    code_revision="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
-    if [ -n "$code_revision" ]; then
-        printf '%s' "$code_revision" > "$SCRIPT_DIR/.xgent-version"
-    elif [ ! -s "$SCRIPT_DIR/.xgent-version" ]; then
-        printf 'unknown' > "$SCRIPT_DIR/.xgent-version"
+    # 归档覆盖不会更新旧 .git：重启不能把下载器写入的新提交改回旧 HEAD。
+    # 真正的干净 Git 检出仍可在 git pull 后同步版本；本地提示词不参与判断。
+    local code_revision git_revision git_root
+    code_revision="$(cat "$SCRIPT_DIR/.xgent-version" 2>/dev/null || true)"
+    git_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    git_revision="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$git_root" == "$SCRIPT_DIR" && "$git_revision" =~ ^[a-f0-9]{40}$ ]]; then
+        if [[ ! "$code_revision" =~ ^[a-f0-9]{7,40}$ ]] || {
+            git -C "$SCRIPT_DIR" diff --quiet HEAD -- xgent_server.py xgent_conversation.py xgent_app install.sh bin tools &&
+            [ -z "$(git -C "$SCRIPT_DIR" ls-files --others --exclude-standard -- xgent_server.py xgent_conversation.py xgent_app install.sh bin tools)" ];
+        }; then
+            code_revision="$git_revision"
+        fi
+    fi
+    if [[ "$code_revision" =~ ^[a-f0-9]{7,40}$ ]]; then
+        printf '%s\n' "$code_revision" > "$SCRIPT_DIR/.xgent-version"
+    else
+        printf 'unknown\n' > "$SCRIPT_DIR/.xgent-version"
     fi
 }
 

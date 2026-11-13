@@ -178,12 +178,20 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def runtime_code_version() -> str:
-    """当前进程加载的代码版本（短 sha，取不到时是 "dev"）。
+    """部署代码版本：优先使用部署标记，Git 为兜底，取不到时是 "dev"。
 
     "功能没生效"类问题里最常见的根因是 git pull 了但没重启（或反过来），
     进程里跑的还是旧代码。启动日志、CLI banner、/api/health 三处同源同逻辑，
     对不上就说明进程没换。
     """
+    # 下载覆盖后的部署标记优先于未同步的 .git，三端与设置页使用同一版本。
+    try:
+        with open(os.path.join(PROJECT_ROOT, '.xgent-version'), encoding='utf-8') as handle:
+            stamped = handle.read().strip()
+        if re.fullmatch(r'[a-f0-9]{7,40}', stamped):
+            return stamped
+    except (OSError, UnicodeError):
+        pass
     try:
         import subprocess as _sp
 
@@ -193,15 +201,6 @@ def runtime_code_version() -> str:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()[:10]
-    except Exception:
-        pass
-    try:
-        stamped_path = os.path.join(PROJECT_ROOT, ".xgent-version")
-        if os.path.isfile(stamped_path):
-            with open(stamped_path, encoding="utf-8") as handle:
-                stamped = handle.read().strip()
-            if stamped:
-                return stamped
     except Exception:
         pass
     return "dev"
