@@ -323,6 +323,8 @@ class QueueStore:
             for index, item in enumerate(batch):
                 metadata = {**item_metadata(item), 'queue_id': item['id'], 'queue_origin': item['origin'], 'queue_created_at': item['created_at'],
                             'queue_run_id': scope.run_id, 'src': 'message-queue'}
+                if item['origin'] == 'web' and item['request_key'].startswith('web:'):
+                    metadata['web_request_id'] = item['request_key'][4:]
                 if item['origin'] == 'telegram':
                     from .telegram_records import source_bot_id
                     metadata['telegram_source_bot_id'] = scope.telegram_bot_id or source_bot_id()

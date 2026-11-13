@@ -7,6 +7,7 @@ import {preventAutofill} from './input-policy.js';
 import {syncVisualPage,syncReplyPages} from './visual-pages.js';
 import {enhanceCommandBlock,installCommandResults,updateCommandCards} from './command-output.js';
 import {installViewportFit} from './viewport.js';
+import {readHistory,canRetryHistory} from './history-loader.js';
 (function () {
   "use strict";
 
@@ -52,7 +53,7 @@ import {installViewportFit} from './viewport.js';
   var initialConversationParams = new URLSearchParams(location.hash.split('?')[1] || '');
   var selectedConversationId = initialConversationParams.has('message') ? null : initialConversationParams.get('conversation');
   const commandSeries=installCommandSeries(log,{conversation:()=>selectedConversationId,currentRun,
-    captureAnchor:scrollAnchor,restoreAnchor:restoreScrollAnchor,scrollAdjusted:noteScrollAdjustment});
+    captureAnchor:scrollAnchor,restoreAnchor:restoreScrollAnchor,restoreAfterLayout:stabilizeScrollAnchor,scrollAdjusted:noteScrollAdjustment});
   var conversationDrafts = Object.create(null);
   var conversationFiles = Object.create(null);
   var serverDrafts = Object.create(null);
@@ -104,6 +105,7 @@ import {installViewportFit} from './viewport.js';
   var uploadQueue = null;
   var queueEnabled=false,queueState=null,queueController=null,queueVersion=0,queueExpanded=false,queueRefreshPending=false;
   var queueActions=new Map(),recoveredEdits=new Set(),textSubmitting=false,textSubmission=null;
+  const localMessages=new Map();
   const observedRuns=new Map(),finishedRuns=new Set();
   function currentRun(){
     const cid=selectedConversationId||window.XGentConversations?.current;
@@ -1341,6 +1343,7 @@ import {installViewportFit} from './viewport.js';
     if(entry?.visualPage){entry.visualPage.destroy();entry.visualPage=null;}
     if(entry?.visualPages){entry.visualPages.forEach(child=>child.visualPage?.destroy());entry.visualPages.clear();}
     if (!entry) return;
+    entry.disposed=true;
     Object.keys(byMessageId).forEach(function (id) {
       if (byMessageId[id] === entry) delete byMessageId[id];
     });
@@ -1352,6 +1355,89 @@ import {installViewportFit} from './viewport.js';
     }
     if (lastStreamEntry === entry) lastStreamEntry = null;
     updateEmptyState();
+  }
+
+  function localMessage(key,values){
+    let pending=localMessages.get(key);
+    if(!pending){
+      const previous=[...localMessages.values()].find(item=>item.phase==='failed'&&item.cid===values.cid&&
+        item.token===values.token&&item.text===values.text&&!!item.files===!!values.files);
+      if(previous){localMessages.delete(previous.key);delete byMessageId[previous.key];pending=previous;}
+      else pending={...values,started:Date.now()/1000};
+      Object.assign(pending,values,{key});localMessages.set(key,pending);
+    }
+    showLocalMessage(pending);return pending;
+  }
+  function showLocalMessage(pending){
+    if(pending.cid!==selectedConversationId||!pending.cid&&pending.token!==window.XGentConversations?.newToken)return;
+    let entry=pending.entry;
+    if(entry&&!entry.disposed&&!entry.row.isConnected)log.appendChild(entry.row);
+    if(!entry?.row.isConnected){
+      entry=pending.entry=makeBubble('user',pending.text,null,null,null,null,pending.started);
+      if(pending.files){
+        entry.objectUrls=[];
+        setInlineMedia(entry,pending.files.map(file=>{
+          const url=URL.createObjectURL(file);entry.objectUrls.push(url);
+          return {kind:file.type.startsWith('image/')?'photo':mediaKindFromName(file.name),filename:file.name,
+            download_url:url,local_preview:true,ingress_mode:fileModes.get(file)||'attachment'};
+        }));
+      }
+    }
+    entry.localMessage=pending;entry.row.dataset.localRequest=pending.key;byMessageId[pending.key]=entry;
+    if(pending.queueId)byMessageId['queue:'+pending.queueId]=entry;
+    if(pending.phase)setLocalMessageState(pending,pending.phase,pending.error);
+  }
+  function setLocalMessageState(pending,phase,error){
+    pending.phase=phase;pending.error=error||'';
+    const entry=pending.entry;if(!entry?.row.isConnected||entry.durable)return;
+    if(!entry.sendState){
+      entry.sendState=document.createElement('small');entry.sendState.className='message-send-state';
+      entry.sendState.setAttribute('role','status');entry.bubble.appendChild(entry.sendState);
+    }
+    entry.sendState.dataset.state=phase;
+    entry.sendState.replaceChildren();
+    const label=document.createElement('span');
+    label.textContent=error||({sending:'发送中…',confirming:'正在确认发送…',queued:'排队中',accepted:'已发送，等待同步…'}[phase]||'');
+    entry.sendState.append(label);
+    if(phase==='failed'){
+      const retry=document.createElement('button');retry.type='button';retry.textContent='重试';retry.setAttribute('aria-label','重试发送此消息');
+      retry.onclick=()=>{
+        if(textSubmitting||uploadQueue||!historyReady||currentConnState)return;
+        if(pending.files)sendFiles(pending.text,pending.files);
+        else sendQueuedText(pending.text,pending.submission);
+      };
+      entry.sendState.append(retry);
+    }
+    syncLocalMessageVisibility(pending);
+  }
+  function syncLocalMessageVisibility(pending){
+    const entry=pending.entry;if(!entry?.row.isConnected||entry.durable)return;
+    const queued=pending.phase==='queued'&&queueState?.conversation_id===pending.cid&&queueState.items?.some(item=>item.id===pending.queueId);
+    // 队列卡片还在时只显示一份；交接时保留原气泡，直到持久记录接替它。
+    entry.row.hidden=!!queued;entry.row.classList.toggle('msg-row',!queued);
+  }
+  function forgetLocalMessage(pending,remove=false){
+    if(!pending)return;
+    if(!remove&&pending.entry?.durable&&pending.submission&&pending.cid===selectedConversationId&&input.value===pending.draft){
+      input.value='';conversationDrafts[draftId(pending.cid)]='';
+      try{sessionStorage.removeItem(draftKey(pending.cid));}catch{}
+      syncSendState();
+    }
+    localMessages.delete(pending.key);
+    const entry=pending.entry;
+    if(entry){entry.sendState?.remove();entry.sendState=null;delete entry.localMessage;delete entry.row.dataset.localRequest;entry.row.hidden=false;entry.row.classList.add('msg-row');}
+    if(remove)removeEntry(entry);
+  }
+  function cancelLocalMessages(cid){
+    for(const pending of localMessages.values())if(cid===undefined||pending.cid===cid){
+      pending.cancelled=true;pending.controller?.abort();forgetLocalMessage(pending,true);
+    }
+  }
+  function retainLocalMessages(retained,cid){
+    for(const pending of localMessages.values())if(pending.cid===cid&&(cid||pending.token===window.XGentConversations?.newToken)){
+      showLocalMessage(pending);
+      if(pending.entry?.row.isConnected){retained.add(pending.entry);log.appendChild(pending.entry.row);}
+    }
   }
 
   const thinkingStates=new Map();
@@ -1488,6 +1574,8 @@ import {installViewportFit} from './viewport.js';
       (message.media_group_id||'history:'+(message.record_id??message.id));
     var aliases=message.replace_message_ids||[];
     if(message.upload_request_key)aliases=aliases.concat('upload:'+message.upload_request_key);
+    if(message.web_request_id)aliases=aliases.concat('send:'+message.web_request_id);
+    if(message.queue_id)aliases=aliases.concat('queue:'+message.queue_id);
     if(message.web_live&&message.web_live.epoch===epoch)aliases=aliases.concat(message.web_live.message_ids||[]);
     var existing=byMessageId[id];
     // Adopt the existing live bubble rather than throw away expanded blocks and
@@ -1516,6 +1604,7 @@ import {installViewportFit} from './viewport.js';
     if(hidden)entry.row.classList.remove('msg-row');else entry.row.classList.add('msg-row');
     if(message.file_message&&entry.uploadProgress){entry.uploadProgress.remove();entry.uploadProgress=null;}
     entry.durable=!message.ui_message_id;
+    if(entry.durable&&entry.localMessage)forgetLocalMessage(entry.localMessage);
     aliases.forEach(function(mid){byMessageId[mid]=entry;});
     entry.row.dataset.historyCursor=message.history_cursor||entry.row.dataset.historyCursor||'';
     entry.row._historyOrder=[Number(message.timestamp)||0,message.ui_message_id?1:0,String(message.ui_message_id||message.record_id||message.id||'').padStart(20,'0')];
@@ -1907,6 +1996,7 @@ import {installViewportFit} from './viewport.js';
       }
     } else if (frame.type === "history_reset" || frame.type === "context_reset") {
       cancelUploads("记忆已清空");
+      cancelLocalMessages(frame.conversation_id||selectedConversationId);
       pendingFrames = [];
       // An earlier baseline may be resolving and flushing this very event.
       // Invalidation must replace it, not coalesce into that stale request.
@@ -1943,6 +2033,8 @@ import {installViewportFit} from './viewport.js';
     var requestGeneration=historyGen+1;
     var request=loadHistory(replaceView).then(function(){if(requestGeneration===historyGen)flushPending();}).catch(function(err){
       if(requestGeneration!==historyGen)return;
+      if(err.name==='AbortError')return;
+      historyError={baseline:true,message:err.message,retryable:canRetryHistory(err)};updateHistoryState();
       toast('历史加载失败：'+err.message,true);
       setConnState('disconnected');
       // Do not call flushPending after failed history: the baseline is unknown.
@@ -2100,7 +2192,7 @@ import {installViewportFit} from './viewport.js';
   function disconnectStream() {
     stopLiveTransport();
     reconcileAfterTurn = true;
-    cancelUploads("连接中断");
+    // 实时通道重连不代表上传失败；HTTP 接收与本地预览继续保留。
     setConnState("disconnected");
     if (navigator.onLine !== false) {
       reconnectTimer = setTimeout(connectStream, reconnectDelay);
@@ -2123,6 +2215,8 @@ import {installViewportFit} from './viewport.js';
   var keepLoadedHistory = false;
   var historyPreloads = new Map(),historyNetworkMs=500,historyVelocity=0,historyDirection=0,historyScrollAt=0,historyScrollTop=0;
   var adjustedScrollTop=null;
+  var historyInteraction=0;
+  var historyAnchorCleanup=null;
   var newFrames = 0;
   function historyUrl(anchor=historyAnchor) {
     return "/api/workbench/history?limit=50" + (anchor ? "&anchor=" + encodeURIComponent(anchor) : "");
@@ -2140,7 +2234,7 @@ import {installViewportFit} from './viewport.js';
       const unit=commandSeries.members(row),members=new Set(unit);
       if(unit.some(member=>{
         const box=member.getBoundingClientRect();
-        return box.height>0&&box.bottom>viewport.top&&box.top<viewport.bottom||member.contains(document.activeElement)||
+        return !!member._chatEntry?.localMessage||box.height>0&&box.bottom>viewport.top&&box.top<viewport.bottom||member.contains(document.activeElement)||
           commandSeries.focused(member)||Array.from(member.querySelectorAll('video,audio')).some(media=>!media.paused)||
           selection&&!selection.isCollapsed&&(member.contains(selection.anchorNode)||member.contains(selection.focusNode));
       }))break;
@@ -2155,6 +2249,8 @@ import {installViewportFit} from './viewport.js';
   function displayedFrameEntry(frame){
     var keys=[frame.ui_message_id?'ui:'+frame.ui_message_id:null,frame.media_group_id,
       frame.record_id!=null?'history:'+frame.record_id:null,frame.web_display?.reply_message_id,frame.message_id,
+      frame.web_request_id?'send:'+frame.web_request_id:null,frame.upload_request_key?'upload:'+frame.upload_request_key:null,
+      frame.queue_id?'queue:'+frame.queue_id:null,
       ...(frame.replace_message_ids||[]),...(frame.web_live?.epoch===streamEpoch?frame.web_live.message_ids||[]:[])];
     return keys.map(key=>key!=null?byMessageId[key]:null).find(Boolean);
   }
@@ -2172,8 +2268,40 @@ import {installViewportFit} from './viewport.js';
       if(box.height>0||anchor.row.classList.contains('command-series-control'))setLogScrollTop(log.scrollTop+box.top-anchor.top);
     }
   }
+  async function stabilizeScrollAnchor(anchor,valid){
+    if(!anchor)return;
+    const interaction=historyInteraction,cid=selectedConversationId,generation=historyGen;
+    let top=log.scrollTop;
+    // 作者去重、命令组合与浏览器布局完成后再校正；读者继续滑动就立即让位。
+    for(let frame=0;frame<2;frame++){
+      await new Promise(requestAnimationFrame);
+      if(historyInteraction!==interaction||cid!==selectedConversationId||generation!==historyGen||
+        !anchor.row.isConnected||Math.abs(log.scrollTop-top)>2||valid&&!valid())return;
+      syncTurnAuthors(log);commandSeries.flush();restoreScrollAnchor(anchor);top=log.scrollTop;
+    }
+    historyAnchorCleanup?.();
+    let queued=false,stopped=false;
+    const stop=()=>{stopped=true;observer.disconnect();mutations.disconnect();clearTimeout(timer);if(historyAnchorCleanup===stop)historyAnchorCleanup=null;};
+    const repair=()=>{
+      if(queued||stopped)return;queued=true;
+      requestAnimationFrame(()=>{
+        queued=false;if(stopped)return;
+        if(historyInteraction!==interaction||cid!==selectedConversationId||generation!==historyGen||
+          !anchor.row.isConnected||Math.abs(log.scrollTop-top)>2){stop();return;}
+        restoreScrollAnchor(anchor);top=log.scrollTop;
+      });
+    };
+    const observer=new ResizeObserver(repair),mutations=new MutationObserver(repair);
+    const root=anchor.row.closest('.msg-row')||anchor.row;
+    const before=Array.from(log.children);const index=before.indexOf(root);
+    before.slice(Math.max(0,index-80),index+1).forEach(row=>observer.observe(row));
+    mutations.observe(log,{childList:true,subtree:true,attributes:true,attributeFilter:['class','style','hidden']});
+    const timer=setTimeout(stop,1000);historyAnchorCleanup=stop;
+  }
   function cancelHistoryPage(){
+    historyAnchorCleanup?.();
     historyPageVersion++;
+    clearTimeout(historyPageRequest?.slowTimer);
     historyPageRequest?.controller.abort();historyPageRequest=null;
     historyLoading=false;historyError=null;
     historyPreloads.forEach(item=>item.controller.abort());historyPreloads.clear();
@@ -2182,13 +2310,23 @@ import {installViewportFit} from './viewport.js';
   function historyFetch(forward,cursor){
     const key=historyGen+'|'+selectedConversationId+'|'+forward+'|'+cursor;
     const cached=historyPreloads.get(key),now=performance.now();
+    if(cached?.error&&now-cached.finished<15000)return Promise.reject(cached.error);
     if(cached&&(!cached.done||(!cached.dirty&&now-cached.finished<15000))){
       historyPreloads.delete(key);historyPreloads.set(key,cached);return cached.promise;
     }
     if(cached)historyPreloads.delete(key);
-    const item={controller:new AbortController(),started:now,forward:forward,done:false,dirty:false};
-    item.promise=api('/api/workbench/history?limit=50&'+(forward?'after=':'before=')+encodeURIComponent(cursor),{signal:item.controller.signal}).then(data=>{
+    const item={controller:new AbortController(),started:now,forward:forward,done:false,dirty:false,attempt:0,retrying:false};
+    item.promise=readHistory(signal=>api('/api/workbench/history?limit=50&'+(forward?'after=':'before=')+encodeURIComponent(cursor),{signal,cache:'no-store'}),{
+      signal:item.controller.signal,onState:state=>{
+        Object.assign(item,state);
+        if(historyPageRequest?.cacheKey===key&&historyPreloads.get(key)===item)updateHistoryState();
+      }
+    }).then(data=>{
       historyNetworkMs=Math.max(150,historyNetworkMs*.5+(performance.now()-item.started)*.5);return data;
+    }).catch(error=>{
+      // 失败只保留为重试状态，不能当作已经加载好的历史页。
+      item.error=error;
+      throw error;
     }).finally(()=>{item.done=true;item.finished=performance.now();
     });
     item.promise.catch(function(){});historyPreloads.set(key,item);
@@ -2251,12 +2389,19 @@ import {installViewportFit} from './viewport.js';
     document.getElementById('wb-chat').classList.toggle('history-top',log.scrollTop<8&&!!historyCursor);
     document.getElementById('wb-chat').classList.toggle('history-error',!!historyError);
     const status=document.getElementById('history-loading-state');
-    status.hidden=!historyError;
-    status.setAttribute('aria-busy',String(historyLoading));
-    document.getElementById('history-retry').hidden=!historyError;
-    document.getElementById('history-retry').textContent=historyError?.forward?'重试较新消息':'重试加载历史';
+    const loading=historyPageRequest||historyLoadController;
+    const cached=historyPageRequest&&historyPreloads.get(historyPageRequest.cacheKey);
+    const retrying=!!(cached?.retrying||loading?.retrying);
+    const slow=!!loading&&(retrying||performance.now()-loading.started>=1600);
+    const forward=!!(historyPageRequest?.forward||historyError?.forward);
+    status.hidden=!historyError&&!loading;
+    status.setAttribute('aria-busy',String(!!loading));
+    status.dataset.state=historyError?'error':retrying?'retrying':slow?'slow':'loading';
+    status.dataset.edge=forward?'bottom':'top';
+    document.getElementById('history-retry').hidden=!historyError&&!slow;
+    document.getElementById('history-retry').textContent=historyError?(historyError.baseline?'重试加载':forward?'重试较新消息':'重试加载历史'):'立即重试';
     document.getElementById('wb-history-state').textContent=historyError?'加载失败：'+historyError.message:
-      historyLoading?'正在提前加载历史…':newFrames?'有 '+newFrames+' 条新动态':'';
+      loading?(retrying?'网络较慢，正在重试…':slow?'正在等待历史记录…':forward?'正在加载较新消息…':'正在加载历史记录…'):newFrames?'有 '+newFrames+' 条新动态':'';
   }
   function historyControls(data) {
     historyCursor=data.before ? (data.before.has_more?data.before.cursor:null) : data.next_cursor||null;
@@ -2272,10 +2417,11 @@ import {installViewportFit} from './viewport.js';
     var cursor=forward?(historyForwardCursor||edgeCursor(true)):historyCursor;
     if(!cursor||historyLoading||(forward&&!newerAvailable))return;
     var request={controller:new AbortController(),version:++historyPageVersion,generation:historyGen,cid:selectedConversationId,
-      cacheKey:historyGen+'|'+selectedConversationId+'|'+forward+'|'+cursor,newFrames:newFrames};
+      cacheKey:historyGen+'|'+selectedConversationId+'|'+forward+'|'+cursor,newFrames:newFrames,forward,started:performance.now()};
     historyPageRequest=request;historyLoading=true;historyError=null;updateHistoryState();
     var current=()=>historyPageRequest===request&&request.version===historyPageVersion&&
       request.generation===historyGen&&request.cid===selectedConversationId;
+    request.slowTimer=setTimeout(()=>{if(current())updateHistoryState();},1600);
     try{
       var data=await historyFetch(forward,cursor);
       if(!current())return;
@@ -2301,57 +2447,81 @@ import {installViewportFit} from './viewport.js';
         if(!forward&&data.messages?.length)keepLoadedHistory=true;
         // Restore before pruning so the visible rows are protected by the window.
         if(historyAnchor)sortHistoryRows();
+        syncTurnAuthors(log);commandSeries.flush();
         restoreScrollAnchor(anchor);boundMessages(!forward);
         if(forward){historyForwardCursor=data.last_cursor||historyForwardCursor;newerAvailable=!!data.next_cursor||newFrames>request.newFrames;historyCursor=edgeCursor(false)||historyCursor;}
         else { historyForwardCursor=edgeCursor(true)||historyForwardCursor; historyCursor=(data.messages?.length&&data.next_cursor!==cursor)?data.next_cursor||null:null; }
-        updateHistoryState();restoreScrollAnchor(anchor);
+        updateHistoryState();restoreScrollAnchor(anchor);await stabilizeScrollAnchor(anchor,current);
       }finally{renderingHistory--;}
-    }catch(err){if(current()&&err.name!=='AbortError')historyError={forward:forward,message:err.message};}
+    }catch(err){if(current()&&err.name!=='AbortError')historyError={forward:forward,message:err.message,retryable:canRetryHistory(err)};}
     finally{
+      clearTimeout(request.slowTimer);
       if(current()){
         if(!historyError)historyPreloads.delete(request.cacheKey);
         historyPageRequest=null;historyLoading=false;historyScrollTop=log.scrollTop;updateHistoryState();scheduleHistoryPrefetch();
       }
     }
   }
-  document.getElementById('history-retry').onclick=function(){const direction=!!historyError?.forward;historyPreloads.forEach(item=>item.controller.abort());historyPreloads.clear();historyPage(direction);};
+  function retryHistory(){
+    const baseline=!!historyError?.baseline||!!historyLoadController;
+    const direction=!!(historyError?.forward||historyPageRequest?.forward);
+    if(baseline){resync(true).catch(function(){});return;}
+    cancelHistoryPage();historyPage(direction);
+  }
+  document.getElementById('history-retry').onclick=retryHistory;
+  window.addEventListener('online',()=>{if(historyError?.retryable&&!loggedOut)retryHistory();});
+  function beginHistoryLoad(){
+    const controller=historyLoadController=new AbortController();controller.started=performance.now();
+    controller.slowTimer=setTimeout(()=>{if(historyLoadController===controller)updateHistoryState();},1600);
+    controller.signal.addEventListener('abort',()=>clearTimeout(controller.slowTimer),{once:true});
+    updateHistoryState();return controller;
+  }
+  function finishHistoryLoad(controller){
+    clearTimeout(controller.slowTimer);
+    if(historyLoadController===controller){historyLoadController=null;updateHistoryState();}
+  }
+  function readHistorySnapshot(path,controller){
+    return readHistory(signal=>api(path,{signal,cache:'no-store'}),{signal:controller.signal,onState:state=>{
+      Object.assign(controller,state);if(historyLoadController===controller)updateHistoryState();
+    }});
+  }
   function returnToLatest(){if(location.hash.includes('?conversation=')){history.replaceState(null,'',window.XGentConversations?.href(selectedConversationId)||'#/chat');document.getElementById('source-navigation').hidden=true;}historyAnchor=null;viewingPast=false;newFrames=0;resync(true,true).then(scrollDown).catch(function(){});}
   function loadHistory(replaceView=false) {
     if(!selectedConversationId){
       cancelHistoryPage();historyLoadController?.abort();historyGen++;
-      const gen=historyGen,controller=historyLoadController=new AbortController();
+      const gen=historyGen,controller=beginHistoryLoad();
       return api('/api/events',{signal:controller.signal}).then(data=>{
         if(gen!==historyGen||selectedConversationId)return;
         if(data.epoch&&Number.isSafeInteger(data.cursor)){streamEpoch=data.epoch;streamCursor=data.cursor;}
         uiGeneration=null;queueEnabled=true;historyAnchor=null;historyControls({messages:[]});
-        const uploading=uploadQueue?.conversation_id===null?uploadQueue.entry:null;
-        Array.from(new Set(Object.values(byMessageId))).forEach(entry=>{if(entry!==uploading)removeEntry(entry);});
+        const retained=new Set();retainLocalMessages(retained,null);
+        Array.from(new Set(Object.values(byMessageId))).forEach(entry=>{if(!retained.has(entry))removeEntry(entry);});
         byMessageId={};log.replaceChildren();msgCount=0;lastStreamEntry=null;
-        if(uploading)log.append(uploading.row);
+        retainLocalMessages(retained,null);
         setBusy(false);hideTyping();updateEmptyState();updateHistoryState();syncSendState();
-      }).finally(()=>{if(historyLoadController===controller)historyLoadController=null;});
+      }).finally(()=>finishHistoryLoad(controller));
     }
     const visible=scrollAnchor(),row=visible?.row;
     const readingAnchor=!replaceView&&(viewingPast||!isNearBottom())&&
       (row?.dataset.uiMessageId?'ui:'+row.dataset.uiMessageId:row?.dataset.recordId?'history:'+row.dataset.recordId:null);
     const oldFirst=edgeCursor(false),oldLast=edgeCursor(true);
     cancelHistoryPage();historyLoadController?.abort();
-    var controller=historyLoadController=new AbortController();
+    var controller=beginHistoryLoad();
     historyGen++;
     var gen=historyGen, requestedCid=selectedConversationId;
     var wasNearBottom=isNearBottom();
     var top=log.scrollTop;
     let unavailableAnchor=false;
-    const response=api(historyUrl(readingAnchor||historyAnchor),{signal:controller.signal}).catch(async function(error){
+    const response=readHistorySnapshot(historyUrl(readingAnchor||historyAnchor),controller).catch(async function(error){
       if([404,409].includes(error.status)&&window.XGentConversations){
         await window.XGentConversations.refresh();
         if(controller.signal.aborted||gen!==historyGen||requestedCid!==selectedConversationId)return;
       }
       if(!readingAnchor||error.status!==404||controller.signal.aborted||gen!==historyGen||requestedCid!==selectedConversationId)throw error;
       unavailableAnchor=true;
-      return api(historyUrl(null),{signal:controller.signal});
+      return readHistorySnapshot(historyUrl(null),controller);
     });
-    return response.then(function(data){
+    return response.then(async function(data){
       if(gen!==historyGen || requestedCid!==selectedConversationId)return;
       if(data.conversation_id && requestedCid && data.conversation_id!==requestedCid){
         throw new Error('会话已变化，请重新加载');
@@ -2397,8 +2567,7 @@ import {installViewportFit} from './viewport.js';
       }
       // A snapshot taken while HTTP is still receiving cannot contain this
       // user message yet. Keep its one optimistic bubble until acceptance.
-      var uploading=uploadQueue?.conversation_id===requestedCid?uploadQueue.entry:null;
-      if(uploading&&!uploading.durable){retained.add(uploading);log.appendChild(uploading.row);}
+      retainLocalMessages(retained,requestedCid);
       // Remove obsolete DOM only after incoming state is ready; no blank interstitial.
       Array.from(new Set(Object.values(byMessageId))).forEach(function(entry){
         if(!retained.has(entry)){
@@ -2419,9 +2588,10 @@ import {installViewportFit} from './viewport.js';
       if(historyAnchor&&!preserveReading){const target=byMessageId[historyAnchor];if(target){commandSeries.reveal(target.row);target.row.scrollIntoView({block:'center'});}}
       else if(preserveReading)restoreScrollAnchor(currentAnchor);
       else if(wasNearBottom)scrollDown();else setLogScrollTop(top);
+      if(preserveReading)await stabilizeScrollAnchor(currentAnchor,()=>gen===historyGen&&requestedCid===selectedConversationId);
       updateHistoryState();
       if(historyAnchor){const entry=byMessageId[historyAnchor];if(entry){entry.row.classList.add('wb-focus');setTimeout(()=>entry.row.classList.remove('wb-focus'),2000);}}
-    }).finally(function(){if(historyLoadController===controller)historyLoadController=null;});
+    }).finally(function(){finishHistoryLoad(controller);});
   }
 
   function appendHistoryMedia(entry, message, role) {
@@ -2477,6 +2647,7 @@ import {installViewportFit} from './viewport.js';
     var recovering=Array.from(queueActions.values()).filter(p=>['cancel','edit'].includes(p.action)&&p.item?.conversation_id===selectedConversationId&&!items?.some(i=>i.id===p.item.id));
     var anchor=scrollAnchor();
     panel.replaceChildren();panel.hidden=!items?.length&&!error&&!recovering.length;
+    for(const pending of localMessages.values())syncLocalMessageVisibility(pending);
     if(panel.hidden)return;
     var head=document.createElement('div');head.className='queue-head';
     var title=document.createElement('strong');title.textContent='待发消息 · '+(items?.length||0)+' 条';head.appendChild(title);
@@ -2563,6 +2734,7 @@ import {installViewportFit} from './viewport.js';
       var data=await api('/api/queue/'+action,{method:'POST',body:JSON.stringify({conversation_id:cid,id:item?.id,
         generation:item?.generation??queueState.generation,revision:item?.revision??queueState.revision,request_id:pending.request_id})});
       if(action==='edit'||action==='cancel'){restoreQueuedDraft(cid,data.text,pending.request_id);await restoreQueuedFiles(cid,data);}
+      if(action==='edit'||action==='cancel')for(const local of localMessages.values())if(local.queueId===item?.id)forgetLocalMessage(local,true);
       queueActions.delete(key);persistQueueEdits();await refreshQueue(true);drawQueue();
     }catch(e){pending.busy=false;pending.error=e.message;if(e.status===409){queueActions.delete(key);persistQueueEdits();await refreshQueue(true);toast(e.message,true);if(cid===selectedConversationId)drawQueue();}else if(cid===selectedConversationId)drawQueue(e.message);else toast(e.message,true);}
   }
@@ -2571,24 +2743,43 @@ import {installViewportFit} from './viewport.js';
     try{sessionStorage.setItem('xgent_queue_edits',JSON.stringify(Array.from(queueActions.values()).filter(p=>['cancel','edit'].includes(p.action)).map(p=>({action:p.action,request_id:p.request_id,item:{id:p.item.id,conversation_id:p.item.conversation_id,generation:p.item.generation,revision:p.item.revision}}))));}catch(e){}
   }
 
-  async function sendQueuedText(text){
+  async function sendQueuedText(text,retrySubmission){
     var cid=selectedConversationId,draft=input.value;
     const token=cid?null:window.XGentConversations?.newToken;
     if(token&&!textSubmission){try{const saved=JSON.parse(sessionStorage.getItem('xgent-new-chat-submission')||'null');if(saved?.token===token)textSubmission=saved;}catch{}}
+    if(retrySubmission)textSubmission=retrySubmission;
     if(!textSubmission||textSubmission.cid!==cid||textSubmission.token!==token||textSubmission.text!==text){textSubmission={cid,token,text,group_id:window.XGentConversations?.newGroup||'ungrouped',generation:uiGeneration,request_id:queueRequestId()};}
     var submission=textSubmission;textSubmitting=true;updateSendAvailability();
+    const pending=localMessage('send:'+submission.request_id,{cid,token,text,submission,draft});
+    setLocalMessageState(pending,'sending');
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
+    pending.controller=controller;
+    const slowTimer=setTimeout(()=>setLocalMessageState(pending,'confirming'),1600);
     if(token){try{sessionStorage.setItem('xgent-new-chat-submission',JSON.stringify(submission));}catch{}}
     try{
-      var result=await api('/api/chat',{method:'POST',body:JSON.stringify({text,request_id:submission.request_id,
+      var result=await api('/api/chat',{method:'POST',signal:controller.signal,body:JSON.stringify({text,request_id:submission.request_id,
         ...(token?{new_conversation:token,group_id:submission.group_id}:{conversation_id:cid,generation:submission.generation})})});
+      if(!result.ok&&!result.queued&&!result.management)throw new Error('暂未收到发送确认');
+      clearTimeout(slowTimer);
+      if(result.conversation_id){pending.cid=result.conversation_id;pending.token=null;}
+      if(result.queued&&result.id){pending.queueId=result.id;byMessageId['queue:'+result.id]=pending.entry;}
       if(token){window.XGentConversations?.materialize(result,token,submission.group_id);cid=result.conversation_id;try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}
       if(result.ok||result.queued||result.management)setServerDraft(cid,null);
-      if(cid===selectedConversationId&&input.value===draft){input.value='';updateInputHeight();conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
-      else if(cid!==selectedConversationId&&conversationDrafts[cid]===draft){conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
-      if(!result.queued&&!result.management&&cid===selectedConversationId)makeBubble('user',text);
+      const clearDraft=draft.trim()===text||!draft.trim();
+      if(clearDraft&&cid===selectedConversationId&&input.value===draft){input.value='';updateInputHeight();conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
+      else if(clearDraft&&cid!==selectedConversationId&&conversationDrafts[cid]===draft){conversationDrafts[cid]='';try{sessionStorage.removeItem(draftKey(cid));}catch(e){}}
+      if(result.management)forgetLocalMessage(pending,true);
+      else if(!pending.entry?.durable)setLocalMessageState(pending,result.queued?'queued':'accepted');
       textSubmission=null;await refreshQueue(true);triggerHaptic();
-    }catch(e){if(e.status>=400&&e.status<500){textSubmission=null;if(token){try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}}toast(e.message+'；内容已保留，可重试发送。',true);}
-    finally{textSubmitting=false;syncSendState();}
+    }catch(e){
+      clearTimeout(slowTimer);
+      if(pending.cancelled)return;
+      if(pending.entry?.durable){textSubmission=null;return;}
+      if(e.status>=400&&e.status<500){textSubmission=null;pending.submission=null;if(token){try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}}
+      const error=e.name==='AbortError'?'发送确认超时':e instanceof TypeError?'网络连接中断':e.message;
+      setLocalMessageState(pending,'failed',error+'，内容已保留');toast(e.message+'；内容已保留，可重试发送。',true);
+    }
+    finally{clearTimeout(timer);clearTimeout(slowTimer);textSubmitting=false;syncSendState();}
   }
 
   function send() {
@@ -2725,13 +2916,11 @@ import {installViewportFit} from './viewport.js';
         batch.files.forEach(file=>fileStatuses.set(file,'上传中'));
         fileStatuses.set(f,"上传中");
         var caption = text;
-        var entry = makeBubble('user', text);
-        batch.entry=entry;
-        entry.objectUrls = [];
-        setInlineMedia(entry,batch.files.map(function(file){
-          var url=URL.createObjectURL(file);entry.objectUrls.push(url);
-          return {kind:file.type.startsWith('image/')?'photo':mediaKindFromName(file.name),filename:file.name,download_url:url,local_preview:true,ingress_mode:fileModes.get(file)||'attachment'};
-        }));
+        var signature = JSON.stringify([mode,text,modes,batch.generation,batch.new_conversation||batch.conversation_id,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
+        var previous = fileBatchKeys.get(f);
+        var requestKey = previous?.signature===signature ? previous.key : (crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());
+        const pending=localMessage('upload:'+requestKey,{cid:batch.conversation_id,token:batch.new_conversation,text,files:batch.files});
+        var entry=batch.entry=pending.entry;
         if(!queueEnabled)setBusy(true);
         // HTTP 只确认接收，turn_end 才允许下一份上传进入对话核心。
         batch.awaitingTurn = !queueEnabled;
@@ -2743,9 +2932,6 @@ import {installViewportFit} from './viewport.js';
         fd.append('modes',JSON.stringify(modes));
         if(queueEnabled)fd.append('queue','1');
         if(batch.generation!==null)fd.append('generation',String(batch.generation));
-        var signature = JSON.stringify([mode,text,modes,batch.generation,batch.new_conversation||batch.conversation_id,batch.files.map(file=>[file.name,file.size,file.lastModified])]);
-        var previous = fileBatchKeys.get(f);
-        var requestKey = previous?.signature===signature ? previous.key : (crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random());
         byMessageId['upload:'+requestKey]=entry;
         batch.files.forEach(file=>fileBatchKeys.set(file,{signature:signature,key:requestKey}));
         fd.append('idempotency_key',requestKey);
@@ -2762,28 +2948,35 @@ import {installViewportFit} from './viewport.js';
             var request=new XMLHttpRequest();
             request.open('POST',mode==='server_upload'?'/api/server-uploads':'/api/attachments');
             request.withCredentials=true;
+            request.timeout=120000;
             request.upload.onprogress=function(event){
               progress.textContent=event.lengthComputable?(event.loaded>=event.total?'传输完成，正在保存…':'上传 '+Math.round(event.loaded/event.total*100)+'%'):'正在上传…';
             };
             request.upload.onload=function(){progress.textContent='传输完成，正在保存…';};
             request.onerror=()=>reject(new Error('网络中断，文件仍保留，可重试本批文件'));
+            request.ontimeout=()=>reject(new Error('上传确认超时，文件仍保留，可重试本批文件'));
             request.onload=()=>resolve({ok:request.status>=200&&request.status<300,status:request.status,
-              json:async()=>{try{return JSON.parse(request.responseText);}catch(e){return {};}}});
+              json:async()=>{try{return JSON.parse(request.responseText);}catch(e){throw new Error('暂未收到完整的上传确认，请重试核对');}}});
             request.send(fd);
           });
           body = await response.json().catch(function () { return {}; });
           if (!response.ok) throw new Error(body.error || (response.status===413?'反向代理拒绝了上传（HTTP 413），请调整代理请求体限制后重试。':response.status===524?'代理等待服务器响应超时（HTTP 524），请先核对历史；不要重复提交已确认文件。':"HTTP " + response.status));
           }
           if(body.queued){
+            if(body.conversation_id){pending.cid=body.conversation_id;pending.token=null;}
+            if(body.id){pending.queueId=body.id;byMessageId['queue:'+body.id]=entry;}
             if(batch.new_conversation){batch.conversation_id=body.conversation_id;batch.generation=body.generation;window.XGentConversations?.materialize(body,batch.new_conversation,batch.group_id);}
             batch.next=batch.files.length;batch.awaitingTurn=false;
             progress.textContent='已保存到待发队列';setServerDraft(batch.conversation_id,null);
-            if(!entry.durable)removeEntry(entry);
+            progress.remove();entry.uploadProgress=null;
+            if(!entry.durable)setLocalMessageState(pending,'queued');
             batch.files.forEach(file=>fileBatchKeys.delete(file));
             await refreshQueue(true);return;
           }
           batch.awaitingTurn=true;
           progress.textContent='已接收，正在处理';
+          progress.remove();entry.uploadProgress=null;
+          if(!entry.durable)setLocalMessageState(pending,'accepted');
           if(body.message&&batch.conversation_id===selectedConversationId)putHistoryFrame(body.message,streamEpoch);
           else if(Number.isSafeInteger(body.record_id)&&batch.conversation_id===selectedConversationId){
             const saved=await api('/api/workbench/history?presentation_ids='+body.record_id+'&conversation_id='+encodeURIComponent(batch.conversation_id));
@@ -2792,9 +2985,10 @@ import {installViewportFit} from './viewport.js';
           if(body.ok||body.record_id)setServerDraft(batch.conversation_id,null);
           if(body.duplicate){batch.next=batch.files.length;batch.awaitingTurn=false;reconcileAfterTurn=true;return;}
         } catch (err) {
-          if(entry.durable){batch.next=batch.files.length;await turnDone;return;}
+          if(pending.entry?.durable){batch.next=batch.files.length;if(queueEnabled){batch.awaitingTurn=false;return;}await turnDone;return;}
           batch.awaitingTurn = false;
-          removeEntry(entry);
+          progress?.remove();entry.uploadProgress=null;
+          setLocalMessageState(pending,'failed',err.message+'，文件已保留');
           batch.files.forEach(file=>fileStatuses.set(file,'上传失败：'+err.message));
           batch.error = f.name + " 上传失败：" + err.message;
           return;
@@ -3625,7 +3819,7 @@ import {installViewportFit} from './viewport.js';
     const now=performance.now(),delta=log.scrollTop-historyScrollTop,elapsed=now-historyScrollAt;
     const adjusted=adjustedScrollTop!=null&&Math.abs(log.scrollTop-adjustedScrollTop)<2;
     adjustedScrollTop=null;
-    if(!adjusted&&Math.abs(delta)>3){historyDirection=Math.sign(delta);if(historyScrollAt&&elapsed<1500)historyVelocity=Math.abs(delta)/Math.max(16,elapsed);}
+    if(!adjusted&&Math.abs(delta)>3){historyInteraction++;historyDirection=Math.sign(delta);if(historyScrollAt&&elapsed<1500)historyVelocity=Math.abs(delta)/Math.max(16,elapsed);}
     historyScrollTop=log.scrollTop;historyScrollAt=now;
     document.getElementById('wb-chat').classList.toggle('history-top',log.scrollTop<8&&!!historyCursor);
     if (isNearBottom()) hideScrollBtn(); else showScrollBtn();
@@ -3633,11 +3827,12 @@ import {installViewportFit} from './viewport.js';
   });
   function noteHistoryIntent(direction){
     if(!direction)return;
-    historyDirection=Math.sign(direction);scheduleHistoryPrefetch();
+    historyInteraction++;historyDirection=Math.sign(direction);scheduleHistoryPrefetch();
   }
   log.addEventListener('wheel',event=>noteHistoryIntent(event.deltaY),{passive:true});
   let historyTouchY=null;
-  log.addEventListener('touchstart',event=>{historyTouchY=event.touches[0]?.clientY??null;},{passive:true});
+  log.addEventListener('touchstart',event=>{historyInteraction++;historyTouchY=event.touches[0]?.clientY??null;},{passive:true});
+  log.addEventListener('pointerdown',()=>historyInteraction++,{passive:true});
   log.addEventListener('touchmove',event=>{
     const y=event.touches[0]?.clientY;
     if(historyTouchY!=null&&y!=null)noteHistoryIntent(historyTouchY-y);
@@ -3873,6 +4068,7 @@ import {installViewportFit} from './viewport.js';
     syncSendState();
   });
   window.addEventListener('xgent-conversation-deleted',function(event){
+    cancelLocalMessages(event.detail.conversation_id);
     const cid=event.detail.conversation_id;delete conversationDrafts[cid];try{sessionStorage.removeItem(draftKey(cid));}catch{}
     if(cardScrollIntent?.cid===cid)cancelCardFollow();
   });
@@ -3950,6 +4146,7 @@ import {installViewportFit} from './viewport.js';
   try{const saved=JSON.parse(sessionStorage.getItem('xgent-new-chat-submission')||'null');if(saved&&saved.token===window.XGentConversations?.newToken)textSubmission=saved;}catch{}
   input.addEventListener("input",function(){try{sessionStorage.setItem(draftKey(),input.value);}catch(e){}});
   window.addEventListener('xgent-auth-expired',function(){
+    cancelLocalMessages();
     closeCommands(false);
     if(actionRequest){actionRequest.abort();actionRequest=null;}
     if(actionDialog.open)closeAction();

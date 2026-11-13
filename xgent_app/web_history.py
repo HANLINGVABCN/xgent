@@ -503,6 +503,8 @@ def build_history_message(
         message['reply_group_id'] = metadata['reply_group_id']
     if isinstance(metadata.get('queue_id'), str):
         message['queue_id'] = metadata['queue_id']
+    if role == 'user' and isinstance(metadata.get('web_request_id'), str):
+        message['web_request_id'] = metadata['web_request_id']
     if (isinstance(live, dict) and isinstance(live.get('epoch'), str)
             and isinstance(live.get('message_ids'), list)):
         message['web_live'] = {'epoch': live['epoch'], 'message_ids': [mid for mid in live['message_ids'] if type(mid) is int]}

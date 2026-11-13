@@ -1,5 +1,5 @@
 // Fold only completed runs of command-only replies. Original message nodes stay in place.
-export function installCommandSeries(log, {conversation, currentRun, captureAnchor, restoreAnchor, scrollAdjusted}) {
+export function installCommandSeries(log, {conversation, currentRun, captureAnchor, restoreAnchor, restoreAfterLayout, scrollAdjusted}) {
   const controls=new Map(),completed=new Set();
   const commandCounts=new WeakMap();
   const memberships=new WeakMap();
@@ -170,6 +170,7 @@ export function installCommandSeries(log, {conversation, currentRun, captureAnch
           const anchor={row:control.node,top:control.node.getBoundingClientRect().top};
           save(control.key,false);setCollapsed(control,false);
           restoreAnchor?.(anchor);
+          restoreAfterLayout?.(anchor);
           if(event.detail===0&&!touchControls.matches){control.close.hidden=false;control.close.focus({preventScroll:true});}
         };
         close.onclick=()=>{

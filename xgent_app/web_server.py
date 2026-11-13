@@ -678,6 +678,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         name = path.removeprefix("/assets/")
         allowed.add('command-output.js')
         allowed.add('viewport.js')
+        allowed.add('history-loader.js')
         if name not in allowed:
             self._send_json({"error": "not found"}, status=404)
             return

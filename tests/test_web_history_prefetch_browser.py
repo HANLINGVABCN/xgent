@@ -100,7 +100,7 @@ def test_failed_page_waits_for_explicit_retry_and_stops_at_earliest(history_brow
         else:
             requests.append(q)
             if len(requests) == 1:
-                r.fulfill(status=503, json={'error': 'fixture slow network'})
+                r.fulfill(status=400, json={'error': 'fixture invalid history request'})
             else:
                 r.fulfill(json=page_data(server, 1, 51))
     page.route('**/api/workbench/history?*', route)
