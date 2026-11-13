@@ -114,6 +114,8 @@ def test_invalid_link_waits_for_delayed_list_and_returns_blank_without_history_e
 @pytest.mark.parametrize('mode',['attachment','server_upload'])
 def test_first_attachment_waits_for_durable_admission_and_preserves_original_file(browser_context,workspace_url,chunked,mode):
     base=workspace_url['url'];before=state(browser_context,base);page=browser_context.new_page();ready(page,base)
+    history_reads=[]
+    page.on('request',lambda request:history_reads.append(request.url) if '/api/workbench/history?' in request.url else None)
     raw=(b'CHUNKED ORIGINAL FILE\x00'*500000) if chunked else b'FIRST ATTACHMENT COMPLETE TEXT\nALL BYTES'
     name='first.bin' if chunked else 'first.txt'
     page.locator('#file-input' if mode=='attachment' else '#server-upload-input').set_input_files({'name':name,'mimeType':'application/octet-stream' if chunked else 'text/plain','buffer':raw})
@@ -131,6 +133,28 @@ def test_first_attachment_waits_for_durable_admission_and_preserves_original_fil
         original=Path(workspace_url['database_path']).parent/'xgent_storage/uploads'/ref['path']
         assert original.read_bytes()==raw
     assert page.url.endswith('#/chat?conversation='+cid)
+    assert history_reads==[], 'First upload admission must continue its existing view, without reading an entire history window'
+    page.close()
+
+
+def test_first_upload_replays_messages_received_before_http_ack_without_loading_history(browser_context,workspace_url):
+    base=workspace_url['url'];page=browser_context.new_page();ready(page,base)
+    held,history_reads=[],[]
+    def delay(route):held.append((route,route.fetch()))
+    page.route('**/api/attachments',delay)
+    page.on('request',lambda request:history_reads.append(request.url) if '/api/workbench/history?' in request.url else None)
+    page.locator('#file-input').set_input_files({'name':'original.txt','mimeType':'text/plain','buffer':b'Complete original file'})
+    page.locator('#input').fill('确认晚到时也直接接上已有消息');page.locator('#btn-send').click()
+    row=page.locator('#log>.msg-row.user');row.wait_for()
+    row.evaluate('row=>window.originalUpload=row')
+    page.wait_for_timeout(400)
+    assert held and history_reads==[]
+    assert page.url.endswith('#/chat')
+    route,response=held[0];route.fulfill(response=response)
+    page.locator('#log').get_by_text('隔离测试回复，已收到消息。',exact=True).wait_for()
+    assert row.evaluate('row=>row===window.originalUpload')
+    assert page.locator('#log>.msg-row.user').count()==1
+    assert history_reads==[]
     page.close()
 
 
@@ -148,6 +172,7 @@ def test_lost_first_receipt_keeps_draft_and_reloaded_retry_does_not_duplicate_co
     assert page.locator('#input').input_value()==text
     page.locator('#btn-send').click()
     page.wait_for_function('(cid)=>window.XGentConversations.current===cid',arg=receipts[0]['conversation_id'])
+    page.locator('#log').get_by_text('隔离测试回复，已收到消息。',exact=True).wait_for()
     assert len(state(browser_context,base)['items'])==len(before['items'])+1
     page.close()
 

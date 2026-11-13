@@ -933,10 +933,10 @@ import {readHistory,canRetryHistory} from './history-loader.js';
   var lightboxExt = document.getElementById("lightbox-ext");
   var currentRotate = 0;
 
-  function openLightbox(url, name) {
+  function openLightbox(url, name, displayUrl=url) {
     currentRotate = 0;
     lightboxImg.style.transform = "none";
-    lightboxImg.src = url;
+    lightboxImg.src = displayUrl;
     lightboxFilename.textContent = name || "图片预览";
     lightboxDl.href = url;
     lightboxDl.download = name || "image.png";
@@ -1086,7 +1086,10 @@ import {readHistory,canRetryHistory} from './history-loader.js';
         media.decoding = 'async';
         media.className = "media-img";
         media.alt = filename || "图片";
-        media.addEventListener("click", function () { openLightbox(container._mediaItem.download_url||media.src, container._mediaItem.filename); });
+        media.addEventListener("click", function () {
+          const source=media.currentSrc||media.src;
+          openLightbox(container._mediaItem.download_url||source,container._mediaItem.filename,/^blob:/.test(source)?source:undefined);
+        });
         media.addEventListener('load',function(){
           var source=media.src;
           sizeImagePlaceholder(container,media.naturalWidth,media.naturalHeight);
@@ -1881,6 +1884,16 @@ import {readHistory,canRetryHistory} from './history-loader.js';
       return;
     }
     if(frame.conversation_id && frame.conversation_id !== selectedConversationId) {
+      // 首次发送的确认可能晚于实时消息；按本次请求保留它们，建链后原样接续。
+      const firstSend=[...localMessages.values()].find(pending=>!pending.cid&&pending.token&&
+        (pending.earlyConversation===frame.conversation_id||
+         pending.key==='upload:'+frame.upload_request_key||pending.key==='send:'+frame.web_request_id));
+      if(firstSend){
+        firstSend.earlyConversation=frame.conversation_id;
+        const frames=firstSend.earlyFrames||=[];
+        if(frames.length<2000)frames.push(frame);else firstSend.replayOverflow=true;
+        return;
+      }
       if(['generation_end','turn_end','turn_error'].includes(frame.type))finishRun(frame);
       if(uploadQueue?.conversation_id===frame.conversation_id && ['turn_end','turn_error'].includes(frame.type) && uploadQueue.finish){
         uploadQueue.awaitingTurn=false;uploadQueue.finish(frame.type==='turn_error'?frame.text:null);
@@ -2761,6 +2774,8 @@ import {readHistory,canRetryHistory} from './history-loader.js';
         ...(token?{new_conversation:token,group_id:submission.group_id}:{conversation_id:cid,generation:submission.generation})})});
       if(!result.ok&&!result.queued&&!result.management)throw new Error('暂未收到发送确认');
       clearTimeout(slowTimer);
+      pending.management=!!result.management;
+      pending.recoverHistory=Number.isSafeInteger(result.record_id)&&!pending.earlyFrames?.length;
       if(result.conversation_id){pending.cid=result.conversation_id;pending.token=null;}
       if(result.queued&&result.id){pending.queueId=result.id;byMessageId['queue:'+result.id]=pending.entry;}
       if(token){window.XGentConversations?.materialize(result,token,submission.group_id);cid=result.conversation_id;try{sessionStorage.removeItem('xgent-new-chat-submission');}catch{}}
@@ -2959,10 +2974,12 @@ import {readHistory,canRetryHistory} from './history-loader.js';
               json:async()=>{try{return JSON.parse(request.responseText);}catch(e){throw new Error('暂未收到完整的上传确认，请重试核对');}}});
             request.send(fd);
           });
-          body = await response.json().catch(function () { return {}; });
+          body = await response.json();
           if (!response.ok) throw new Error(body.error || (response.status===413?'反向代理拒绝了上传（HTTP 413），请调整代理请求体限制后重试。':response.status===524?'代理等待服务器响应超时（HTTP 524），请先核对历史；不要重复提交已确认文件。':"HTTP " + response.status));
           }
+          if(!body||!body.ok&&!body.queued&&!Number.isSafeInteger(body.record_id))throw new Error('暂未收到完整的上传确认，可重试本批文件');
           if(body.queued){
+            pending.recoverHistory=Number.isSafeInteger(body.record_id)&&!pending.earlyFrames?.length;
             if(body.conversation_id){pending.cid=body.conversation_id;pending.token=null;}
             if(body.id){pending.queueId=body.id;byMessageId['queue:'+body.id]=entry;}
             if(batch.new_conversation){batch.conversation_id=body.conversation_id;batch.generation=body.generation;window.XGentConversations?.materialize(body,batch.new_conversation,batch.group_id);}
@@ -2978,12 +2995,12 @@ import {readHistory,canRetryHistory} from './history-loader.js';
           progress.remove();entry.uploadProgress=null;
           if(!entry.durable)setLocalMessageState(pending,'accepted');
           if(body.message&&batch.conversation_id===selectedConversationId)putHistoryFrame(body.message,streamEpoch);
-          else if(Number.isSafeInteger(body.record_id)&&batch.conversation_id===selectedConversationId){
+          else if(Number.isSafeInteger(body.record_id)&&!entry.durable&&batch.conversation_id===selectedConversationId){
             const saved=await api('/api/workbench/history?presentation_ids='+body.record_id+'&conversation_id='+encodeURIComponent(batch.conversation_id));
             if(batch.conversation_id===selectedConversationId)for(const row of saved.messages||[])putHistoryFrame(row,streamEpoch);
           }
           if(body.ok||body.record_id)setServerDraft(batch.conversation_id,null);
-          if(body.duplicate){batch.next=batch.files.length;batch.awaitingTurn=false;reconcileAfterTurn=true;return;}
+          if(body.duplicate){batch.next=batch.files.length;batch.awaitingTurn=false;return;}
         } catch (err) {
           if(pending.entry?.durable){batch.next=batch.files.length;if(queueEnabled){batch.awaitingTurn=false;return;}await turnDone;return;}
           batch.awaitingTurn = false;
@@ -3021,10 +3038,6 @@ import {readHistory,canRetryHistory} from './history-loader.js';
       renderPendingFiles();
       // Disconnecting the upload queue does not finish an accepted server-side turn.
       if (!batch.awaitingTurn&&!queueEnabled) setBusy(false);
-      if ((remaining.length || batch.error || reconcileAfterTurn) && !currentConnState) {
-        reconcileAfterTurn = false;
-        await resync();
-      }
       if (batch.error) makeBubble("sys", "⚠️ " + batch.error);
       if (remaining.length) toast("尚未发送的 " + remaining.length + " 个文件已保留在输入区", true);
     }
@@ -4026,9 +4039,18 @@ import {readHistory,canRetryHistory} from './history-loader.js';
     var next=event.detail.conversation_id;
     if(next===selectedConversationId)return;
     if(event.detail.materialized){
+      const firstSend=[...localMessages.values()].find(pending=>pending.cid===next&&!pending.management);
       selectedConversationId=next;uiGeneration=event.detail.generation;
       queueController?.abort();queueController=null;queueVersion++;queueState=null;drawQueue();
-      if(!loggedOut){resync(true).catch(function(){});loadConversationLineage().catch(function(){});}
+      if(!loggedOut){
+        if(firstSend&&!firstSend.replayOverflow&&!firstSend.recoverHistory){
+          cancelHistoryPage();historyLoadController?.abort();historyGen++;
+          historyCursor=null;historyForwardCursor=null;historyAnchor=null;viewingPast=false;newerAvailable=false;newFrames=0;
+          const frames=firstSend.earlyFrames||[];firstSend.earlyFrames=[];
+          historyReady=true;frames.forEach(handleFrame);flushPending();updateHistoryState();
+        }else resync(true).catch(function(){});
+        loadConversationLineage().catch(function(){});
+      }
       return;
     }
     {

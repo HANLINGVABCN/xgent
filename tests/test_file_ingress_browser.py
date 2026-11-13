@@ -150,6 +150,11 @@ def test_images_and_caption_stay_in_one_bubble_before_and_after_refresh(browser_
     assert page.evaluate('uploadPreviewNodes.every((node,index)=>Math.abs(node.getBoundingClientRect().width-previewDimensions[index].width)<1 && Math.abs(node.getBoundingClientRect().height-previewDimensions[index].height)<1)')
     held[0].fulfill(json={'ok': True, 'record_id': 900001, 'message': message})
     expect(page.locator('[data-record-id="900001"]')).to_have_count(1)
+    row.locator('.media-img').first.click();page.locator('#lightbox.open').wait_for()
+    assert page.evaluate('document.getElementById("lightbox-img").src===uploadPreviewUrls[0]')
+    assert page.locator('#lightbox-dl').get_attribute('href')==message['media'][0]['download_url']
+    assert not image_requests, 'Opening an accepted local image must reuse its existing preview'
+    page.locator('#lightbox-close').click()
     for refresh in (False, True):
         if refresh:
             page.reload()

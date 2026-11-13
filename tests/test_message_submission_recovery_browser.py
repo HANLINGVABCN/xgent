@@ -144,7 +144,8 @@ def test_failed_text_retry_reuses_request_and_bubble_without_erasing_new_draft(s
     assert page.locator('#input').input_value() == '重试时也保留这个新草稿'
 
 
-def test_image_preview_survives_pending_ack_and_stale_history(submission_browser, tmp_path):
+@pytest.mark.parametrize('failure',['unavailable','truncated'])
+def test_image_preview_survives_pending_ack_and_stale_history(submission_browser, tmp_path, failure):
     server, page, base, state = submission_browser
     held, uploads = [], []
     def upload(route):
@@ -166,8 +167,12 @@ def test_image_preview_survives_pending_ack_and_stale_history(submission_browser
     page.evaluate('window.dispatchEvent(new Event("offline"))')
     assert row.locator('.media-img').is_visible()
     assert row.evaluate('row=>row.querySelector(".media-img")===window.sentImage')
-    held[0].fulfill(status=503, json={'error': 'temporary upload failure'})
+    history_reads=[]
+    page.on('request',lambda request:history_reads.append(request.url) if '/api/workbench/history?' in request.url else None)
+    if failure=='unavailable':held[0].fulfill(status=503, json={'error': 'temporary upload failure'})
+    else:held[0].fulfill(content_type='application/json',body='{"ok":')
     row.get_by_role('button', name='重试发送此消息').wait_for()
     assert page.locator('.pending-file').count() == 1
     assert row.locator('.media-img').is_visible()
     assert row.evaluate('row=>row.querySelector(".media-img")===window.sentImage')
+    assert history_reads==[], 'Upload failure must leave its local preview without refreshing conversation history'
